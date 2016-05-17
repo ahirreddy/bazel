@@ -22,6 +22,7 @@ import com.google.common.hash.HashCode;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
+import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputFileCache;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
@@ -36,6 +37,7 @@ import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.remote.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.standalone.StandaloneSpawnStrategy;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
@@ -98,9 +100,11 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
     StandaloneSpawnStrategy standaloneStrategy =
         Preconditions.checkNotNull(executor.getContext(StandaloneSpawnStrategy.class));
 
-    if (actionCache != null) {
+    String actionOutputKey = null;
+
+    if (remoteActionCache != null) {
       // Save the action output if found in the remote action cache.
-      String actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
+      actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
 
       if (writeActionOutput(spawn.getMnemonic(), actionOutputKey, eventHandler, true)) {
         return;
@@ -243,6 +247,7 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
   private String actionInputHashes(Spawn spawn, ActionExecutionContext actionExecutionContext)
       throws IOException {
     ActionExecutionMetadata actionMetadata = spawn.getResourceOwner();
+    ActionInputFileCache inputFileCache = actionExecutionContext.getActionInputFileCache();
 
     // Compute a hash code to uniquely identify the action plus the action inputs.
     Hasher hasher = Hashing.sha256().newHasher();
