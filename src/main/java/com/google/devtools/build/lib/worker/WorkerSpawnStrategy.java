@@ -36,6 +36,7 @@ import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.standalone.StandaloneSpawnStrategy;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
 import com.google.devtools.build.lib.util.Preconditions;
@@ -66,6 +67,7 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
   public static final String REASON_NO_TOOLS =
       "Not using worker strategy, because the action has no tools";
 
+  private final RemoteActionCache remoteActionCache;
   private final Path execRoot;
   private final WorkerPool workers;
   private final WorkerOptions options;
@@ -77,12 +79,14 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
       OptionsClassProvider optionsProvider,
       WorkerPool workers,
       boolean verboseFailures,
+      RemoteActionCache actionCache,
       int maxRetries) {
     Preconditions.checkNotNull(optionsProvider);
     this.options = optionsProvider.getOptions(WorkerOptions.class);
     this.workers = Preconditions.checkNotNull(workers);
     this.execRoot = blazeDirs.getExecRoot();
     this.verboseFailures = verboseFailures;
+    this.remoteActionCache = actionCache;
     this.maxRetries = maxRetries;
   }
 
@@ -93,6 +97,15 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
     EventHandler eventHandler = executor.getEventHandler();
     StandaloneSpawnStrategy standaloneStrategy =
         Preconditions.checkNotNull(executor.getContext(StandaloneSpawnStrategy.class));
+
+    if (actionCache != null) {
+      // Save the action output if found in the remote action cache.
+      String actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
+
+      if (writeActionOutput(spawn.getMnemonic(), actionOutputKey, eventHandler, true)) {
+        return;
+      }
+    }
 
     if (executor.reportsSubcommands()) {
       executor.reportSubcommand(
@@ -169,7 +182,10 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
         throw new UserExecException(
             String.format(
                 "Worker process sent response with exit code: %d.", response.getExitCode()));
+      } else if (remoteActionCache != null) {
+        remoteActionCache.putActionOutput(actionOutputKey, spawn.getOutputFiles());
       }
+
     } catch (IOException e) {
       String message =
           CommandFailureUtils.describeCommandFailure(
@@ -197,6 +213,65 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
     } else {
       requestBuilder.addArguments(arg);
     }
+  }
+
+  /**
+   * Saves the action output from cache. Returns true if all action outputs are found.
+   */
+  private boolean writeActionOutput(
+      String mnemonic,
+      String actionOutputKey,
+      EventHandler eventHandler,
+      boolean ignoreCacheNotFound)
+      throws IOException {
+    if (remoteActionCache == null) {
+      return false;
+    }
+    try {
+      remoteActionCache.writeActionOutput(actionOutputKey, execRoot);
+      Event.info(mnemonic + " reuse action outputs from cache");
+      return true;
+    } catch (CacheNotFoundException e) {
+      if (!ignoreCacheNotFound) {
+        eventHandler.handle(
+            Event.warn(mnemonic + " some cache entries cannot be found (" + e + ")"));
+      }
+    }
+    return false;
+  }
+
+  private String actionInputHashes(Spawn spawn, ActionExecutionContext actionExecutionContext)
+      throws IOException {
+    ActionExecutionMetadata actionMetadata = spawn.getResourceOwner();
+
+    // Compute a hash code to uniquely identify the action plus the action inputs.
+    Hasher hasher = Hashing.sha256().newHasher();
+
+    // TODO(alpha): The action key is usually computed using the path to the tool and the
+    // arguments. It does not take into account the content / version of the system tool (e.g. gcc).
+    // Either I put information about the system tools in the hash or assume tools are always
+    // checked in.
+    Preconditions.checkNotNull(actionMetadata.getKey());
+    hasher.putString(actionMetadata.getKey(), Charset.defaultCharset());
+
+    List<ActionInput> inputs =
+        ActionInputHelper.expandArtifacts(
+            spawn.getInputFiles(), actionExecutionContext.getArtifactExpander());
+    for (ActionInput input : inputs) {
+      hasher.putString(input.getExecPathString(), Charset.defaultCharset());
+      try {
+        // TODO(alpha): The digest from ActionInputFileCache is used to detect local file
+        // changes. It might not be sufficient to identify the input file globally in the
+        // remote action cache. Consider upgrading this to a better hash algorithm with
+        // less collision.
+        hasher.putBytes(inputFileCache.getDigest(input).toByteArray());
+      } catch (IOException e) {
+        throw new UserExecException("Failed to get digest for input.", e);
+      }
+    }
+
+    // Save the action output if found in the remote action cache.
+    return hasher.hash().toString();
   }
 
   private HashCode combineActionInputHashes(
