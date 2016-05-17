@@ -67,7 +67,7 @@ final class RemoteSpawnStrategy implements SpawnActionContext {
       RemoteActionCache actionCache,
       RemoteWorkExecutor workExecutor) {
     this.execRoot = execRoot;
-    this.standaloneStrategy = new StandaloneSpawnStrategy(execRoot, actionCache, verboseFailures);
+    this.standaloneStrategy = new StandaloneSpawnStrategy(execRoot, verboseFailures);
     this.remoteActionCache = actionCache;
     this.remoteWorkExecutor = workExecutor;
   }
