@@ -22,6 +22,7 @@ import com.google.common.eventbus.SubscriberExceptionHandler;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.actions.cache.CompactPersistentActionCache;
 import com.google.devtools.build.lib.actions.cache.NullActionCache;
+import com.google.devtools.build.lib.actions.cache.S3ActionCache;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
@@ -185,9 +186,10 @@ public final class BlazeWorkspace {
         actionCache = new NullActionCache();
         return actionCache;
       }
+      CompactPersistentActionCache persistentCache = null;
       try (AutoProfiler p = profiledAndLogged("Loading action cache", ProfilerTask.INFO, LOG)) {
         try {
-          actionCache = new CompactPersistentActionCache(getCacheDirectory(), runtime.getClock());
+          persistentCache = new CompactPersistentActionCache(getCacheDirectory(), runtime.getClock());
         } catch (IOException e) {
           LOG.log(Level.WARNING, "Failed to load action cache: " + e.getMessage(), e);
           LoggingUtil.logToRemote(Level.WARNING, "Failed to load action cache: "
@@ -196,9 +198,11 @@ public final class BlazeWorkspace {
               Event.error("Error during action cache initialization: " + e.getMessage()
               + ". Corrupted files were renamed to '" + getCacheDirectory() + "/*.bad'. "
               + "Blaze will now reset action cache data, causing a full rebuild"));
-          actionCache = new CompactPersistentActionCache(getCacheDirectory(), runtime.getClock());
+          persistentCache = new CompactPersistentActionCache(getCacheDirectory(), runtime.getClock());
         }
       }
+
+      actionCache = new S3ActionCache(persistentCache);
     }
     return actionCache;
   }
