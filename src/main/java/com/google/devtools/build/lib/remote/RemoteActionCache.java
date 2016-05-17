@@ -26,7 +26,7 @@ import java.util.Collection;
  * A cache for storing artifacts (input and output) as well as the output of running an action.
  */
 @ThreadCompatible
-interface RemoteActionCache {
+public interface RemoteActionCache {
   /**
    * Put the file in cache if it is not already in it. No-op if the file is already stored in
    * cache.

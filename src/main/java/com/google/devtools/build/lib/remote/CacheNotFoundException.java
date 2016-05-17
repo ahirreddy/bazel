@@ -18,7 +18,7 @@ package com.google.devtools.build.lib.remote;
  * An exception to indicate the cache is not found because of an expected
  * problem.
  */
-final class CacheNotFoundException extends RuntimeException {
+final public class CacheNotFoundException extends RuntimeException {
   CacheNotFoundException() {
     super();
   }
