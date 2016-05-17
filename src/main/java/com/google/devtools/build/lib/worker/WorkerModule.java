@@ -22,7 +22,10 @@ import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildInterruptedEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildStartingEvent;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.remote.HazelcastCacheFactory;
+import com.google.devtools.build.lib.remote.MemcacheActionCache;
 import com.google.devtools.build.lib.remote.RemoteActionCache;
+import com.google.devtools.build.lib.remote.RemoteOptions;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
@@ -105,6 +108,16 @@ public class WorkerModule extends BlazeModule {
     workers.setMinIdlePerKey(options.workerMaxInstances);
     workers.setVerbose(options.workerVerbose);
     this.verbose = options.workerVerbose;
+
+    RemoteOptions remoteOptions = buildRequest.getOptions(RemoteOptions.class);
+    if (actionCache == null && remoteOptions.hazelcastNode != null) {
+      MemcacheActionCache cache =
+          new MemcacheActionCache(
+              this.env.getDirectories().getExecRoot(),
+              remoteOptions,
+              HazelcastCacheFactory.create(remoteOptions));
+      actionCache = cache;
+    }
   }
 
   @Override
