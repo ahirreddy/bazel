@@ -26,11 +26,11 @@ import java.util.concurrent.ConcurrentMap;
  * A factory class for providing a {@link ConcurrentMap} object implemented by Hazelcast.
  * Hazelcast will work as a distributed memory cache.
  */
-final class HazelcastCacheFactory {
+final public class HazelcastCacheFactory {
 
   private static final String CACHE_NAME = "hazelcast-build-cache";
 
-  static ConcurrentMap<String, byte[]> create(RemoteOptions options) {
+  public static ConcurrentMap<String, byte[]> create(RemoteOptions options) {
     HazelcastInstance instance;
     if (options.hazelcastNode != null) {
       // If --hazelast_node is then create a client instance.

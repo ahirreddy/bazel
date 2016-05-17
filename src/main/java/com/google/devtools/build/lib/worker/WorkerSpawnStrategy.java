@@ -22,7 +22,7 @@ import com.google.common.hash.HashCode;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
-import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
+import com.google.devtools.build.lib.actions.ActionMetadata;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputFileCache;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
@@ -250,7 +250,7 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
 
   private String actionInputHashes(Spawn spawn, ActionExecutionContext actionExecutionContext)
       throws IOException, UserExecException {
-    ActionExecutionMetadata actionMetadata = spawn.getResourceOwner();
+    ActionMetadata actionMetadata = spawn.getResourceOwner();
     ActionInputFileCache inputFileCache = actionExecutionContext.getActionInputFileCache();
 
     // Compute a hash code to uniquely identify the action plus the action inputs.
