@@ -36,6 +36,7 @@ import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.rules.cpp.CppCompileAction;
 import com.google.devtools.build.lib.rules.fileset.FilesetActionContext;
 import com.google.devtools.build.lib.rules.test.TestRunnerAction;
@@ -83,6 +84,7 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
       Map<String, String> clientEnv,
       BlazeDirectories blazeDirs,
       ExecutorService backgroundWorkers,
+      RemoteActionCache actionCache,
       boolean verboseFailures,
       boolean sandboxDebug,
       List<String> sandboxAddPath) {
@@ -93,7 +95,7 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
     this.verboseFailures = verboseFailures;
     this.sandboxDebug = sandboxDebug;
     this.sandboxAddPath = sandboxAddPath;
-    this.standaloneStrategy = new StandaloneSpawnStrategy(blazeDirs.getExecRoot(), verboseFailures);
+    this.standaloneStrategy = new StandaloneSpawnStrategy(blazeDirs.getExecRoot(), actionCache, verboseFailures);
   }
 
   /**

@@ -18,6 +18,7 @@ import com.google.common.hash.HashCode;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.actions.ActionInputFileCache;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionMetadata;
@@ -29,6 +30,8 @@ import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.remote.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
@@ -61,11 +64,15 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
   private final Path processWrapper;
   private final Path execRoot;
 
-  public StandaloneSpawnStrategy(Path execRoot, boolean verboseFailures) {
+  public StandaloneSpawnStrategy(
+      Path execRoot,
+      RemoteActionCache actionCache,
+      boolean verboseFailures) {
     this.verboseFailures = verboseFailures;
     this.execRoot = execRoot;
     this.processWrapper = execRoot.getRelative(
         "_bin/process-wrapper" + OsUtils.executableExtension());
+    this.remoteActionCache = actionCache;
   }
 
   /**
@@ -76,6 +83,7 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
       ActionExecutionContext actionExecutionContext)
       throws ExecException {
     Executor executor = actionExecutionContext.getExecutor();
+    EventHandler eventHandler = executor.getEventHandler();
 
     String actionOutputKey = null;
 
@@ -158,7 +166,11 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
     }
 
     if (remoteActionCache != null) {
-      remoteActionCache.putActionOutput(actionOutputKey, spawn.getOutputFiles());
+      try {
+        remoteActionCache.putActionOutput(actionOutputKey, spawn.getOutputFiles());
+      } catch (IOException e) {
+        throw new RuntimeException("failed to put output in cache", e);
+      }
     }
   }
 
@@ -169,6 +181,31 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
 
   @Override
   public boolean willExecuteRemotely(boolean remotable) {
+    return false;
+  }
+
+  /**
+   * Saves the action output from cache. Returns true if all action outputs are found.
+   */
+  private boolean writeActionOutput(
+      String mnemonic,
+      String actionOutputKey,
+      EventHandler eventHandler,
+      boolean ignoreCacheNotFound)
+      throws IOException {
+    if (remoteActionCache == null) {
+      return false;
+    }
+    try {
+      remoteActionCache.writeActionOutput(actionOutputKey, execRoot);
+      Event.info(mnemonic + " reuse action outputs from cache");
+      return true;
+    } catch (CacheNotFoundException e) {
+      if (!ignoreCacheNotFound) {
+        eventHandler.handle(
+            Event.warn(mnemonic + " some cache entries cannot be found (" + e + ")"));
+      }
+    }
     return false;
   }
 

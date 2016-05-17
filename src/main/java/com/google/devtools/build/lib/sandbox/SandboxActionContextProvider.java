@@ -19,6 +19,7 @@ import com.google.devtools.build.lib.actions.ActionContextProvider;
 import com.google.devtools.build.lib.actions.Executor.ActionContext;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.util.OS;
 
@@ -34,7 +35,10 @@ public class SandboxActionContextProvider extends ActionContextProvider {
   private final ImmutableList<ActionContext> strategies;
 
   public SandboxActionContextProvider(
-      CommandEnvironment env, BuildRequest buildRequest, ExecutorService backgroundWorkers) {
+      CommandEnvironment env,
+      BuildRequest buildRequest,
+      RemoteActionCache actionCache,
+      ExecutorService backgroundWorkers) {
     boolean verboseFailures = buildRequest.getOptions(ExecutionOptions.class).verboseFailures;
     boolean sandboxDebug = buildRequest.getOptions(SandboxOptions.class).sandboxDebug;
     List<String> sandboxAddPath = buildRequest.getOptions(SandboxOptions.class).sandboxAddPath;
@@ -46,6 +50,7 @@ public class SandboxActionContextProvider extends ActionContextProvider {
               env.getClientEnv(),
               env.getDirectories(),
               backgroundWorkers,
+              actionCache,
               verboseFailures,
               sandboxDebug,
               sandboxAddPath));
