@@ -14,13 +14,7 @@
 package com.google.devtools.build.lib.standalone;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.hash.HashCode;
-import com.google.common.hash.Hasher;
-import com.google.common.hash.Hashing;
-import com.google.devtools.build.lib.actions.ActionInput;
-import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
-import com.google.devtools.build.lib.actions.ActionMetadata;
 import com.google.devtools.build.lib.actions.ActionStatusMessage;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.ExecutionStrategy;
@@ -29,8 +23,6 @@ import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.remote.CacheNotFoundException;
-import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.apple.AppleHostInfo;
 import com.google.devtools.build.lib.rules.apple.DottedVersion;
@@ -39,15 +31,12 @@ import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.shell.TerminationStatus;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
-import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.OsUtils;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
 
-import java.io.IOException;
 import java.io.File;
-import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -56,7 +45,6 @@ import java.util.List;
  */
 @ExecutionStrategy(name = { "standalone", "local" }, contextType = SpawnActionContext.class)
 public class StandaloneSpawnStrategy implements SpawnActionContext {
-  private final RemoteActionCache remoteActionCache;
   private final boolean verboseFailures;
   private final Path processWrapper;
   private final Path execRoot;
@@ -76,21 +64,6 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
       ActionExecutionContext actionExecutionContext)
       throws ExecException {
     Executor executor = actionExecutionContext.getExecutor();
-
-    String actionOutputKey = null;
-
-    if (remoteActionCache != null) {
-      // Save the action output if found in the remote action cache.
-      try {
-        actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
-        if (writeActionOutput(spawn.getMnemonic(), actionOutputKey, eventHandler, true)) {
-          return;
-        }
-      } catch (IOException e) {
-        // TODO(ahirreddy): Real error handling
-        throw new RuntimeException("Could not interact with cache", e);
-      }
-    }
 
     if (executor.reportsSubcommands()) {
       executor.reportSubcommand(
@@ -156,10 +129,6 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
           verboseFailures, spawn.getArguments(), spawn.getEnvironment(), cwd);
       throw new UserExecException(message, e);
     }
-
-    if (remoteActionCache != null) {
-      remoteActionCache.putActionOutput(actionOutputKey, spawn.getOutputFiles());
-    }
   }
 
   @Override
@@ -170,41 +139,6 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
   @Override
   public boolean willExecuteRemotely(boolean remotable) {
     return false;
-  }
-
-  private String actionInputHashes(Spawn spawn, ActionExecutionContext actionExecutionContext)
-      throws IOException, UserExecException {
-    ActionMetadata actionMetadata = spawn.getResourceOwner();
-    ActionInputFileCache inputFileCache = actionExecutionContext.getActionInputFileCache();
-
-    // Compute a hash code to uniquely identify the action plus the action inputs.
-    Hasher hasher = Hashing.sha256().newHasher();
-
-    // TODO(alpha): The action key is usually computed using the path to the tool and the
-    // arguments. It does not take into account the content / version of the system tool (e.g. gcc).
-    // Either I put information about the system tools in the hash or assume tools are always
-    // checked in.
-    Preconditions.checkNotNull(actionMetadata.getKey());
-    hasher.putString(actionMetadata.getKey(), Charset.defaultCharset());
-
-    List<ActionInput> inputs =
-        ActionInputHelper.expandArtifacts(
-            spawn.getInputFiles(), actionExecutionContext.getArtifactExpander());
-    for (ActionInput input : inputs) {
-      hasher.putString(input.getExecPathString(), Charset.defaultCharset());
-      try {
-        // TODO(alpha): The digest from ActionInputFileCache is used to detect local file
-        // changes. It might not be sufficient to identify the input file globally in the
-        // remote action cache. Consider upgrading this to a better hash algorithm with
-        // less collision.
-        hasher.putBytes(inputFileCache.getDigest(input).toByteArray());
-      } catch (IOException e) {
-        throw new UserExecException("Failed to get digest for input.", e);
-      }
-    }
-
-    // Save the action output if found in the remote action cache.
-    return hasher.hash().toString();
   }
 
   /**
