@@ -18,6 +18,7 @@ import com.google.devtools.build.lib.actions.ActionContextProvider;
 import com.google.devtools.build.lib.actions.Executor.ActionContext;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 
 /**
@@ -27,7 +28,10 @@ final class WorkerActionContextProvider extends ActionContextProvider {
   private final ImmutableList<ActionContext> strategies;
 
   public WorkerActionContextProvider(
-      CommandEnvironment env, BuildRequest buildRequest, WorkerPool workers) {
+      CommandEnvironment env,
+      BuildRequest buildRequest,
+      WorkerPool workers,
+      RemoteActionCache actionCache) {
     boolean verboseFailures = buildRequest.getOptions(ExecutionOptions.class).verboseFailures;
     int maxRetries = buildRequest.getOptions(WorkerOptions.class).workerMaxRetries;
 
@@ -38,6 +42,7 @@ final class WorkerActionContextProvider extends ActionContextProvider {
                 buildRequest,
                 workers,
                 verboseFailures,
+                actionCache,
                 maxRetries));
   }
 

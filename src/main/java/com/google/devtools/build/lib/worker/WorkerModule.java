@@ -22,6 +22,7 @@ import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildInterruptedEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildStartingEvent;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
@@ -41,6 +42,7 @@ public class WorkerModule extends BlazeModule {
 
   private CommandEnvironment env;
   private BuildRequest buildRequest;
+  private RemoteActionCache actionCache;
   private boolean verbose;
 
   @Override
@@ -112,7 +114,7 @@ public class WorkerModule extends BlazeModule {
     Preconditions.checkNotNull(workers);
 
     return ImmutableList.<ActionContextProvider>of(
-        new WorkerActionContextProvider(env, buildRequest, workers));
+        new WorkerActionContextProvider(env, buildRequest, workers, actionCache));
   }
 
   @Override

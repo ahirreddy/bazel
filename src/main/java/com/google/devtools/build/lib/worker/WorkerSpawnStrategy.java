@@ -104,10 +104,14 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
 
     if (remoteActionCache != null) {
       // Save the action output if found in the remote action cache.
-      actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
-
-      if (writeActionOutput(spawn.getMnemonic(), actionOutputKey, eventHandler, true)) {
-        return;
+      try {
+        actionOutputKey = actionInputHashes(spawn, actionExecutionContext);
+        if (writeActionOutput(spawn.getMnemonic(), actionOutputKey, eventHandler, true)) {
+          return;
+        }
+      } catch (IOException e) {
+        // TODO(ahirreddy): Real error handling
+        throw new RuntimeException("Could not interact with cache", e);
       }
     }
 
@@ -245,7 +249,7 @@ public final class WorkerSpawnStrategy implements SpawnActionContext {
   }
 
   private String actionInputHashes(Spawn spawn, ActionExecutionContext actionExecutionContext)
-      throws IOException {
+      throws IOException, UserExecException {
     ActionExecutionMetadata actionMetadata = spawn.getResourceOwner();
     ActionInputFileCache inputFileCache = actionExecutionContext.getActionInputFileCache();
 
