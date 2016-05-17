@@ -18,6 +18,10 @@ import com.google.common.eventbus.Subscribe;
 import com.google.devtools.build.lib.actions.ActionContextProvider;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildStartingEvent;
+import com.google.devtools.build.lib.remote.HazelcastCacheFactory;
+import com.google.devtools.build.lib.remote.MemcacheActionCache;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
+import com.google.devtools.build.lib.remote.RemoteOptions;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
@@ -28,11 +32,12 @@ import com.google.devtools.build.lib.runtime.CommandEnvironment;
 public class StandaloneModule extends BlazeModule {
   private CommandEnvironment env;
   private BuildRequest buildRequest;
+  private RemoteActionCache actionCache;
 
   @Override
   public Iterable<ActionContextProvider> getActionContextProviders() {
     return ImmutableList.<ActionContextProvider>of(
-        new StandaloneActionContextProvider(env, buildRequest));
+        new StandaloneActionContextProvider(env, buildRequest, this.actionCache));
   }
 
   @Override
@@ -50,5 +55,15 @@ public class StandaloneModule extends BlazeModule {
   @Subscribe
   public void buildStarting(BuildStartingEvent event) {
     buildRequest = event.getRequest();
+
+    RemoteOptions remoteOptions = buildRequest.getOptions(RemoteOptions.class);
+    if (actionCache == null && remoteOptions.hazelcastNode != null) {
+      MemcacheActionCache cache =
+          new MemcacheActionCache(
+              this.env.getDirectories().getExecRoot(),
+              remoteOptions,
+              HazelcastCacheFactory.create(remoteOptions));
+      actionCache = cache;
+    }
   }
 }

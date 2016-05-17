@@ -21,6 +21,10 @@ import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildStartingEvent;
 import com.google.devtools.build.lib.concurrent.ExecutorUtil;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.remote.HazelcastCacheFactory;
+import com.google.devtools.build.lib.remote.MemcacheActionCache;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
+import com.google.devtools.build.lib.remote.RemoteOptions;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
@@ -42,6 +46,7 @@ public class SandboxModule extends BlazeModule {
 
   // Per-server state
   private ExecutorService backgroundWorkers;
+  private RemoteActionCache actionCache;
   private Boolean sandboxingSupported = null;
 
   // Per-command state
@@ -61,7 +66,7 @@ public class SandboxModule extends BlazeModule {
     Preconditions.checkNotNull(env);
     if (isSandboxingSupported(env)) {
       return ImmutableList.<ActionContextProvider>of(
-          new SandboxActionContextProvider(env, buildRequest, backgroundWorkers));
+          new SandboxActionContextProvider(env, buildRequest, actionCache, backgroundWorkers));
     }
 
     // For now, sandboxing is only supported on Linux and there's not much point in showing a scary
@@ -111,5 +116,15 @@ public class SandboxModule extends BlazeModule {
   @Subscribe
   public void buildStarting(BuildStartingEvent event) {
     buildRequest = event.getRequest();
+
+    RemoteOptions remoteOptions = buildRequest.getOptions(RemoteOptions.class);
+    if (actionCache == null && remoteOptions.hazelcastNode != null) {
+      MemcacheActionCache cache =
+          new MemcacheActionCache(
+              this.env.getDirectories().getExecRoot(),
+              remoteOptions,
+              HazelcastCacheFactory.create(remoteOptions));
+      actionCache = cache;
+    }
   }
 }

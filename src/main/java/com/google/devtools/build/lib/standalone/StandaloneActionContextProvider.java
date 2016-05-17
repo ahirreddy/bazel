@@ -25,6 +25,7 @@ import com.google.devtools.build.lib.actions.Executor.ActionContext;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.FileWriteStrategy;
+import com.google.devtools.build.lib.remote.RemoteActionCache;
 import com.google.devtools.build.lib.rules.cpp.IncludeScanningContext;
 import com.google.devtools.build.lib.rules.cpp.SpawnGccStrategy;
 import com.google.devtools.build.lib.rules.cpp.SpawnLinkStrategy;
@@ -66,7 +67,10 @@ public class StandaloneActionContextProvider extends ActionContextProvider {
   private final CommandEnvironment env;
   private final ImmutableList<ActionContext> strategies;
 
-  public StandaloneActionContextProvider(CommandEnvironment env, BuildRequest buildRequest) {
+  public StandaloneActionContextProvider(
+      CommandEnvironment env,
+      BuildRequest buildRequest,
+      RemoteActionCache actionCache) {
     this.env = env;
     boolean verboseFailures = buildRequest.getOptions(ExecutionOptions.class).verboseFailures;
 
@@ -80,7 +84,7 @@ public class StandaloneActionContextProvider extends ActionContextProvider {
     // could potentially be used and a spawnActionContext doesn't specify which one it wants, the
     // last one from strategies list will be used
     strategiesBuilder.add(
-        new StandaloneSpawnStrategy(env.getExecRoot(), verboseFailures),
+        new StandaloneSpawnStrategy(env.getExecRoot(), actionCache, verboseFailures),
         new DummyIncludeScanningContext(),
         new SpawnLinkStrategy(),
         new SpawnGccStrategy(),
