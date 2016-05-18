@@ -24,6 +24,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/protobuf:extra_actions_base_java_proto",
+        "//third_party:amazon_s3",
         "//third_party:jsr305",
         "//third_party/protobuf",
     ],

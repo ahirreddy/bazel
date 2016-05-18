@@ -45,6 +45,14 @@ java_import(
 )
 
 java_import(
+    name = "amazon_s3",
+    jars = [
+        "amazon_s3/aws-java-sdk-core-1.11.0.jar",
+        "amazon_s3/aws-java-sdk-s3-1.11.0.jar",
+    ],
+)
+
+java_import(
     name = "android_common",
     jars = [
         "android_common/com.android.tools.build_builder_0.13.3.jar",

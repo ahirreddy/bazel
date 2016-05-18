@@ -20,6 +20,16 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.HttpMethod;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.transfer.TransferManager;
+import com.amazonaws.services.s3.transfer.model.UploadResult;
+
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -94,4 +104,21 @@ public class S3ActionCache implements ActionCache {
   public void dump(PrintStream out) {
     localCache.dump(out);
   };
+
+
+  /*
+  private def uploadFiles(files: Seq[File], bucket: String, destPath: String): Seq[String] = {
+    val uploads = files.map { file =>
+      val inputStream = new FileInputStream(file)
+      val metadata = new ObjectMetadata
+      // Content length must be set for stream uploads.
+      metadata.setContentLength(file.length())
+      transferMgr.upload(bucket, Paths.get(destPath, file.getName()).toString, inputStream, metadata)
+    }
+    // Wait for all of the uploads to complete.
+    val uploadResults: Seq[UploadResult] = uploads.map(_.waitForUploadResult())
+      transferMgr.shutdownNow()
+      uploadResults.map(_.getKey())
+  }
+  */
 }
