@@ -58,8 +58,8 @@ public class S3ActionCache implements ActionCache {
   private final TransferManager transferMgr;
 
   public S3ActionCache(ActionCache localCache) {
-    final BasicAWSCredentials credentials =
-      new BasicAWSCredentials("AKIAJ6V3VSHTA5RSYEQA", "Kaz3cP2s+SQCw73hsFH4IDn2rJzshhDmC6vou3ZY");
+    final BasicAWSCredentials credentials = new BasicAWSCredentials(
+          System.getenv("AWS_ACCESS_KEY_ID"), System.getenv("AWS_SECRET_ACCESS_KEY"));
     this.localCache = localCache;
     this.transferMgr = new TransferManager(credentials);
   }
