@@ -1,3 +1,5 @@
+load("//tools/build_rules:genproto.bzl", "java_proto_library")
+
 package(
     default_visibility = ["//src:__subpackages__"],
 )
@@ -27,10 +29,16 @@ java_library(
         "//third_party:amazon_s3",
         "//third_party:jsr305",
         "//third_party/protobuf",
+        ":s3_cache_entry_java_proto",
     ],
 )
 
 filegroup(
     name = "srcs",
     srcs = glob(["**"]),
+)
+
+java_proto_library(
+    name = "s3_cache_entry_java_proto",
+    src = "cache/S3CacheEntry.proto",
 )
