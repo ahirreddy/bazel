@@ -16,9 +16,11 @@ package com.google.devtools.build.lib.actions.cache;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import com.google.devtools.build.lib.actions.cache.S3CacheEntry.ActionCacheEntry;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.protobuf.ByteString;
 
 import com.amazonaws.AmazonServiceException;
 import com.amazonaws.HttpMethod;
@@ -30,6 +32,7 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.model.UploadResult;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -63,6 +66,15 @@ public class S3ActionCache implements ActionCache {
     this.localCache = localCache;
     this.transferMgr = new TransferManager(credentials);
   }
+
+  private ActionCacheEntry toProto(ActionCache.Entry entry) throws IOException {
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    entry.getFileDigest().write(baos);
+    return ActionCacheEntry.newBuilder()
+      .setActionKey(entry.getActionKey())
+      .setDigest(ByteString.copyFrom(baos.toByteArray()))
+      .build();
+  };
 
   /**
    * Updates the cache entry for the specified key.
