@@ -44,20 +44,9 @@ java_import(
     ],
 )
 
-filegroup(
-    name = "amazon_s3",
-    srcs = [
-        ":amazon_s3_jars",
-        ":apache_commons_logging",
-    ]
-)
-
 java_import(
-    name = "amazon_s3_jars",
-    jars = [
-        "amazon_s3/aws-java-sdk-core-1.11.0.jar",
-        "amazon_s3/aws-java-sdk-s3-1.11.0.jar",
-    ],
+    name = "amazon_s3",
+    jars = glob(["amazon_s3/*.jar"]),
 )
 
 java_import(
