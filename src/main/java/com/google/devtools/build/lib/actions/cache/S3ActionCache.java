@@ -32,7 +32,9 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.model.UploadResult;
 
+import java.nio.file.Files;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -67,19 +69,32 @@ public class S3ActionCache implements ActionCache {
     this.transferMgr = new TransferManager(credentials);
   }
 
-  private ActionCacheEntry toProto(ActionCache.Entry entry) throws IOException {
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    entry.getFileDigest().write(baos);
-    return ActionCacheEntry.newBuilder()
-      .setActionKey(entry.getActionKey())
-      .setDigest(ByteString.copyFrom(baos.toByteArray()))
-      .build();
+  private ActionCacheEntry toProto(ActionCache.Entry entry) {
+    ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
+      .setActionKey(entry.getActionKey());
+    System.out.println(entry.getActionKey());
+
+    try {
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      entry.getFileDigest().write(baos);
+      builder.setDigest(ByteString.copyFrom(baos.toByteArray()));
+
+      for (String path : entry.getPaths()) {
+        System.out.println(path);
+        byte[] bytes = Files.readAllBytes(new File(path).toPath());
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+
+    return builder.build();
   };
 
   /**
    * Updates the cache entry for the specified key.
    */
   public void put(String key, ActionCache.Entry entry) {
+    toProto(entry);
     localCache.put(key, entry);
   };
 
