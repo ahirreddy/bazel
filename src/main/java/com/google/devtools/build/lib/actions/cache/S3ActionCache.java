@@ -32,12 +32,13 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.model.UploadResult;
 
-import java.nio.file.Files;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -85,8 +86,17 @@ public class S3ActionCache implements ActionCache {
 
     // Add an file entry for each item in the mdMap
     for (Map.Entry<String, Metadata> e : entry.getEntries()) {
+      String path = e.getKey();
       ActionCacheEntry.FileEntry.Builder fileEntry = ActionCacheEntry.FileEntry.newBuilder()
-        .setPath(e.getKey());
+        .setPath(path);
+
+      try {
+        InputStream fileIs = Files.newInputStream(new File(path).toPath());
+        fileEntry.setContent(ByteString.readFrom(fileIs));
+      } catch (IOException ioe) {
+        throw new RuntimeException(ioe);
+      }
+
       // We can either have the md5 data or the last modified time.
       Metadata m = e.getValue();
       if (m.digest != null) {
@@ -188,19 +198,26 @@ public class S3ActionCache implements ActionCache {
     }
     */
 
-    entryMap.entrySet().parallelStream().forEach(e -> {
-      try {
-        String outputKey = e.getKey();
-        ActionCache.Entry entry = e.getValue();
-        String key = entry.getActionKey() + entry.getFileDigest();
-        FileOutputStream fos = new FileOutputStream(new File(this.cacheDirectory, key));
-        toProto(outputKey, entry).writeDelimitedTo(fos);
-        fos.flush();
-        fos.close();
-      } catch (IOException ioe) {
-        throw new RuntimeException(ioe);
-      }
-    });
+    entryMap.entrySet()
+      .parallelStream()
+      .filter(e ->
+        !e.getValue().getEntries().stream()
+          .anyMatch(entry ->
+            entry.getKey().startsWith("external/") || entry.getKey().contains("_middlemen"))
+      )
+      .forEach(e -> {
+        try {
+          String outputKey = e.getKey();
+          ActionCache.Entry entry = e.getValue();
+          String key = entry.getActionKey() + entry.getFileDigest();
+          FileOutputStream fos = new FileOutputStream(new File(this.cacheDirectory, key));
+          toProto(outputKey, entry).writeDelimitedTo(fos);
+          fos.flush();
+          fos.close();
+        } catch (IOException ioe) {
+          throw new RuntimeException(ioe);
+        }
+      });
 
     return localCache.save();
   };
