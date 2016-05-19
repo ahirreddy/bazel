@@ -19,10 +19,19 @@ package com.google.devtools.build.lib.actions.cache;
 option java_package = "com.google.devtools.build.lib.actions.cache";
 
 message ActionCacheEntry {
-  string action_key = 1;
+    string action_key = 1;
 
-  repeated bytes files = 2;
+    bytes digest = 2;
 
-  bytes digest = 3;
+    repeated FileEntry files = 3;
+
+    message FileEntry {
+        string path = 1;
+
+        oneof metadata {
+            bytes digest = 2;
+
+            int64 mtime = 3;
+        }
+    }
 }
-

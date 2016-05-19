@@ -28,6 +28,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
@@ -80,10 +81,12 @@ public interface ActionCache {
     // Null iff the corresponding action does not do input discovery.
     private final List<String> files;
     // If null, digest is non-null and the entry is immutable.
-    private Map<String, Metadata> mdMap;
+    @Nullable
+    private final Map<String, Metadata> mdMap;
     private Digest digest;
 
     public Entry(String key, boolean discoversInputs) {
+      assert(discoversInputs == false);
       actionKey = key;
       files = discoversInputs ? new ArrayList<String>() : null;
       mdMap = new HashMap<>();
@@ -128,7 +131,7 @@ public interface ActionCache {
     public Digest getFileDigest() {
       if (digest == null) {
         digest = Digest.fromMetadata(mdMap);
-        mdMap = null;
+        // mdMap = null;
       }
       return digest;
     }
@@ -145,6 +148,13 @@ public interface ActionCache {
      */
     public Collection<String> getPaths() {
       return discoversInputs() ? files : ImmutableList.<String>of();
+    }
+
+    /**
+     * @return
+     */
+    public Set<Map.Entry<String, Metadata>> getEntries() {
+      return mdMap.entrySet();
     }
 
     /**

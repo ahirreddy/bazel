@@ -43,6 +43,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.annotation.Nullable;
 
@@ -61,40 +62,75 @@ public class S3ActionCache implements ActionCache {
 
   private final ActionCache localCache;
   private final TransferManager transferMgr;
+  private final ConcurrentHashMap<String, ActionCache.Entry> entryMap;
 
   public S3ActionCache(ActionCache localCache) {
     final BasicAWSCredentials credentials = new BasicAWSCredentials(
           System.getenv("AWS_ACCESS_KEY_ID"), System.getenv("AWS_SECRET_ACCESS_KEY"));
     this.localCache = localCache;
     this.transferMgr = new TransferManager(credentials);
+    this.entryMap = new ConcurrentHashMap<String, ActionCache.Entry>();
   }
 
   private ActionCacheEntry toProto(ActionCache.Entry entry) {
-    ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
-      .setActionKey(entry.getActionKey());
-    System.out.println(entry.getActionKey());
-
     try {
+      ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
+        .setActionKey(entry.getActionKey());
+
       ByteArrayOutputStream baos = new ByteArrayOutputStream();
       entry.getFileDigest().write(baos);
       builder.setDigest(ByteString.copyFrom(baos.toByteArray()));
 
-      for (String path : entry.getPaths()) {
-        System.out.println(path);
-        byte[] bytes = Files.readAllBytes(new File(path).toPath());
+      // Add an file entry for each item in the mdMap
+      for (Map.Entry<String, Metadata> e : entry.getEntries()) {
+        ActionCacheEntry.FileEntry.Builder fileEntry = ActionCacheEntry.FileEntry.newBuilder()
+          .setPath(e.getKey());
+        // We can either have the md5 data or the last modified time.
+        Metadata m = e.getValue();
+        if (m.digest != null) {
+          fileEntry.setDigest(ByteString.copyFrom(m.digest));
+        } else {
+          fileEntry.setMtime(m.mtime);
+        }
+        builder.addFiles(fileEntry.build());
       }
+
+      System.out.println(builder.build());
+      return builder.build();
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
+  };
 
-    return builder.build();
+  private ActionCache.Entry fromProto(ActionCacheEntry proto) {
+    ActionCache.Entry entry = this.createEntry(proto.getActionKey(), false);
+    for (ActionCacheEntry.FileEntry fileEntry : proto.getFilesList()) {
+      Metadata md = null;
+      // TODO(ahirreddy): Not sure why oneof hasBlah() isn't working
+      // if (fileEntry.hasMtime()) {
+      if (fileEntry.getMtime() != 0) {
+        md = new Metadata(fileEntry.getMtime());
+      // } else if (fileEntry.hasDigest()) {
+      } else if (fileEntry.getDigest() != ByteString.EMPTY) {
+        md = new Metadata(fileEntry.getDigest().toByteArray());
+      } else {
+        throw new RuntimeException("ActionCacheEntry Proto missing file Metadata: " + fileEntry);
+      }
+      entry.addFile(new PathFragment(fileEntry.getPath()), md);
+    }
+
+    if (entry.getFileDigest() != new Digest(proto.getDigest().toByteArray())) {
+      throw new RuntimeException("Computed digest differs from digest stored in proto");
+    }
+
+    return entry;
   };
 
   /**
    * Updates the cache entry for the specified key.
    */
   public void put(String key, ActionCache.Entry entry) {
-    toProto(entry);
+    entryMap.put(key, entry);
     localCache.put(key, entry);
   };
 
@@ -126,6 +162,14 @@ public class S3ActionCache implements ActionCache {
    * @return size in bytes of the serialized cache.
    */
   public long save() throws IOException {
+    for (Map.Entry<String, ActionCache.Entry> entry : entryMap.entrySet()) {
+      ActionCacheEntry proto = toProto(entry.getValue());
+      ActionCache.Entry deserializedEntry = fromProto(proto);
+      if (entry.hashCode() != deserializedEntry.hashCode() || !entry.equals(deserializedEntry)) {
+        throw new RuntimeException(
+            "Proto SerDe failed: " + entry + "\n\n" + proto + "\n\n" + deserializedEntry);
+      }
+    }
     return localCache.save();
   };
 
