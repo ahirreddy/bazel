@@ -73,19 +73,28 @@ public class ActionCacheChecker {
    * If yes, returns it - otherwise uses first output file as a key
    */
   private ActionCache.Entry getCacheEntry(Action action) {
+    /*
     for (Artifact output : action.getOutputs()) {
       ActionCache.Entry entry = actionCache.get(output.getExecPathString());
       if (entry != null) {
         return entry;
       }
     }
+    */
+    ActionCache.Entry entry = actionCache.get(action.getKey());
+    if (entry != null) {
+      return entry;
+    }
     return null;
   }
 
   private void removeCacheEntry(Action action) {
+    /*
     for (Artifact output : action.getOutputs()) {
       actionCache.remove(output.getExecPathString());
     }
+    */
+    actionCache.remove(action.getKey());
   }
 
   /**
@@ -174,7 +183,7 @@ public class ActionCacheChecker {
       if (entry != null) {
         removeCacheEntry(action);
       }
-      return new Token(getKeyString(action));
+      return new Token(action.getKey());
     }
 
     if (!inputsKnown) {
@@ -222,11 +231,13 @@ public class ActionCacheChecker {
     ActionCache.Entry entry =
         actionCache.createEntry(action.getKey(), action.discoversInputs());
     for (Artifact output : action.getOutputs()) {
+      /*
       // Remove old records from the cache if they used different key.
       String execPath = output.getExecPathString();
       if (!key.equals(execPath)) {
         actionCache.remove(execPath);
       }
+      */
       if (!metadataHandler.artifactOmitted(output)) {
         // Output files *must* exist and be accessible after successful action execution.
         Metadata metadata = metadataHandler.getMetadata(output);
@@ -279,7 +290,8 @@ public class ActionCacheChecker {
   protected void checkMiddlemanAction(Action action, EventHandler handler,
       MetadataHandler metadataHandler) {
     Artifact middleman = action.getPrimaryOutput();
-    String cacheKey = middleman.getExecPathString();
+    // String cacheKey = middleman.getExecPathString();
+    String cacheKey = action.getKey();
     ActionCache.Entry entry = actionCache.get(cacheKey);
     boolean changed = false;
     if (entry != null) {
@@ -309,15 +321,6 @@ public class ActionCacheChecker {
       actionCache.put(cacheKey, entry);
     }
   }
-
-  /**
-   * Returns an action key. It is always set to the first output exec path string.
-   */
-  private static String getKeyString(Action action) {
-    Preconditions.checkState(!action.getOutputs().isEmpty());
-    return action.getOutputs().iterator().next().getExecPathString();
-  }
-
 
   /**
    * In most cases, this method should not be called directly - reportXXX() methods
