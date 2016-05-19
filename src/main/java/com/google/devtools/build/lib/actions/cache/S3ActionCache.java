@@ -35,6 +35,7 @@ import com.amazonaws.services.s3.transfer.model.UploadResult;
 import java.nio.file.Files;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.Arrays;
@@ -64,6 +65,7 @@ public class S3ActionCache implements ActionCache {
   private final ActionCache localCache;
   private final TransferManager transferMgr;
   private final ConcurrentHashMap<String, ActionCache.Entry> entryMap;
+  private final File cacheDirectory;
 
   public S3ActionCache(ActionCache localCache) {
     final BasicAWSCredentials credentials = new BasicAWSCredentials(
@@ -71,6 +73,8 @@ public class S3ActionCache implements ActionCache {
     this.localCache = localCache;
     this.transferMgr = new TransferManager(credentials);
     this.entryMap = new ConcurrentHashMap<String, ActionCache.Entry>();
+    this.cacheDirectory = new File(System.getProperty("user.home"), ".databricks/bazel-cache");
+    this.cacheDirectory.mkdirs();
   }
 
   private ActionCacheEntry toProto(String outputKey, ActionCache.Entry entry) {
@@ -126,8 +130,8 @@ public class S3ActionCache implements ActionCache {
    * Updates the cache entry for the specified key.
    */
   public void put(String key, ActionCache.Entry entry) {
-    entryMap.put(key, entry);
     localCache.put(key, entry);
+    entryMap.put(key, entry);
   };
 
   /**
@@ -135,13 +139,20 @@ public class S3ActionCache implements ActionCache {
    * null if not found.
    */
   public ActionCache.Entry get(String key) {
-    return localCache.get(key);
+    ActionCache.Entry localResult = localCache.get(key);
+    if (localResult != null) {
+      return localResult;
+    } else {
+      // TODO(ahirreddy): S3 Lookup
+      return null;
+    }
   };
 
   /**
    * Removes entry from cache
    */
   public void remove(String key) {
+    // Never remove from the remote cache.
     localCache.remove(key);
   };
 
@@ -158,6 +169,7 @@ public class S3ActionCache implements ActionCache {
    * @return size in bytes of the serialized cache.
    */
   public long save() throws IOException {
+    /*
     for (Map.Entry<String, ActionCache.Entry> entry : entryMap.entrySet()) {
       String outputKey = entry.getKey();
       ActionCache.Entry actionCacheEntry = entry.getValue();
@@ -174,6 +186,22 @@ public class S3ActionCache implements ActionCache {
             "Proto SerDe failed: " + entry + "\n\n" + proto + "\n\n" + deserializedEntry);
       }
     }
+    */
+
+    entryMap.entrySet().parallelStream().forEach(e -> {
+      try {
+        String outputKey = e.getKey();
+        ActionCache.Entry entry = e.getValue();
+        String key = entry.getActionKey() + entry.getFileDigest();
+        FileOutputStream fos = new FileOutputStream(new File(this.cacheDirectory, key));
+        toProto(outputKey, entry).writeDelimitedTo(fos);
+        fos.flush();
+        fos.close();
+      } catch (IOException ioe) {
+        throw new RuntimeException(ioe);
+      }
+    });
+
     return localCache.save();
   };
 
