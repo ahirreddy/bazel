@@ -73,8 +73,9 @@ public class S3ActionCache implements ActionCache {
     this.entryMap = new ConcurrentHashMap<String, ActionCache.Entry>();
   }
 
-  private ActionCacheEntry toProto(ActionCache.Entry entry) {
+  private ActionCacheEntry toProto(String outputKey, ActionCache.Entry entry) {
     ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
+      .setOutputKey(outputKey)
       .setActionKey(entry.getActionKey())
       .setDigest(ByteString.copyFrom(entry.getFileDigest().asMetadata().digest));
 
@@ -158,9 +159,14 @@ public class S3ActionCache implements ActionCache {
    */
   public long save() throws IOException {
     for (Map.Entry<String, ActionCache.Entry> entry : entryMap.entrySet()) {
+      String outputKey = entry.getKey();
       ActionCache.Entry actionCacheEntry = entry.getValue();
-      ActionCacheEntry proto = toProto(actionCacheEntry);
+      ActionCacheEntry proto = toProto(outputKey, actionCacheEntry);
       ActionCache.Entry deserializedEntry = fromProto(proto);
+      if (outputKey != proto.getOutputKey()) {
+        throw new RuntimeException(
+            "Proto output key differs: " + "\n\n" + outputKey + "\n\n" + proto.getOutputKey());
+      }
       // TODO(ahirreddy): Is this a correct equality check?
       if (!actionCacheEntry.getActionKey().equals(deserializedEntry.getActionKey()) ||
           !actionCacheEntry.getFileDigest().equals(deserializedEntry.getFileDigest())) {
