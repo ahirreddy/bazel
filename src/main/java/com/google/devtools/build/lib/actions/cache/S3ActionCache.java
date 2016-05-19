@@ -37,6 +37,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -73,33 +74,26 @@ public class S3ActionCache implements ActionCache {
   }
 
   private ActionCacheEntry toProto(ActionCache.Entry entry) {
-    try {
-      ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
-        .setActionKey(entry.getActionKey());
+    ActionCacheEntry.Builder builder = ActionCacheEntry.newBuilder()
+      .setActionKey(entry.getActionKey())
+      .setDigest(ByteString.copyFrom(entry.getFileDigest().asMetadata().digest));
 
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      entry.getFileDigest().write(baos);
-      builder.setDigest(ByteString.copyFrom(baos.toByteArray()));
-
-      // Add an file entry for each item in the mdMap
-      for (Map.Entry<String, Metadata> e : entry.getEntries()) {
-        ActionCacheEntry.FileEntry.Builder fileEntry = ActionCacheEntry.FileEntry.newBuilder()
-          .setPath(e.getKey());
-        // We can either have the md5 data or the last modified time.
-        Metadata m = e.getValue();
-        if (m.digest != null) {
-          fileEntry.setDigest(ByteString.copyFrom(m.digest));
-        } else {
-          fileEntry.setMtime(m.mtime);
-        }
-        builder.addFiles(fileEntry.build());
+    // Add an file entry for each item in the mdMap
+    for (Map.Entry<String, Metadata> e : entry.getEntries()) {
+      ActionCacheEntry.FileEntry.Builder fileEntry = ActionCacheEntry.FileEntry.newBuilder()
+        .setPath(e.getKey());
+      // We can either have the md5 data or the last modified time.
+      Metadata m = e.getValue();
+      if (m.digest != null) {
+        fileEntry.setDigest(ByteString.copyFrom(m.digest));
+      } else {
+        fileEntry.setMtime(m.mtime);
       }
-
-      System.out.println(builder.build());
-      return builder.build();
-    } catch (IOException e) {
-      throw new RuntimeException(e);
+      builder.addFiles(fileEntry.build());
     }
+
+    System.out.println(builder.build());
+    return builder.build();
   };
 
   private ActionCache.Entry fromProto(ActionCacheEntry proto) {
@@ -119,7 +113,8 @@ public class S3ActionCache implements ActionCache {
       entry.addFile(new PathFragment(fileEntry.getPath()), md);
     }
 
-    if (entry.getFileDigest() != new Digest(proto.getDigest().toByteArray())) {
+    if (!Arrays.equals(entry.getFileDigest().asMetadata().digest,
+          proto.getDigest().toByteArray())) {
       throw new RuntimeException("Computed digest differs from digest stored in proto");
     }
 
