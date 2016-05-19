@@ -158,9 +158,12 @@ public class S3ActionCache implements ActionCache {
    */
   public long save() throws IOException {
     for (Map.Entry<String, ActionCache.Entry> entry : entryMap.entrySet()) {
-      ActionCacheEntry proto = toProto(entry.getValue());
+      ActionCache.Entry actionCacheEntry = entry.getValue();
+      ActionCacheEntry proto = toProto(actionCacheEntry);
       ActionCache.Entry deserializedEntry = fromProto(proto);
-      if (entry.hashCode() != deserializedEntry.hashCode() || !entry.equals(deserializedEntry)) {
+      // TODO(ahirreddy): Is this a correct equality check?
+      if (!actionCacheEntry.getActionKey().equals(deserializedEntry.getActionKey()) ||
+          !actionCacheEntry.getFileDigest().equals(deserializedEntry.getFileDigest())) {
         throw new RuntimeException(
             "Proto SerDe failed: " + entry + "\n\n" + proto + "\n\n" + deserializedEntry);
       }
