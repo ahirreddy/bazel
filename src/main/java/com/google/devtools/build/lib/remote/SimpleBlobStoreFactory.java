@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.remote;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
+import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.remote.blobstore.OnDiskBlobStore;
 import com.google.devtools.build.lib.remote.blobstore.SimpleBlobStore;
 import com.google.devtools.build.lib.remote.blobstore.http.HttpBlobStore;
@@ -34,12 +35,13 @@ public final class SimpleBlobStoreFactory {
 
   private SimpleBlobStoreFactory() {}
 
-  public static SimpleBlobStore createRest(RemoteOptions options, Credentials creds)
+  public static SimpleBlobStore createRest(RemoteOptions options, AuthAndTLSOptions authAndTlsOptions, Credentials creds)
       throws IOException {
     try {
       return new HttpBlobStore(
           URI.create(options.remoteHttpCache),
           (int) TimeUnit.SECONDS.toMillis(options.remoteTimeout),
+          authAndTlsOptions,
           creds);
     } catch (Exception e) {
       throw new RuntimeException(e);
@@ -53,10 +55,10 @@ public final class SimpleBlobStoreFactory {
   }
 
   public static SimpleBlobStore create(
-      RemoteOptions options, @Nullable Credentials creds, @Nullable Path workingDirectory)
+      RemoteOptions options, AuthAndTLSOptions authAndTlsOptions, @Nullable Credentials creds, @Nullable Path workingDirectory)
       throws IOException {
     if (isRestUrlOptions(options)) {
-      return createRest(options, creds);
+      return createRest(options, authAndTlsOptions, creds);
     }
     if (workingDirectory != null && isLocalDiskCache(options)) {
       return createLocalDisk(options, workingDirectory);

@@ -145,6 +145,7 @@ public final class RemoteModule extends BlazeModule {
             new SimpleBlobStoreActionCache(
                 SimpleBlobStoreFactory.create(
                     remoteOptions,
+                    authAndTlsOptions,
                     GoogleAuthUtils.newCredentials(authAndTlsOptions),
                     env.getWorkingDirectory()),
                 digestUtil);
