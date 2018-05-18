@@ -18,6 +18,7 @@ import static com.google.devtools.build.lib.remote.util.Utils.getFromFuture;
 import com.google.auth.Credentials;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.remote.blobstore.SimpleBlobStore;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
@@ -56,6 +57,7 @@ import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.PlatformDependent;
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -123,31 +125,33 @@ public final class HttpBlobStore implements SimpleBlobStore {
   private long lastRefreshTime;
 
   public static HttpBlobStore create(URI uri, int timeoutMillis,
-      int remoteMaxConnections, @Nullable final Credentials creds)
+      int remoteMaxConnections, final AuthAndTLSOptions authAndTlsOptions,
+      @Nullable final Credentials creds)
       throws Exception {
     return new HttpBlobStore(
         NioEventLoopGroup::new,
         NioSocketChannel.class,
-        uri, timeoutMillis, remoteMaxConnections, creds,
+        uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
         null);
   }
 
   public static HttpBlobStore create(
       DomainSocketAddress domainSocketAddress,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds)
+      URI uri, int timeoutMillis, int remoteMaxConnections,
+      final AuthAndTLSOptions authAndTlsOptions, @Nullable final Credentials creds)
       throws Exception {
 
       if (KQueue.isAvailable()) {
         return new HttpBlobStore(
             KQueueEventLoopGroup::new,
             KQueueDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
+            uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
             domainSocketAddress);
       } else if (Epoll.isAvailable()) {
         return new HttpBlobStore(
             EpollEventLoopGroup::new,
             EpollDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
+            uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
             domainSocketAddress);
       } else {
         throw new Exception("Unix domain sockets are unsupported on this platform");
@@ -157,7 +161,9 @@ public final class HttpBlobStore implements SimpleBlobStore {
   private HttpBlobStore(
       Function<Integer, EventLoopGroup> newEventLoopGroup,
       Class<? extends Channel> channelClass,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds,
+      URI uri, int timeoutMillis, int remoteMaxConnections,
+      final AuthAndTLSOptions authAndTlsOptions,
+      @Nullable final Credentials creds,
       @Nullable SocketAddress socketAddress)
       throws Exception {
     useTls = uri.getScheme().equals("https");
@@ -183,7 +189,21 @@ public final class HttpBlobStore implements SimpleBlobStore {
       // OpenSsl gives us a > 2x speed improvement on fast networks, but requires netty tcnative
       // to be there which is not available on all platforms and environments.
       SslProvider sslProvider = OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK;
-      sslCtx = SslContextBuilder.forClient().sslProvider(sslProvider).build();
+      SslContextBuilder sslCtxBuilder = SslContextBuilder.forClient().sslProvider(sslProvider);
+      if (authAndTlsOptions.httpCacheTlsCertificate != null || authAndTlsOptions.httpCacheTlsKey != null) {
+        if (authAndTlsOptions.httpCacheTlsCertificate == null || authAndTlsOptions.httpCacheTlsKey == null) {
+          throw new IllegalArgumentException("Both or neither of --http_cache_tls_certificate" +
+              " and --http_cache_tls_certificate must be set");
+        }
+        File cert = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsCertificate));
+        File key = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsKey));
+        sslCtxBuilder.keyManager(cert, key);
+      }
+      if (authAndTlsOptions.httpCacheTlsCertificateAuthority != null) {
+        File certificateAuthority = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsCertificateAuthority));
+        sslCtxBuilder.trustManager(certificateAuthority);
+      }
+      sslCtx = sslCtxBuilder.build();
     } else {
       sslCtx = null;
     }
@@ -222,6 +242,10 @@ public final class HttpBlobStore implements SimpleBlobStore {
     }
     this.creds = creds;
     this.timeoutMillis = timeoutMillis;
+  }
+
+  private String expandHomeDir(String path) {
+    return path.replaceAll("^~" + File.separator, System.getProperty("user.home") + File.separator);
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
