@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.authandtls;
 
+import com.google.devtools.build.lib.util.OptionsUtils.PathFragmentConverter;
 import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
@@ -98,6 +99,7 @@ public class AuthAndTLSOptions extends OptionsBase {
     defaultValue = "null",
     documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
     effectTags = {OptionEffectTag.UNKNOWN},
+    converter = OptionsUtils.PathFragmentConverter.class,
     help = "Specify the X.509 TLS client certificate to use for HTTP Caching."
   )
   public String httpCacheTlsCertificate;
@@ -107,6 +109,7 @@ public class AuthAndTLSOptions extends OptionsBase {
     defaultValue = "null",
     documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
     effectTags = {OptionEffectTag.UNKNOWN},
+    converter = OptionsUtils.PathFragmentConverter.class,
     help = "Specify the PKCS8 PEM private key to use for HTTP Caching."
   )
   public String httpCacheTlsKey;
@@ -116,6 +119,7 @@ public class AuthAndTLSOptions extends OptionsBase {
     defaultValue = "null",
     documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
     effectTags = {OptionEffectTag.UNKNOWN},
+    converter = OptionsUtils.PathFragmentConverter.class,
     help = "Specify the trusted certificates used to verify the remote endpoint for HTTP Caching. "
             + " This file must be an X.509 PEM certificate collection."
   )
