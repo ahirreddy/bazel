@@ -14,13 +14,15 @@
 
 package com.google.devtools.build.lib.authandtls;
 
-import com.google.devtools.build.lib.util.OptionsUtils.PathFragmentConverter;
+import com.google.devtools.build.lib.util.OptionsUtils;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
+import java.io.File;
 import java.util.List;
 
 /**
@@ -102,7 +104,7 @@ public class AuthAndTLSOptions extends OptionsBase {
     converter = OptionsUtils.PathFragmentConverter.class,
     help = "Specify the X.509 TLS client certificate to use for HTTP Caching."
   )
-  public String httpCacheTlsCertificate;
+  public PathFragment httpCacheTlsCertificate;
 
   @Option(
     name = "http_cache_tls_key",
@@ -112,7 +114,7 @@ public class AuthAndTLSOptions extends OptionsBase {
     converter = OptionsUtils.PathFragmentConverter.class,
     help = "Specify the PKCS8 PEM private key to use for HTTP Caching."
   )
-  public String httpCacheTlsKey;
+  public PathFragment httpCacheTlsKey;
 
   @Option(
     name = "http_cache_tls_certificate_authority",
@@ -123,5 +125,5 @@ public class AuthAndTLSOptions extends OptionsBase {
     help = "Specify the trusted certificates used to verify the remote endpoint for HTTP Caching. "
             + " This file must be an X.509 PEM certificate collection."
   )
-  public String httpCacheTlsCertificateAuthority;
+  public PathFragment httpCacheTlsCertificateAuthority;
 }
