@@ -18,6 +18,7 @@ import static com.google.devtools.build.lib.remote.util.Utils.getFromFuture;
 import com.google.auth.Credentials;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.remote.blobstore.SimpleBlobStore;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
@@ -123,7 +124,8 @@ public final class HttpBlobStore implements SimpleBlobStore {
   private long lastRefreshTime;
 
   public static HttpBlobStore create(URI uri, int timeoutMillis,
-      int remoteMaxConnections, @Nullable final Credentials creds)
+      int remoteMaxConnections, final AuthAndTLSOptions authAndTlsOptions,
+      @Nullable final Credentials creds)
       throws Exception {
     return new HttpBlobStore(
         NioEventLoopGroup::new,
@@ -134,7 +136,8 @@ public final class HttpBlobStore implements SimpleBlobStore {
 
   public static HttpBlobStore create(
       DomainSocketAddress domainSocketAddress,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds)
+      URI uri, int timeoutMillis, int remoteMaxConnections,
+      final AuthAndTLSOptions authAndTlsOptions, @Nullable final Credentials creds)
       throws Exception {
 
       if (KQueue.isAvailable()) {
