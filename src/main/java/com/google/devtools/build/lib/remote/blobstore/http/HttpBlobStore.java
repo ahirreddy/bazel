@@ -131,7 +131,7 @@ public final class HttpBlobStore implements SimpleBlobStore {
     return new HttpBlobStore(
         NioEventLoopGroup::new,
         NioSocketChannel.class,
-        uri, timeoutMillis, remoteMaxConnections, creds,
+        uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
         null);
   }
 
@@ -145,13 +145,13 @@ public final class HttpBlobStore implements SimpleBlobStore {
         return new HttpBlobStore(
             KQueueEventLoopGroup::new,
             KQueueDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
+            uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
             domainSocketAddress);
       } else if (Epoll.isAvailable()) {
         return new HttpBlobStore(
             EpollEventLoopGroup::new,
             EpollDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
+            uri, timeoutMillis, remoteMaxConnections, authAndTlsOptions, creds,
             domainSocketAddress);
       } else {
         throw new Exception("Unix domain sockets are unsupported on this platform");
@@ -161,7 +161,9 @@ public final class HttpBlobStore implements SimpleBlobStore {
   private HttpBlobStore(
       Function<Integer, EventLoopGroup> newEventLoopGroup,
       Class<? extends Channel> channelClass,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds,
+      URI uri, int timeoutMillis, int remoteMaxConnections,
+      final AuthAndTLSOptions authAndTlsOptions,
+      @Nullable final Credentials creds,
       @Nullable SocketAddress socketAddress)
       throws Exception {
     useTls = uri.getScheme().equals("https");
