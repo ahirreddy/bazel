@@ -175,6 +175,7 @@ public final class RemoteModule extends BlazeModule {
                 remoteOptions,
                 SimpleBlobStoreFactory.create(
                     remoteOptions,
+                    authAndTlsOptions,
                     GoogleAuthUtils.newCredentials(authAndTlsOptions),
                     env.getWorkingDirectory()),
                 retrier,
