@@ -195,12 +195,12 @@ public final class HttpBlobStore implements SimpleBlobStore {
           throw new IllegalArgumentException("Both or neither of --http_cache_tls_certificate" +
               " and --http_cache_tls_certificate must be set");
         }
-        File cert = new File(authAndTlsOptions.httpCacheTlsCertificate);
-        File key = new File(authAndTlsOptions.httpCacheTlsKey);
+        File cert = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsCertificate));
+        File key = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsKey));
         sslCtxBuilder.keyManager(cert, key);
       }
       if (authAndTlsOptions.httpCacheTlsCertificateAuthority != null) {
-        File certificateAuthority = new File(authAndTlsOptions.httpCacheTlsCertificateAuthority);
+        File certificateAuthority = new File(expandHomeDir(authAndTlsOptions.httpCacheTlsCertificateAuthority));
         sslCtxBuilder.trustManager(certificateAuthority);
       }
       sslCtx = sslCtxBuilder.build();
@@ -241,6 +241,10 @@ public final class HttpBlobStore implements SimpleBlobStore {
     }
     this.creds = creds;
     this.timeoutMillis = timeoutMillis;
+  }
+
+  private String expandHomeDir(String path) {
+    return path.replaceAll("^~" + File.separator, System.getProperty("user.home") + File.separator);
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
