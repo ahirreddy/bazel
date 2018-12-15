@@ -87,7 +87,8 @@ final class RemoteSpawnCache implements SpawnCache {
   @Override
   public CacheHandle lookup(Spawn spawn, SpawnExecutionContext context)
       throws InterruptedException, IOException, ExecException {
-    boolean checkCache = options.remoteAcceptCached && Spawns.mayBeCached(spawn);
+    boolean cachable = Spawns.mayBeCached(spawn);
+    boolean checkCache = options.remoteAcceptCached && cachable;
 
     if (checkCache) {
       context.report(ProgressStatus.CHECKING_CACHE, "remote-cache");
@@ -150,7 +151,7 @@ final class RemoteSpawnCache implements SpawnCache {
         withMetadata.detach(previous);
       }
     }
-    if (options.remoteUploadLocalResults) {
+    if (options.remoteUploadLocalResults && cachable) {
       return new CacheHandle() {
         @Override
         public boolean hasResult() {
