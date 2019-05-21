@@ -113,7 +113,7 @@ public class BlazeVersionInfo {
     String buildLabel = buildData.get(BUILD_LABEL);
     return (buildLabel != null && buildLabel.length() > 0)
         ? "release " + buildLabel
-        : "development version";
+        : "tls-bazel-0.25.2";
   }
 
   /**
