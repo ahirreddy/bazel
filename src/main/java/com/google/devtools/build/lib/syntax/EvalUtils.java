@@ -304,6 +304,9 @@ public final class EvalUtils {
             return StarlarkList.concat((StarlarkList<?>) x, (StarlarkList<?>) y, mu);
           }
 
+        } else if (x instanceof Dict && y instanceof Dict) {
+          // Databricks Hack: Restore dict + dict
+          return Dict.plus((Dict<?, ?>) x, (Dict<?, ?>) y, mu);
         }
         break;
 
