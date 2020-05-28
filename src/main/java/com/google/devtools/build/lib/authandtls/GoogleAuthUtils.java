@@ -107,7 +107,7 @@ public final class GoogleAuthUtils {
     return !target.startsWith("grpc://");
   }
 
-  private static SslContext createSSlContext(
+  public static SslContext createSSlContext(
       @Nullable String rootCert, @Nullable String clientCert, @Nullable String clientKey)
       throws IOException {
     SslContextBuilder sslContextBuilder;
