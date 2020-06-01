@@ -113,7 +113,7 @@ public class BlazeVersionInfo {
     String buildLabel = buildData.get(BUILD_LABEL);
     return (buildLabel != null && buildLabel.length() > 0)
         ? "release " + buildLabel
-        : "development version";
+        : "databricks-bazel-3.2.0-1";
   }
 
   /**
