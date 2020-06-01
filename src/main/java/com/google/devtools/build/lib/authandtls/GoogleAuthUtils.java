@@ -33,8 +33,10 @@ import io.netty.channel.kqueue.KQueue;
 import io.netty.channel.kqueue.KQueueDomainSocketChannel;
 import io.netty.channel.kqueue.KQueueEventLoopGroup;
 import io.netty.channel.unix.DomainSocketAddress;
+import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslProvider;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -63,7 +65,10 @@ public final class GoogleAuthUtils {
     SslContext sslContext =
         isTlsEnabled(target)
             ? createSSlContext(
-                options.tlsCertificate, options.tlsClientCertificate, options.tlsClientKey)
+                true, /* grpcContext */
+                options.tlsCertificate,
+                options.tlsClientCertificate,
+                options.tlsClientKey)
             : null;
 
     String targetUrl = convertTargetScheme(target);
@@ -108,11 +113,22 @@ public final class GoogleAuthUtils {
   }
 
   public static SslContext createSSlContext(
-      @Nullable String rootCert, @Nullable String clientCert, @Nullable String clientKey)
+      boolean grpcContext,
+      @Nullable String rootCert,
+      @Nullable String clientCert,
+      @Nullable String clientKey)
       throws IOException {
     SslContextBuilder sslContextBuilder;
     try {
-      sslContextBuilder = GrpcSslContexts.forClient();
+      if (grpcContext) {
+        sslContextBuilder = GrpcSslContexts.forClient();
+      } else {
+        // OpenSsl gives us a > 2x speed improvement on fast networks, but requires netty tcnative
+        // to be there which is not available on all platforms and environments.
+        // TODO: Determine what SSL Provider the GRPC SSL Context uses
+        SslProvider sslProvider = OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK;
+        sslContextBuilder = SslContextBuilder.forClient().sslProvider(sslProvider);
+      }
     } catch (Exception e) {
       String message = "Failed to init TLS infrastructure: " + e.getMessage();
       throw new IOException(message, e);

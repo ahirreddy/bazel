@@ -57,11 +57,9 @@ import io.netty.handler.codec.http.HttpRequestEncoder;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseDecoder;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
-import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.stream.ChunkedWriteHandler;
 import io.netty.handler.timeout.ReadTimeoutException;
 import io.netty.handler.timeout.WriteTimeoutException;
@@ -244,11 +242,11 @@ public final class HttpCacheClient implements RemoteCacheClient {
 
     final SslContext sslCtx;
     if (useTls) {
-      // OpenSsl gives us a > 2x speed improvement on fast networks, but requires netty tcnative
-      // to be there which is not available on all platforms and environments.
-      // TODO: Determine what SSL Provider the GRPC SSL Context uses
-      SslProvider sslProvider = OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK;
-      sslCtx = GoogleAuthUtils.createSSlContext(options.tlsCertificate, options.tlsClientCertificate, options.tlsClientKey);
+      sslCtx = GoogleAuthUtils.createSSlContext(
+          false, /* grpcContext */
+          options.tlsCertificate,
+          options.tlsClientCertificate,
+          options.tlsClientKey);
     } else {
       sslCtx = null;
     }
