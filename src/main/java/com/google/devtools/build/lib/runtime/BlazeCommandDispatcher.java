@@ -350,7 +350,7 @@ public class BlazeCommandDispatcher implements CommandDispatcher {
         out = new FileOutputStream(commonOptions.starlarkCpuProfile);
       } catch (IOException ex) {
         String message = "Starlark CPU profiler: " + ex.getMessage();
-        storedEventHandler.handle(Event.error(message));
+        outErr.printErrLn(message);
         return createDetailedCommandResult(
             message,
             ExitCode.LOCAL_ENVIRONMENTAL_ERROR,
@@ -360,7 +360,7 @@ public class BlazeCommandDispatcher implements CommandDispatcher {
         Starlark.startCpuProfile(out, Duration.ofMillis(10));
       } catch (IllegalStateException ex) { // e.g. SIGPROF in use
         String message = Strings.nullToEmpty(ex.getMessage());
-        storedEventHandler.handle(Event.error(message));
+        outErr.printErrLn(message);
         return createDetailedCommandResult(
             message,
             ExitCode.LOCAL_ENVIRONMENTAL_ERROR,

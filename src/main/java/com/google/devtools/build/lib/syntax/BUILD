@@ -123,7 +123,6 @@ java_library(
         "StringModule.java",
         "Tuple.java",
     ],
-    data = [":libcpu_profiler.so"],  # will be loaded dynamically
     deps = [
         ":frontend",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
@@ -136,6 +135,35 @@ java_library(
         "//third_party:jsr305",
         "//third_party/protobuf:protobuf_java",
     ],
+)
+
+# Dynamic library for Starlark CPU profiler.
+# The application or test must arrange for the library to be added
+# to the java.library.path directory (e.g. by 'java -Djava.library.path=<dir>').
+# What a mess.
+filegroup(
+    name = "cpu_profiler",
+    srcs = select({
+        "//src/conditions:darwin": [":libcpu_profiler.dylib"],
+        "//src/conditions:windows": [":cpu_profiler.dll"],
+        "//conditions:default": [":libcpu_profiler.so"],  # POSIX
+    }),
+)
+
+genrule(
+    name = "cpu_profiler_darwin",
+    srcs = ["libcpu_profiler.so"],
+    outs = ["libcpu_profiler.dylib"],
+    cmd = "cp $< $@",
+    visibility = ["//visibility:private"],
+)
+
+genrule(
+    name = "cpu_profiler_windows",
+    srcs = ["libcpu_profiler.so"],
+    outs = ["cpu_profiler.dll"],
+    cmd = "cp $< $@",
+    visibility = ["//visibility:private"],
 )
 
 # The C++ portion of the Starlark CPU profiler.
@@ -152,5 +180,6 @@ cc_binary(
         "//conditions:default": ["cpu_profiler_unimpl.cc"],
     }),
     linkshared = 1,
+    visibility = ["//visibility:private"],
     deps = ["@bazel_tools//tools/jdk:jni"],
 )
