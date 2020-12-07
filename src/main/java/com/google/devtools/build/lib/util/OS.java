@@ -13,15 +13,20 @@
 // limitations under the License.
 package com.google.devtools.build.lib.util;
 
+import java.util.EnumSet;
+
 /**
  * Detects the running operating system and returns a describing enum value.
  */
 public enum OS {
   DARWIN("osx", "Mac OS X"),
   FREEBSD("freebsd", "FreeBSD"),
+  OPENBSD("openbsd", "OpenBSD"),
   LINUX("linux", "Linux"),
   WINDOWS("windows", "Windows"),
   UNKNOWN("unknown", "");
+
+  private static final EnumSet<OS> POSIX_COMPATIBLE = EnumSet.of(DARWIN, FREEBSD, OPENBSD, LINUX);
 
   private final String canonicalName;
   private final String detectionName;
@@ -29,13 +34,6 @@ public enum OS {
   OS(String canonicalName, String detectionName) {
     this.canonicalName = canonicalName;
     this.detectionName = detectionName;
-  }
-
-  /**
-   * The current operating system.
-   */
-  public static OS getCurrent() {
-    return HOST_SYSTEM;
   }
 
   public String getCanonicalName() {
@@ -47,6 +45,23 @@ public enum OS {
     return getCanonicalName();
   }
 
+  private static final OS HOST_SYSTEM = determineCurrentOs();
+
+  /**
+   * The current operating system.
+   */
+  public static OS getCurrent() {
+    return HOST_SYSTEM;
+  }
+
+  public static boolean isPosixCompatible() {
+    return POSIX_COMPATIBLE.contains(getCurrent());
+  }
+
+  public static String getVersion() {
+    return System.getProperty("os.version");
+  }
+
   // We inject a the OS name through blaze.os, so we can have
   // some coverage for Windows specific code on Linux.
   private static OS determineCurrentOs() {
@@ -55,7 +70,7 @@ public enum OS {
       osName = System.getProperty("os.name");
     }
 
-    if (osName == null) { 
+    if (osName == null) {
       return OS.UNKNOWN;
     }
 
@@ -68,6 +83,4 @@ public enum OS {
 
     return OS.UNKNOWN;
   }
-
-  private static final OS HOST_SYSTEM = determineCurrentOs();
 }

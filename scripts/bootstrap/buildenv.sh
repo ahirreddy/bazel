@@ -18,60 +18,200 @@
 
 set -o errexit
 
-DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-WORKSPACE_DIR="$(dirname $(dirname ${DIR}))"
+# Check if all necessary tools are available.
+# List: https://github.com/bazelbuild/bazel/issues/7641#issuecomment-472344261
+for tool in basename cat chmod comm cp dirname find grep ln ls mkdir mktemp \
+            readlink rm sed sort tail touch tr uname unzip which; do
+  if ! hash "$tool" >/dev/null; then
+    echo >&2 "ERROR: cannot find \"$tool\"; check your PATH."
+    echo >&2 "       You may need to run the following command or similar:"
+    echo >&2 "         export PATH=\"/bin:/usr/bin:\$PATH\""
+    exit 1
+  fi
+done
 
-JAVA_VERSION=${JAVA_VERSION:-1.8}
-BAZELRC=${BAZELRC:-"/dev/null"}
-PLATFORM="$(uname -s | tr 'A-Z' 'a-z')"
+# Ensure Python is on the PATH on Windows, otherwise we would see
+# "LAUNCHER ERROR" messages from py_binary exe launchers.
+case "$(uname -s | tr "[:upper:]" "[:lower:]")" in
+msys*|mingw*|cygwin*)
+  # Ensure Python is on the PATH, otherwise the bootstrapping fails later.
+  if ! hash python.exe >/dev/null; then
+    echo >&2 "ERROR: cannot locate python.exe; check your PATH."
+    echo >&2 "       You may need to run the following command, or something"
+    echo >&2 "       similar, depending on where you installed Python:"
+    echo >&2 "         export PATH=\"/c/Python27:\$PATH\""
+    exit 1
+  fi
+  # Ensure TMPDIR uses the user-specified TMPDIR or TMP or TEMP.
+  # This is necessary to avoid overly longs paths during bootstrapping, see for
+  # example https://github.com/bazelbuild/bazel/issues/4536
+  export TMPDIR="${TMPDIR:-${TMP:-${TEMP:-}}}"
+esac
 
-MACHINE_TYPE="$(uname -m)"
-MACHINE_IS_64BIT='no'
-if [ "${MACHINE_TYPE}" = 'amd64' -o "${MACHINE_TYPE}" = 'x86_64' ]; then
-  MACHINE_IS_64BIT='yes'
+# If BAZEL_WRKDIR is set, default all variables to point into
+# that directory
+
+if [ -n "${BAZEL_WRKDIR}" ] ; then
+ mkdir -p "${BAZEL_WRKDIR}/tmp"
+ mkdir -p "${BAZEL_WRKDIR}/user_root"
+ : ${TMPDIR:=${BAZEL_WRKDIR}/tmp}
+ export TMPDIR
+ : ${BAZEL_DIR_STARTUP_OPTIONS:="--output_user_root=${BAZEL_WRKDIR}/user_root"}
 fi
 
-MACHINE_IS_ARM='no'
-if [ "${MACHINE_TYPE}" = 'arm' -o "${MACHINE_TYPE}" = 'armv7l' ]; then
-  MACHINE_IS_ARM='yes'
-fi
 
-ATEXIT_=""
-function atexit() {
-  ATEXIT_="$1; ${ATEXIT_}"
-  trap "{ ${ATEXIT_} }" EXIT
-}
-
-function tempdir() {
-  local tmp=${TMPDIR:-/tmp}
-  local DIR="$(mktemp -d ${tmp%%/}/bazel.XXXXXXXX)"
-  mkdir -p "${DIR}"
-  atexit "rm -fr ${DIR}"
-  NEW_TMPDIR="${DIR}"
-}
-tempdir
-OUTPUT_DIR=${NEW_TMPDIR}
-errfile=${OUTPUT_DIR}/errors
-atexit "if [ -f ${errfile} ]; then cat ${errfile} >&2; fi"
-phasefile=${OUTPUT_DIR}/phase
-atexit "if [ -f ${phasefile} ]; then echo >&2; cat ${phasefile} >&2; fi"
-
-function run_silent() {
-  echo "${@}" >${errfile}
-  # TODO(kchodorow): figure out why this doesn't exit on a non-zero exit code,
-  # even though errexit is set.
-  "${@}" >>${errfile} 2>&1 || exit $?
-  rm ${errfile}
-}
-
+# We define the fail function early so we can use it when detecting the JDK
+# See https://github.com/bazelbuild/bazel/issues/2949,
 function fail() {
   local exitCode=$?
   if [[ "$exitCode" = "0" ]]; then
     exitCode=1
   fi
   echo >&2
-  echo "$1" >&2
+  echo "ERROR: $*" >&2
   exit $exitCode
+}
+
+
+# Set standard variables
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+WORKSPACE_DIR="$(dirname "$(dirname "${DIR}")")"
+
+JAVA_VERSION=${JAVA_VERSION:-1.8}
+BAZELRC=${BAZELRC:-"/dev/null"}
+PLATFORM="$(uname -s | tr 'A-Z' 'a-z')"
+
+PATHSEP=":"
+case "${PLATFORM}" in
+linux)
+  # JAVA_HOME must point to a Java installation.
+  JAVA_HOME="${JAVA_HOME:-$(readlink -f $(which javac) | sed 's_/bin/javac__')}"
+  ;;
+
+freebsd)
+  # JAVA_HOME must point to a Java installation.
+  JAVA_HOME="${JAVA_HOME:-/usr/local/openjdk8}"
+  ;;
+
+openbsd)
+  # JAVA_HOME must point to a Java installation.
+  JAVA_HOME="${JAVA_HOME:-/usr/local/jdk-1.8.0}"
+  ;;
+
+darwin)
+  if [[ -z "$JAVA_HOME" ]]; then
+    JAVA_HOME="$(/usr/libexec/java_home -v ${JAVA_VERSION}+ 2> /dev/null)" \
+      || fail "Could not find JAVA_HOME, please ensure a JDK (version ${JAVA_VERSION}+) is installed."
+  fi
+  ;;
+
+msys*|mingw*|cygwin*)
+  # Use a simplified platform string.
+  PLATFORM="windows"
+  PATHSEP=";"
+  # Find the latest available version of the SDK.
+  JAVA_HOME="${JAVA_HOME:-$(ls -d C:/Program\ Files/Java/jdk* | sort | tail -n 1)}"
+  # Replace backslashes with forward slashes.
+  JAVA_HOME="${JAVA_HOME//\\//}"
+esac
+
+EXE_EXT=""
+if [ "${PLATFORM}" == "windows" ]; then
+  # Extension for executables.
+  EXE_EXT=".exe"
+
+  # Fix TMPDIR on windows
+  default_tmp=${TMP:-$(cygpath -mO)/Temp}
+  TMPDIR=$(cygpath -ml "${TMPDIR:-$default_tmp}")
+fi
+
+# Whether we display build messages or not.  We set this conditionally because
+# the file including us or the user may already have defined VERBOSE to their
+# liking.
+: ${VERBOSE:=yes}
+
+# List of functions to invoke on exit.
+ATEXIT_HANDLERS=
+
+# Registers a function to be invoked on exit.
+#
+# The handlers will be invoked at exit time in the order they were registered.
+# See comments in run_atexit for more details.
+function atexit() {
+  local handler="${1}"; shift
+
+  [ -n "${ATEXIT_HANDLERS}" ] || trap 'run_atexit_handlers $?' EXIT
+  ATEXIT_HANDLERS="${ATEXIT_HANDLERS} ${handler}"
+}
+
+# Exit routine to run all registered atexit handlers.
+#
+# If the program exited with an error, this exit routine will also exit with the
+# same error.  However, if the program exited successfully, this exit routine
+# will only exit successfully if the atexit handlers succeed.
+function run_atexit_handlers() {
+  local exit_code="$?"
+
+  local failed=no
+  for handler in ${ATEXIT_HANDLERS}; do
+    eval "${handler}" || failed=yes
+  done
+
+  trap - EXIT  # Reset exit handler to prevent double execution.
+  if [ ${exit_code} -ne 0 ]; then
+    exit ${exit_code}
+  else
+    if [ "${failed}" = yes ]; then
+      echo "Program tried to exit successfully but atexit routines failed" 1>&2
+      exit 1
+    else
+      exit 0
+    fi
+  fi
+}
+
+function tempdir() {
+  local tmp=${TMPDIR:-/tmp}
+  mkdir -p "${tmp}"
+  local DIR="$(mktemp -d "${tmp%%/}/bazel_XXXXXXXX")"
+  mkdir -p "${DIR}"
+  local DIRBASE=$(basename "${DIR}")
+  eval "cleanup_tempdir_${DIRBASE}() { rm -rf '${DIR}' >&/dev/null || true ; }"
+  atexit cleanup_tempdir_${DIRBASE}
+  NEW_TMPDIR="${DIR}"
+}
+tempdir
+OUTPUT_DIR=${NEW_TMPDIR}
+phasefile=${OUTPUT_DIR}/phase
+function cleanup_phasefile() {
+  if [ -f "${phasefile}" ]; then
+    echo 1>&2;
+    cat "${phasefile}" 1>&2;
+  fi;
+}
+
+atexit cleanup_phasefile
+
+# Excutes a command respecting the current verbosity settings.
+#
+# If VERBOSE is yes, the command itself and its output are printed.
+# If VERBOSE is no, the command's output is only displayed in case of failure.
+#
+# Exits the script if the command fails.
+function run() {
+  if [ "${VERBOSE}" = yes ]; then
+    echo "${@}"
+    "${@}" || exit $?
+  else
+    local errfile="${OUTPUT_DIR}/errors"
+
+    echo "${@}" >"${errfile}"
+    if ! "${@}" >>"${errfile}" 2>&1; then
+      local exitcode=$?
+      cat "${errfile}" 1>&2
+      exit $exitcode
+    fi
+  fi
 }
 
 function display() {
@@ -103,13 +243,43 @@ function new_step() {
   else
     new_line="\n"
   fi
-  display -n "$new_line$LEAVES  $1"
+  if [ -t 2 ]; then
+    display -n "$new_line$LEAVES  $1"
+  else
+    display -n "$new_line$1"
+  fi
 }
 
 function git_sha1() {
-  if [ -x "$(which git || true)" ] && [ -d .git ]; then
+  if [ -x "$(which git 2>/dev/null)" ] && [ -d .git ]; then
     git rev-parse --short HEAD 2>/dev/null || true
   fi
+}
+
+function git_date() {
+  if [ -x "$(which git 2>/dev/null)" ] && [ -d .git ]; then
+    git log -1 --pretty=%ai | cut -d " " -f 1 || true
+  fi
+}
+
+# Get the latest release version and append the date of
+# the last commit if any.
+function get_last_version() {
+  if [ -f "CHANGELOG.md" ]; then
+    local version="$(fgrep -m 1 '## Release' CHANGELOG.md \
+                       | sed -E 's|.*Release (.*) \(.*\)|\1|')"
+  else
+    local version=""
+  fi
+
+  local date="$(git_date)"
+  if [ -z "${version-}" ]; then
+    version="unknown"
+  fi
+  if [ -n "${date-}" ]; then
+    date="$(date +%Y-%m-%d)"
+  fi
+  echo "${version}-${date}"
 }
 
 if [[ ${PLATFORM} == "darwin" ]]; then
@@ -132,15 +302,76 @@ function get_java_version() {
     || fail "JAVA_HOME ($JAVA_HOME) is not a path to a working JDK."
 
   JAVAC_VERSION=$("${JAVAC}" -version 2>&1)
-  if [[ "$JAVAC_VERSION" =~ ^"javac "(1\.([789]|[1-9][0-9])).*$ ]]; then
-    JAVAC_VERSION=${BASH_REMATCH[1]}
+  if [[ "$JAVAC_VERSION" =~ javac\ ((1\.)?([789]|[1-9][0-9])).*$ ]]; then
+    JAVAC_VERSION=1.${BASH_REMATCH[3]}
   else
-    fail "Cannot determine JDK version, please set \$JAVA_HOME."
+    fail \
+      "Cannot determine JDK version, please set \$JAVA_HOME.\n" \
+      "\$JAVAC_VERSION is \"${JAVAC_VERSION}\""
   fi
 }
 
 # Return the target that a bind point to, using Bazel query.
 function get_bind_target() {
-  $BAZEL --bazelrc=${BAZELRC} --nomaster_bazelrc \
+  $BAZEL --bazelrc=${BAZELRC} --nomaster_bazelrc ${BAZEL_DIR_STARTUP_OPTIONS} \
     query "deps($1, 1) - $1"
+}
+
+# Create a link for a directory on the filesystem
+function link_dir() {
+  local source=$1
+  local dest=$2
+
+  if [[ "${PLATFORM}" == "windows" ]]; then
+    local -r s="$(cygpath -w "$source")"
+    local -r d="$(cygpath -w "$dest")"
+    powershell -command "New-Item -ItemType Junction -Path '$d' -Value '$s'"
+  else
+    ln -s "${source}" "${dest}"
+  fi
+}
+
+function link_file() {
+  local source=$1
+  local dest=$2
+
+  if [[ "${PLATFORM}" == "windows" ]]; then
+    # Attempt creating a symlink to the file. This is supported without
+    # elevation (Administrator privileges) on Windows 10 version 1709 when
+    # Developer Mode is enabled.
+    local -r s="$(cygpath -w "$source")"
+    local -r d="$(cygpath -w "$dest")"
+    if ! powershell -command "New-Item -ItemType SymbolicLink -Path '$d' -Value '$s'"; then
+      # If the previous call failed to create a symlink, just copy the file.
+      cp "$source" "$dest"
+    fi
+  else
+    ln -s "${source}" "${dest}"
+  fi
+}
+
+# Link direct children (subdirectories and files) of a directory.
+# Usage:
+#   link_children "$PWD" "tools" "${BAZEL_TOOLS_REPO}"
+# This creates:
+#   ${BAZEL_TOOLS_REPO}/tools/android -> $PWD/tools/android
+#   ${BAZEL_TOOLS_REPO}/tools/bash -> $PWD/tools/bash
+#   ... and so on for all files and directories directly under "tools".
+function link_children() {
+  local -r source_dir=${1%/}
+  local -r source_subdir=${2%/}
+  local -r dest_dir=${3%/}
+
+  for e in $(find "${source_dir}/${source_subdir}" -mindepth 1 -maxdepth 1 -type d); do
+    local dest_path="${dest_dir}/${e#$source_dir/}"
+    if [[ ! -d "$dest_path" ]]; then
+      link_dir "$e" "$dest_path"
+    fi
+  done
+  for e in $(find "${source_dir}/${source_subdir}" -mindepth 1 -maxdepth 1 -type f); do
+    local dest_path="${dest_dir}/${e#$source_dir/}"
+    if [[ ! -f "$dest_path" ]]; then
+      link_file "$e" "$dest_path"
+    fi
+  done
 }

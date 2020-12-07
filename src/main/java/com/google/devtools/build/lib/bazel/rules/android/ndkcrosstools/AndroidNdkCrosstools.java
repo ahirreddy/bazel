@@ -1,4 +1,4 @@
-// Copyright 2015 The Bazel Authors. All rights reserved.
+// Copyright 2016 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,26 +14,49 @@
 
 package com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.EventHandler;
+import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.NdkMajorRevisionR10;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r11.NdkMajorRevisionR11;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r12.NdkMajorRevisionR12;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r13.NdkMajorRevisionR13;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r15.NdkMajorRevisionR15;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r17.NdkMajorRevisionR17;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r18.NdkMajorRevisionR18;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r19.NdkMajorRevisionR19;
 import com.google.devtools.build.lib.util.OS;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CrosstoolRelease;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.DefaultCpuToolchain;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map.Entry;
+import java.util.Map;
 
 /**
- * Generates a CrosstoolRelease proto for the Android NDK.
+ * Helper methods for generating a CrosstoolRelease proto for the Android NDK based on a particular
+ * NDK release.
  */
-public class AndroidNdkCrosstools {
+public final class AndroidNdkCrosstools {
+  private AndroidNdkCrosstools() {}
 
-  // TODO(bazel-team): Support future versions of the NDK.
-  private static final String KNOWN_NDK_REVISION = "r10e";
+  // NDK minor revisions should be backwards compatible within a major revision, so all that needs
+  // to be tracked here are the major revision numbers.
+  public static final ImmutableMap<Integer, NdkMajorRevision> KNOWN_NDK_MAJOR_REVISIONS =
+      new ImmutableMap.Builder<Integer, NdkMajorRevision>()
+          .put(10, new NdkMajorRevisionR10())
+          .put(11, new NdkMajorRevisionR11())
+          .put(12, new NdkMajorRevisionR12())
+          .put(13, new NdkMajorRevisionR13("3.8.256229"))
+          // The only difference between the NDK13 and NDK14 CROSSTOOLs is the version of clang in
+          // built-in includes paths, so we can reuse everything else.
+          .put(14, new NdkMajorRevisionR13("3.8.275480"))
+          .put(15, new NdkMajorRevisionR15("5.0.300080"))
+          // The only difference between r15 and r16 is that old headers are removed, forcing
+          // usage of the unified headers. Support for unified headers were added in r15.
+          .put(16, new NdkMajorRevisionR15("5.0.300080")) // no changes relevant to Bazel
+          .put(17, new NdkMajorRevisionR17("6.0.2"))
+          .put(18, new NdkMajorRevisionR18("7.0.2"))
+          .put(19, new NdkMajorRevisionR19("8.0.2"))
+          .put(20, new NdkMajorRevisionR19("8.0.7")) // no changes relevant to Bazel
+          .build();
+
+  public static final Map.Entry<Integer, NdkMajorRevision> LATEST_KNOWN_REVISION =
+      Iterables.getLast(KNOWN_NDK_MAJOR_REVISIONS.entrySet());
 
   /**
    * Exception thrown when there is an error creating the crosstools file.
@@ -42,122 +65,6 @@ public class AndroidNdkCrosstools {
     private NdkCrosstoolsException(String msg) {
       super(msg);
     }
-  }
-
-  private AndroidNdkCrosstools() {}
-
-  /**
-   * Creates a CrosstoolRelease proto for the Android NDK, given the API level to use and the
-   * release revision. The crosstools are generated through code rather than checked in as a flat
-   * file to reduce the amount of templating needed (for parameters like the release name and
-   * certain paths), to reduce duplication, and to make it easier to support future versions of the
-   * NDK. TODO(bazel-team): Eventually we should move this into Skylark so the crosstools can be
-   * updated independently of Bazel itself.
-   *
-   * @param eventHandler The event handler for sending warning messages.
-   * @param repositoryName The name of the repository, which should correspond to the name of the
-   *        android_ndk_repository rule. 
-   * @param apiLevel The API level used for the NDK.
-   * @param ndkRelease The NDK release
-   * @return A CrosstoolRelease for the Android NDK.
-   * @throws NdkCrosstoolsException If the crosstool could not be created.
-   */
-  public static CrosstoolRelease create(
-      EventHandler eventHandler,
-      NdkPaths ndkPaths,
-      String repositoryName,
-      ApiLevel apiLevel,
-      NdkRelease ndkRelease,
-      StlImpl stlImpl,
-      String hostPlatform) throws NdkCrosstoolsException {
-
-    // Check that the Android NDK revision is both valid and one we know about. 
-    if (!ndkRelease.isValid) {
-
-      // Try using the NDK revision we know about.
-      ndkRelease = NdkRelease.guessBitness(KNOWN_NDK_REVISION);
-
-      eventHandler.handle(Event.warn(String.format(
-          "The revision of the Andorid NDK given in android_ndk_repository rule '%s' could not be "
-          + "determined (the revision string found is '%s'). "
-          + "Defaulting to Android NDK revision %s", repositoryName, ndkRelease.rawRelease,
-          ndkRelease)));
-
-    } else if (!KNOWN_NDK_REVISION.equals(ndkRelease.release)) {
-      eventHandler.handle(Event.warn(String.format(
-          "Bazel Android NDK crosstools are based on Android NDK revision %s. "
-          + "The revision of the Android NDK given in android_ndk_repository rule '%s' is '%s'",
-          KNOWN_NDK_REVISION, repositoryName, ndkRelease.release)));
-    }
-
-    CrosstoolRelease crosstoolRelease = CrosstoolRelease.newBuilder()
-        .setMajorVersion("android")
-        .setMinorVersion("")
-        .setDefaultTargetCpu("armeabi")
-        .addAllDefaultToolchain(getDefaultCpuToolchains(stlImpl))
-        .addAllToolchain(createToolchains(ndkPaths, stlImpl, hostPlatform))
-        .build();
-
-    return crosstoolRelease;
-  }
-
-  private static ImmutableList<CToolchain> createToolchains(
-      NdkPaths ndkPaths, StlImpl stlImpl, String hostPlatform) {
-
-    List<CToolchain.Builder> toolchainBuilders = new ArrayList<>();
-    toolchainBuilders.addAll(new ArmCrosstools(ndkPaths, stlImpl).createCrosstools());
-    toolchainBuilders.addAll(new MipsCrosstools(ndkPaths, stlImpl).createCrosstools());
-    toolchainBuilders.addAll(new X86Crosstools(ndkPaths, stlImpl).createCrosstools());
-
-    ImmutableList.Builder<CToolchain> toolchains = new ImmutableList.Builder<>();
-
-    // Set attributes common to all toolchains.
-    for (CToolchain.Builder toolchainBuilder : toolchainBuilders) {
-      toolchainBuilder
-          .setHostSystemName(hostPlatform)
-          .setTargetLibc("local")
-          .setAbiVersion(toolchainBuilder.getTargetCpu())
-          .setAbiLibcVersion("local");
-
-      // builtin_sysroot is set individually on each toolchain.
-      toolchainBuilder.addCxxBuiltinIncludeDirectory("%sysroot%/usr/include");
-
-      toolchains.add(toolchainBuilder.build());
-    }
-
-    return toolchains.build();
-  }
-
-  private static ImmutableList<DefaultCpuToolchain> getDefaultCpuToolchains(StlImpl stlImpl) {
-    // TODO(bazel-team): It would be better to auto-generate this somehow.
-
-    ImmutableMap<String, String> defaultCpus = ImmutableMap.<String, String>builder()
-        // arm
-        .put("armeabi",                "arm-linux-androideabi-4.9")
-        .put("armeabi-v7a",            "arm-linux-androideabi-4.9-v7a")
-        .put("armeabi-v7a-hard",       "arm-linux-androideabi-4.9-v7a-hard")
-        .put("armeabi-thumb",          "arm-linux-androideabi-4.9-thumb")
-        .put("armeabi-v7a-thumb",      "arm-linux-androideabi-4.9-v7a-thumb")
-        .put("armeabi-v7a-hard-thumb", "arm-linux-androideabi-4.9-v7a-hard-thumb")
-        .put("arm64-v8a",              "aarch64-linux-android-4.9")
-
-        // mips
-        .put("mips",                   "mipsel-linux-android-4.9")
-        .put("mips64",                 "mips64el-linux-android-4.9")
-
-        // x86
-        .put("x86",                    "x86-4.9")
-        .put("x86_64",                 "x86_64-4.9")
-        .build();
-
-    ImmutableList.Builder<DefaultCpuToolchain> defaultCpuToolchains = ImmutableList.builder();
-    for (Entry<String, String> defaultCpu : defaultCpus.entrySet()) {
-      defaultCpuToolchains.add(DefaultCpuToolchain.newBuilder()
-          .setCpu(defaultCpu.getKey())
-          .setToolchainIdentifier(defaultCpu.getValue() + "-" + stlImpl.getName())
-          .build());
-    }
-    return defaultCpuToolchains.build();
   }
 
   public static String getHostPlatform(NdkRelease ndkRelease) throws NdkCrosstoolsException {
@@ -188,5 +95,9 @@ public class AndroidNdkCrosstools {
     String hostArch = ndkRelease.is64Bit ? "x86_64" : "x86";
 
     return hostOs + "-" + hostArch;
+  }
+
+  public static boolean isKnownNDKRevision(NdkRelease ndkRelease) {
+    return KNOWN_NDK_MAJOR_REVISIONS.containsKey(ndkRelease.majorRevision);
   }
 }

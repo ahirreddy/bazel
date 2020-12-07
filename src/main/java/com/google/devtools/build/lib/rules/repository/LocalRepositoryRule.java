@@ -15,12 +15,11 @@
 package com.google.devtools.build.lib.rules.repository;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING;
 
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 
 /**
@@ -31,13 +30,13 @@ public class LocalRepositoryRule implements RuleDefinition {
   public static final String NAME = "local_repository";
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment environment) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
         /* <!-- #BLAZE_RULE(local_repository).ATTRIBUTE(path) -->
         The path to the local repository's directory.
-        ${SYNOPSIS}
 
-        <p>This must be an absolute path to the directory containing the repository's
+        <p>This must be a path to the directory containing the repository's
+        <i>WORKSPACE</i> file. The path can be either absolute or relative to the main repository's
         <i>WORKSPACE</i> file.</p>
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr("path", STRING).mandatory())
@@ -55,15 +54,25 @@ public class LocalRepositoryRule implements RuleDefinition {
         .build();
   }
 }
+/*<!-- #FAMILY_SUMMARY -->
+
+<p>
+Workspace rules are used to pull in <a href="../external.html">external dependencies</a>, typically
+source code located outside the main repository.
+</p>
+
+<p><em>Note:</em> besides the native workspace rules, Bazel also embeds various
+<a href="../repo/index.html">Starlark workspace rules</a>, in particular those to deal
+with git repositories or archives hosted on the web.
+</p>
+
+<!-- #END_FAMILY_SUMMARY -->*/
+
 /*<!-- #BLAZE_RULE (NAME = local_repository, TYPE = OTHER, FAMILY = Workspace)[GENERIC_RULE] -->
 
-${ATTRIBUTE_SIGNATURE}
-
 <p>Allows targets from a local directory to be bound. This means that the current repository can
-  use targets defined in this other directory. See the <a href="#bind_examples">bind section</a>
-  for more details.</p>
-
-${ATTRIBUTE_DEFINITION}
+  use targets defined in this other directory. See the <a href="${link bind_examples}">bind
+  section</a> for more details.</p>
 
 <h4 id="local_repository_examples">Examples</h4>
 

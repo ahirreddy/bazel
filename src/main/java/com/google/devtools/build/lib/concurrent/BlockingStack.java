@@ -22,11 +22,11 @@ import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 
 /** A {@link BlockingQueue} with LIFO (last-in-first-out) ordering. */
-class BlockingStack<E> extends AbstractQueue<E> implements BlockingQueue<E> {
+public class BlockingStack<E> extends AbstractQueue<E> implements BlockingQueue<E> {
   // We just restrict to only using the *First methods on the deque, turning it into a stack.
   private final BlockingDeque<E> deque;
 
-  BlockingStack() {
+  public BlockingStack() {
     this.deque = new LinkedBlockingDeque<>();
   }
 
@@ -51,6 +51,11 @@ class BlockingStack<E> extends AbstractQueue<E> implements BlockingQueue<E> {
   }
 
   @Override
+  public boolean offer(E e) {
+    return deque.offerFirst(e);
+  }
+
+  @Override
   public E take() throws InterruptedException {
     return deque.takeFirst();
   }
@@ -58,6 +63,11 @@ class BlockingStack<E> extends AbstractQueue<E> implements BlockingQueue<E> {
   @Override
   public E poll(long timeout, TimeUnit unit) throws InterruptedException {
     return deque.pollFirst(timeout, unit);
+  }
+
+  @Override
+  public E poll() {
+    return deque.pollFirst();
   }
 
   @Override
@@ -73,16 +83,6 @@ class BlockingStack<E> extends AbstractQueue<E> implements BlockingQueue<E> {
   @Override
   public int drainTo(Collection<? super E> c, int maxElements) {
     return deque.drainTo(c, maxElements);
-  }
-
-  @Override
-  public boolean offer(E e) {
-    return deque.offerFirst(e);
-  }
-
-  @Override
-  public E poll() {
-    return deque.pollFirst();
   }
 
   @Override

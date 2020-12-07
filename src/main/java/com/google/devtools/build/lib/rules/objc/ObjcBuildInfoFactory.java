@@ -19,11 +19,17 @@ import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoCollection;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoKey;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 
 /**
  * Objc build info creation - passes on BuildInfo output file for consumption from Objc rules.
+ *
+ * @deprecated The native bundling rules have been deprecated. This class will be removed in the
+ *     future.
  */
+@Deprecated
 public class ObjcBuildInfoFactory implements BuildInfoFactory {
 
   public static final BuildInfoKey KEY = new BuildInfoKey("ObjC");
@@ -33,7 +39,7 @@ public class ObjcBuildInfoFactory implements BuildInfoFactory {
    */
   @Override
   public BuildInfoCollection create(BuildInfoContext context, BuildConfiguration config,
-      Artifact buildInfo, Artifact buildChangelist) {
+      Artifact buildInfo, Artifact buildChangelist, RepositoryName repositoryName) {
     return new BuildInfoCollection(
         ImmutableList.<Action>of(),
         ImmutableList.of(buildInfo),

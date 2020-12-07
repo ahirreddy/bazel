@@ -14,12 +14,15 @@
 
 #include "src/main/native/unix_jni.h"
 
-#include <string.h>
+#include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 
 #include <string>
+
+namespace blaze_jni {
 
 std::string ErrorMessage(int error_number) {
   char buf[1024] = "";
@@ -27,8 +30,16 @@ std::string ErrorMessage(int error_number) {
   // In its infinite wisdom, GNU libc defines strerror_r with extended
   // functionality which is not compatible with not the
   // SUSv3-conformant one which returns an error code; see DESCRIPTION
-  // at strerror(1).
+// at strerror(3).
+#if !__GLIBC__ || (_POSIX_C_SOURCE >= 200112L && !_GNU_SOURCE)
+  if (strerror_r(error_number, buf, sizeof buf) == -1) {
+    return std::string("");
+  } else {
+    return std::string(buf);
+  }
+#else
   return std::string(strerror_r(error_number, buf, sizeof buf));
+#endif
 }
 
 int portable_fstatat(
@@ -65,11 +76,49 @@ int StatNanoSeconds(const portable_stat_struct &statbuf, StatTimes t) {
 }
 
 ssize_t portable_getxattr(const char *path, const char *name, void *value,
-                          size_t size) {
-  return ::getxattr(path, name, value, size);
+                          size_t size, bool *attr_not_found) {
+  ssize_t result = ::getxattr(path, name, value, size);
+  *attr_not_found = (errno == ENODATA);
+  return result;
 }
 
 ssize_t portable_lgetxattr(const char *path, const char *name, void *value,
-                           size_t size) {
-  return ::lgetxattr(path, name, value, size);
+                           size_t size, bool *attr_not_found) {
+  ssize_t result = ::lgetxattr(path, name, value, size);
+  *attr_not_found = (errno == ENODATA);
+  return result;
 }
+
+int portable_sysctlbyname(const char *name_chars, long *mibp, size_t *sizep) {
+  errno = ENOSYS;
+  return -1;
+}
+
+int portable_push_disable_sleep() {
+  // Currently not supported.
+  return -1;
+}
+
+int portable_pop_disable_sleep() {
+  // Currently not supported.
+  return -1;
+}
+
+int portable_suspend_count() {
+  // Currently not implemented.
+  return 0;
+}
+
+int portable_memory_pressure_warning_count() {
+  // Currently not implemented.
+  // https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
+  return 0;
+}
+
+int portable_memory_pressure_critical_count() {
+  // Currently not implemented.
+  // https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
+  return 0;
+}
+
+}  // namespace blaze_jni

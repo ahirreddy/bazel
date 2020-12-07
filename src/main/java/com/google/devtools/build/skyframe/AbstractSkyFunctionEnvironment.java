@@ -14,16 +14,14 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.skyframe.ValueOrExceptionUtils.BottomException;
-
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.devtools.build.lib.util.GroupedList;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
-
 import javax.annotation.Nullable;
 
 /**
@@ -33,219 +31,292 @@ import javax.annotation.Nullable;
 @VisibleForTesting
 public abstract class AbstractSkyFunctionEnvironment implements SkyFunction.Environment {
   protected boolean valuesMissing = false;
-  private <E extends Exception> ValueOrException<E> getValueOrException(SkyKey depKey,
-      Class<E> exceptionClass) {
-    return ValueOrExceptionUtils.downconvert(
-        getValueOrException(depKey, exceptionClass, BottomException.class), exceptionClass);
+  // Hack for the common case that there are no errors in the retrieved values. In that case, we
+  // don't have to filter out any impermissible exceptions. Hack because we communicate this in an
+  // out-of-band way from #getValueOrUntypedExceptions. It's out-of-band because we don't want to
+  // incur the garbage overhead of returning a more complex data structure from
+  // #getValueOrUntypedExceptions.
+  protected boolean errorMightHaveBeenFound = false;
+  @Nullable private final GroupedList<SkyKey> temporaryDirectDeps;
+  @Nullable protected List<ListenableFuture<?>> externalDeps;
+
+  public AbstractSkyFunctionEnvironment(@Nullable GroupedList<SkyKey> temporaryDirectDeps) {
+    this.temporaryDirectDeps = temporaryDirectDeps;
   }
 
-  private <E1 extends Exception, E2 extends Exception> ValueOrException2<E1, E2>
-  getValueOrException(SkyKey depKey, Class<E1> exceptionClass1, Class<E2> exceptionClass2) {
-    return ValueOrExceptionUtils.downconvert(getValueOrException(depKey, exceptionClass1,
-        exceptionClass2, BottomException.class), exceptionClass1, exceptionClass2);
+  public AbstractSkyFunctionEnvironment() {
+    this(null);
   }
 
-  private <E1 extends Exception, E2 extends Exception, E3 extends Exception>
-  ValueOrException3<E1, E2, E3> getValueOrException(SkyKey depKey, Class<E1> exceptionClass1,
-      Class<E2> exceptionClass2, Class<E3> exceptionClass3) {
-    return ValueOrExceptionUtils.downconvert(getValueOrException(depKey, exceptionClass1,
-            exceptionClass2, exceptionClass3, BottomException.class), exceptionClass1,
-        exceptionClass2, exceptionClass3);
-  }
-
-  private <E1 extends Exception, E2 extends Exception, E3 extends Exception,
-      E4 extends Exception> ValueOrException4<E1, E2, E3, E4> getValueOrException(SkyKey depKey,
-      Class<E1> exceptionClass1, Class<E2> exceptionClass2, Class<E3> exceptionClass3,
-      Class<E4> exceptionClass4) {
-    return getValueOrExceptions(ImmutableSet.of(depKey), exceptionClass1, exceptionClass2,
-        exceptionClass3, exceptionClass4).get(depKey);
-  }
-
-  private <E1 extends Exception, E2 extends Exception, E3 extends Exception,
-      E4 extends Exception> Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> getValueOrExceptions(
-      Set<SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2,
-      Class<E3> exceptionClass3, Class<E4> exceptionClass4) {
-    SkyFunctionException.validateExceptionType(exceptionClass1);
-    SkyFunctionException.validateExceptionType(exceptionClass2);
-    SkyFunctionException.validateExceptionType(exceptionClass3);
-    SkyFunctionException.validateExceptionType(exceptionClass4);
-    Map<SkyKey, ValueOrUntypedException> valueOrExceptions =
-        getValueOrUntypedExceptions(depKeys);
-    ImmutableMap.Builder<SkyKey, ValueOrException4<E1, E2, E3, E4>> builder =
-        ImmutableMap.builder();
-    for (SkyKey depKey : depKeys) {
-      ValueOrUntypedException voe = valueOrExceptions.get(depKey);
-      SkyValue value = voe.getValue();
-      if (value != null) {
-        builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofValue(value));
-        continue;
-      }
-      Exception e = voe.getException();
-      if (e != null) {
-        if (exceptionClass1.isInstance(e)) {
-          builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofExn1(
-              exceptionClass1.cast(e)));
-          continue;
-        }
-        if (exceptionClass2.isInstance(e)) {
-          builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofExn2(
-              exceptionClass2.cast(e)));
-          continue;
-        }
-        if (exceptionClass3.isInstance(e)) {
-          builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofExn3(
-              exceptionClass3.cast(e)));
-          continue;
-        }
-        if (exceptionClass4.isInstance(e)) {
-          builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofExn4(
-              exceptionClass4.cast(e)));
-          continue;
-        }
-      }
-      valuesMissing = true;
-      builder.put(depKey, ValueOrExceptionUtils.<E1, E2, E3, E4>ofNullValue());
-    }
-    return builder.build();
+  @Override
+  public GroupedList<SkyKey> getTemporaryDirectDeps() {
+    return temporaryDirectDeps;
   }
 
   /** Implementations should set {@link #valuesMissing} as necessary. */
   protected abstract Map<SkyKey, ValueOrUntypedException> getValueOrUntypedExceptions(
-      Set<SkyKey> depKeys);
+      Iterable<? extends SkyKey> depKeys) throws InterruptedException;
 
   @Override
   @Nullable
-  public SkyValue getValue(SkyKey depKey) {
-    try {
-      return getValueOrThrow(depKey, BottomException.class);
-    } catch (BottomException e) {
-      throw new IllegalStateException("shouldn't reach here");
-    }
+  public SkyValue getValue(SkyKey depKey) throws InterruptedException {
+    return getValues(ImmutableSet.of(depKey)).get(depKey);
   }
 
   @Override
   @Nullable
   public <E extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E> exceptionClass)
-      throws E {
-    return getValueOrException(depKey, exceptionClass).get();
+      throws E, InterruptedException {
+    return getValuesOrThrow(ImmutableSet.of(depKey), exceptionClass).get(depKey).get();
   }
 
   @Override
   @Nullable
-  public <E1 extends Exception, E2 extends Exception> SkyValue getValueOrThrow(SkyKey depKey,
-      Class<E1> exceptionClass1, Class<E2> exceptionClass2) throws E1, E2 {
-    return getValueOrException(depKey, exceptionClass1, exceptionClass2).get();
+  public <E1 extends Exception, E2 extends Exception> SkyValue getValueOrThrow(
+      SkyKey depKey, Class<E1> exceptionClass1, Class<E2> exceptionClass2)
+      throws E1, E2, InterruptedException {
+    return getValuesOrThrow(ImmutableSet.of(depKey), exceptionClass1, exceptionClass2)
+        .get(depKey)
+        .get();
   }
 
   @Override
   @Nullable
-  public <E1 extends Exception, E2 extends Exception,
-      E3 extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E1> exceptionClass1,
-      Class<E2> exceptionClass2, Class<E3> exceptionClass3) throws E1, E2, E3 {
-    return getValueOrException(depKey, exceptionClass1, exceptionClass2, exceptionClass3).get();
+  public <E1 extends Exception, E2 extends Exception, E3 extends Exception>
+      SkyValue getValueOrThrow(
+          SkyKey depKey,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3)
+          throws E1, E2, E3, InterruptedException {
+    return getValuesOrThrow(
+            ImmutableSet.of(depKey), exceptionClass1, exceptionClass2, exceptionClass3)
+        .get(depKey)
+        .get();
   }
 
   @Override
-  public <E1 extends Exception, E2 extends Exception, E3 extends Exception,
-      E4 extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E1> exceptionClass1,
-      Class<E2> exceptionClass2, Class<E3> exceptionClass3, Class<E4> exceptionClass4) throws E1,
-      E2, E3, E4 {
-    return getValueOrException(depKey, exceptionClass1, exceptionClass2, exceptionClass3,
-        exceptionClass4).get();
+  public <E1 extends Exception, E2 extends Exception, E3 extends Exception, E4 extends Exception>
+      SkyValue getValueOrThrow(
+          SkyKey depKey,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3,
+          Class<E4> exceptionClass4)
+          throws E1, E2, E3, E4, InterruptedException {
+    return getValuesOrThrow(
+            ImmutableSet.of(depKey),
+            exceptionClass1,
+            exceptionClass2,
+            exceptionClass3,
+            exceptionClass4)
+        .get(depKey)
+        .get();
   }
 
   @Override
-  public Map<SkyKey, SkyValue> getValues(Iterable<SkyKey> depKeys) {
-    return Maps.transformValues(getValuesOrThrow(depKeys, BottomException.class),
-        GET_VALUE_FROM_VOE);
+  public <
+          E1 extends Exception,
+          E2 extends Exception,
+          E3 extends Exception,
+          E4 extends Exception,
+          E5 extends Exception>
+      SkyValue getValueOrThrow(
+          SkyKey depKey,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3,
+          Class<E4> exceptionClass4,
+          Class<E5> exceptionClass5)
+          throws E1, E2, E3, E4, E5, InterruptedException {
+    return getValuesOrThrow(
+            ImmutableSet.of(depKey),
+            exceptionClass1,
+            exceptionClass2,
+            exceptionClass3,
+            exceptionClass4,
+            exceptionClass5)
+        .get(depKey)
+        .get();
+  }
+
+  @Override
+  public Map<SkyKey, SkyValue> getValues(Iterable<? extends SkyKey> depKeys)
+      throws InterruptedException {
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(valuesOrExceptions, null, null, null, null, null);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(valuesOrExceptions, ValueOrUntypedException::getValue));
   }
 
   @Override
   public <E extends Exception> Map<SkyKey, ValueOrException<E>> getValuesOrThrow(
-      Iterable<SkyKey> depKeys, Class<E> exceptionClass) {
-    return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass, BottomException.class),
-        makeSafeDowncastToVOEFunction(exceptionClass));
+      Iterable<? extends SkyKey> depKeys, Class<E> exceptionClass) throws InterruptedException {
+    SkyFunctionException.validateExceptionType(exceptionClass);
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(
+        valuesOrExceptions, exceptionClass, null, null, null, null);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(
+            valuesOrExceptions, voe -> ValueOrException.fromUntypedException(voe, exceptionClass)));
   }
 
   @Override
-  public <E1 extends Exception,
-      E2 extends Exception> Map<SkyKey, ValueOrException2<E1, E2>> getValuesOrThrow(
-      Iterable<SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2) {
-    return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass1, exceptionClass2,
-        BottomException.class), makeSafeDowncastToVOE2Function(exceptionClass1,
-        exceptionClass2));
+  public <E1 extends Exception, E2 extends Exception>
+      Map<SkyKey, ValueOrException2<E1, E2>> getValuesOrThrow(
+          Iterable<? extends SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2)
+              throws InterruptedException {
+    SkyFunctionException.validateExceptionType(exceptionClass1);
+    SkyFunctionException.validateExceptionType(exceptionClass2);
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(
+        valuesOrExceptions, exceptionClass1, exceptionClass2, null, null, null);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(
+            valuesOrExceptions,
+            voe -> ValueOrException2.fromUntypedException(voe, exceptionClass1, exceptionClass2)));
   }
 
   @Override
-  public <E1 extends Exception, E2 extends Exception, E3 extends Exception> Map<SkyKey,
-      ValueOrException3<E1, E2, E3>> getValuesOrThrow(Iterable<SkyKey> depKeys,
-      Class<E1> exceptionClass1, Class<E2> exceptionClass2, Class<E3> exceptionClass3) {
-    return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass1, exceptionClass2,
-        exceptionClass3, BottomException.class), makeSafeDowncastToVOE3Function(exceptionClass1,
-        exceptionClass2, exceptionClass3));
+  public <E1 extends Exception, E2 extends Exception, E3 extends Exception>
+      Map<SkyKey, ValueOrException3<E1, E2, E3>> getValuesOrThrow(
+          Iterable<? extends SkyKey> depKeys,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3)
+              throws InterruptedException {
+    SkyFunctionException.validateExceptionType(exceptionClass1);
+    SkyFunctionException.validateExceptionType(exceptionClass2);
+    SkyFunctionException.validateExceptionType(exceptionClass3);
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(
+        valuesOrExceptions, exceptionClass1, exceptionClass2, exceptionClass3, null, null);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(
+            valuesOrExceptions,
+            voe ->
+                ValueOrException3.fromUntypedException(
+                    voe, exceptionClass1, exceptionClass2, exceptionClass3)));
   }
 
   @Override
-  public <E1 extends Exception, E2 extends Exception, E3 extends Exception,
-      E4 extends Exception> Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> getValuesOrThrow(
-      Iterable<SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2,
-      Class<E3> exceptionClass3, Class<E4> exceptionClass4) {
-    Set<SkyKey> keys = ImmutableSet.copyOf(depKeys);
-    Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> result = getValueOrExceptions(keys,
-        exceptionClass1, exceptionClass2, exceptionClass3, exceptionClass4);
-    return Collections.unmodifiableMap(result);
+  public <E1 extends Exception, E2 extends Exception, E3 extends Exception, E4 extends Exception>
+      Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> getValuesOrThrow(
+          Iterable<? extends SkyKey> depKeys,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3,
+          Class<E4> exceptionClass4)
+           throws InterruptedException {
+    SkyFunctionException.validateExceptionType(exceptionClass1);
+    SkyFunctionException.validateExceptionType(exceptionClass2);
+    SkyFunctionException.validateExceptionType(exceptionClass3);
+    SkyFunctionException.validateExceptionType(exceptionClass4);
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(
+        valuesOrExceptions,
+        exceptionClass1,
+        exceptionClass2,
+        exceptionClass3,
+        exceptionClass4,
+        null);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(
+            valuesOrExceptions,
+            voe ->
+                ValueOrException4.fromUntypedException(
+                    voe, exceptionClass1, exceptionClass2, exceptionClass3, exceptionClass4)));
   }
 
+  @Override
+  public <
+          E1 extends Exception,
+          E2 extends Exception,
+          E3 extends Exception,
+          E4 extends Exception,
+          E5 extends Exception>
+      Map<SkyKey, ValueOrException5<E1, E2, E3, E4, E5>> getValuesOrThrow(
+          Iterable<? extends SkyKey> depKeys,
+          Class<E1> exceptionClass1,
+          Class<E2> exceptionClass2,
+          Class<E3> exceptionClass3,
+          Class<E4> exceptionClass4,
+          Class<E5> exceptionClass5)
+              throws InterruptedException {
+    SkyFunctionException.validateExceptionType(exceptionClass1);
+    SkyFunctionException.validateExceptionType(exceptionClass2);
+    SkyFunctionException.validateExceptionType(exceptionClass3);
+    SkyFunctionException.validateExceptionType(exceptionClass4);
+    SkyFunctionException.validateExceptionType(exceptionClass5);
+    Map<SkyKey, ValueOrUntypedException> valuesOrExceptions = getValueOrUntypedExceptions(depKeys);
+    checkValuesMissingBecauseOfFilteredError(
+        valuesOrExceptions,
+        exceptionClass1,
+        exceptionClass2,
+        exceptionClass3,
+        exceptionClass4,
+        exceptionClass5);
+    return Collections.unmodifiableMap(
+        Maps.transformValues(
+            valuesOrExceptions,
+            voe ->
+                ValueOrException5.fromUntypedException(
+                    voe,
+                    exceptionClass1,
+                    exceptionClass2,
+                    exceptionClass3,
+                    exceptionClass4,
+                    exceptionClass5)));
+  }
+
+  private <
+          E1 extends Exception,
+          E2 extends Exception,
+          E3 extends Exception,
+          E4 extends Exception,
+          E5 extends Exception>
+      void checkValuesMissingBecauseOfFilteredError(
+          Map<SkyKey, ValueOrUntypedException> voes,
+          @Nullable Class<E1> exceptionClass1,
+          @Nullable Class<E2> exceptionClass2,
+          @Nullable Class<E3> exceptionClass3,
+          @Nullable Class<E4> exceptionClass4,
+          @Nullable Class<E5> exceptionClass5) {
+    if (!errorMightHaveBeenFound) {
+      // Short-circuit in the common case of no errors.
+      return;
+    }
+    for (ValueOrUntypedException voe : voes.values()) {
+      SkyValue value = voe.getValue();
+      if (value == null) {
+        Exception e = voe.getException();
+        if (e == null
+            || ((exceptionClass1 == null || !exceptionClass1.isInstance(e))
+                && (exceptionClass2 == null || !exceptionClass2.isInstance(e))
+                && (exceptionClass3 == null || !exceptionClass3.isInstance(e))
+                && (exceptionClass4 == null || !exceptionClass4.isInstance(e))
+                && (exceptionClass5 == null || !exceptionClass5.isInstance(e)))) {
+          valuesMissing = true;
+          return;
+        }
+      }
+    }
+  }
 
   @Override
   public boolean valuesMissing() {
-    return valuesMissing;
+    return valuesMissing || (externalDeps != null);
   }
 
-  private static final Function<ValueOrException<BottomException>, SkyValue> GET_VALUE_FROM_VOE =
-      new Function<ValueOrException<BottomException>, SkyValue>() {
-        @Override
-        public SkyValue apply(ValueOrException<BottomException> voe) {
-          return ValueOrExceptionUtils.downconvert(voe);
-        }
-      };
-
-  private static <E extends Exception>
-  Function<ValueOrException2<E, BottomException>, ValueOrException<E>>
-  makeSafeDowncastToVOEFunction(final Class<E> exceptionClass) {
-    return new Function<ValueOrException2<E, BottomException>, ValueOrException<E>>() {
-      @Override
-      public ValueOrException<E> apply(ValueOrException2<E, BottomException> voe) {
-        return ValueOrExceptionUtils.downconvert(voe, exceptionClass);
-      }
-    };
-  }
-
-  private static <E1 extends Exception, E2 extends Exception>
-  Function<ValueOrException3<E1, E2, BottomException>, ValueOrException2<E1, E2>>
-  makeSafeDowncastToVOE2Function(final Class<E1> exceptionClass1,
-      final Class<E2> exceptionClass2) {
-    return new Function<ValueOrException3<E1, E2, BottomException>,
-        ValueOrException2<E1, E2>>() {
-      @Override
-      public ValueOrException2<E1, E2> apply(ValueOrException3<E1, E2, BottomException> voe) {
-        return ValueOrExceptionUtils.downconvert(voe, exceptionClass1, exceptionClass2);
-      }
-    };
-  }
-
-  private static <E1 extends Exception, E2 extends Exception, E3 extends Exception>
-  Function<ValueOrException4<E1, E2, E3, BottomException>, ValueOrException3<E1, E2, E3>>
-  makeSafeDowncastToVOE3Function(final Class<E1> exceptionClass1,
-      final Class<E2> exceptionClass2, final Class<E3> exceptionClass3) {
-    return new Function<ValueOrException4<E1, E2, E3, BottomException>,
-        ValueOrException3<E1, E2, E3>>() {
-      @Override
-      public ValueOrException3<E1, E2, E3> apply(ValueOrException4<E1, E2, E3,
-          BottomException> voe) {
-        return ValueOrExceptionUtils.downconvert(voe, exceptionClass1, exceptionClass2,
-            exceptionClass3);
-      }
-    };
+  @Override
+  public void dependOnFuture(ListenableFuture<?> future) {
+    if (future.isDone()) {
+      // No need to track a dependency on something that's already done.
+      return;
+    }
+    if (externalDeps == null) {
+      externalDeps = new ArrayList<>();
+    }
+    externalDeps.add(future);
   }
 }

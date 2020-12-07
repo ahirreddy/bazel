@@ -14,64 +14,26 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 
-/**
- * A {@link TransitiveInfoProvider} that creates extra actions.
- */
+/** A {@link TransitiveInfoProvider} that creates extra actions. */
 @Immutable
+@AutoCodec
 public final class ExtraActionArtifactsProvider implements TransitiveInfoProvider {
   public static final ExtraActionArtifactsProvider EMPTY =
       new ExtraActionArtifactsProvider(
-          NestedSetBuilder.<Artifact>emptySet(Order.STABLE_ORDER),
-          NestedSetBuilder.<ExtraArtifactSet>emptySet(Order.STABLE_ORDER));
+          NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+          NestedSetBuilder.emptySet(Order.STABLE_ORDER));
 
-  /**
-   * The set of extra artifacts provided by a single configured target.
-   */
-  @Immutable
-  public static final class ExtraArtifactSet {
-    private final Label label;
-    private final ImmutableList<Artifact> artifacts;
-
-    private ExtraArtifactSet(Label label, Iterable<Artifact> artifacts) {
-      this.label = label;
-      this.artifacts = ImmutableList.copyOf(artifacts);
-    }
-
-    public Label getLabel() {
-      return label;
-    }
-
-    public ImmutableList<Artifact> getArtifacts() {
-      return artifacts;
-    }
-
-    public static ExtraArtifactSet of(Label label, Iterable<Artifact> artifacts) {
-      return new ExtraArtifactSet(label, artifacts);
-    }
-
-    @Override
-    public int hashCode() {
-      return label.hashCode();
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      return other == this
-          || (other instanceof ExtraArtifactSet
-              && label.equals(((ExtraArtifactSet) other).getLabel()));
-    }
-  }
-
-  public static ExtraActionArtifactsProvider create(NestedSet<Artifact> extraActionArtifacts,
-      NestedSet<ExtraArtifactSet> transitiveExtraActionArtifacts) {
+  public static ExtraActionArtifactsProvider create(
+      NestedSet<Artifact.DerivedArtifact> extraActionArtifacts,
+      NestedSet<Artifact.DerivedArtifact> transitiveExtraActionArtifacts) {
     if (extraActionArtifacts.isEmpty() && transitiveExtraActionArtifacts.isEmpty()) {
       return EMPTY;
     }
@@ -80,8 +42,8 @@ public final class ExtraActionArtifactsProvider implements TransitiveInfoProvide
 
   public static ExtraActionArtifactsProvider merge(
       Iterable<ExtraActionArtifactsProvider> providers) {
-    NestedSetBuilder<Artifact> artifacts = NestedSetBuilder.stableOrder();
-    NestedSetBuilder<ExtraArtifactSet> transitiveExtraActionArtifacts =
+    NestedSetBuilder<Artifact.DerivedArtifact> artifacts = NestedSetBuilder.stableOrder();
+    NestedSetBuilder<Artifact.DerivedArtifact> transitiveExtraActionArtifacts =
         NestedSetBuilder.stableOrder();
 
     for (ExtraActionArtifactsProvider provider : providers) {
@@ -93,29 +55,27 @@ public final class ExtraActionArtifactsProvider implements TransitiveInfoProvide
   }
 
   /** The outputs of the extra actions associated with this target. */
-  private final NestedSet<Artifact> extraActionArtifacts;
-  private final NestedSet<ExtraArtifactSet> transitiveExtraActionArtifacts;
+  private final NestedSet<Artifact.DerivedArtifact> extraActionArtifacts;
 
-  /**
-   * Use {@link #create} instead.
-   */
-  private ExtraActionArtifactsProvider(NestedSet<Artifact> extraActionArtifacts,
-      NestedSet<ExtraArtifactSet> transitiveExtraActionArtifacts) {
+  private final NestedSet<Artifact.DerivedArtifact> transitiveExtraActionArtifacts;
+
+  /** Use {@link #create} instead. */
+  @AutoCodec.Instantiator
+  @VisibleForSerialization
+  ExtraActionArtifactsProvider(
+      NestedSet<Artifact.DerivedArtifact> extraActionArtifacts,
+      NestedSet<Artifact.DerivedArtifact> transitiveExtraActionArtifacts) {
     this.extraActionArtifacts = extraActionArtifacts;
     this.transitiveExtraActionArtifacts = transitiveExtraActionArtifacts;
   }
 
-  /**
-   * The outputs of the extra actions associated with this target.
-   */
-  public NestedSet<Artifact> getExtraActionArtifacts() {
+  /** The outputs of the extra actions associated with this target. */
+  public NestedSet<Artifact.DerivedArtifact> getExtraActionArtifacts() {
     return extraActionArtifacts;
   }
 
-  /**
-   * The outputs of the extra actions in the whole transitive closure.
-   */
-  public NestedSet<ExtraArtifactSet> getTransitiveExtraActionArtifacts() {
+  /** The outputs of the extra actions in the whole transitive closure. */
+  public NestedSet<Artifact.DerivedArtifact> getTransitiveExtraActionArtifacts() {
     return transitiveExtraActionArtifacts;
   }
 }

@@ -30,17 +30,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
 #include <limits.h>
 #include <limits>
 #include <vector>
 
+#include "third_party/ijar/mapped_file.h"
+#include "third_party/ijar/platform_utils.h"
 #include "third_party/ijar/zip.h"
-#include <zlib.h>
+#include "third_party/ijar/zlib_client.h"
 
 #define LOCAL_FILE_HEADER_SIGNATURE   0x04034b50
 #define CENTRAL_FILE_HEADER_SIGNATURE 0x02014b50
+#define UNIX_ZIP_FILE_VERSION 0x0300
 #define DIGITAL_SIGNATURE             0x05054b50
 #define ZIP64_EOCD_SIGNATURE          0x06064b50
 #define ZIP64_EOCD_LOCATOR_SIGNATURE  0x07064b50
@@ -71,7 +72,10 @@
 namespace devtools_ijar {
 // In the absence of ZIP64 support, zip files are limited to 4GB.
 // http://www.info-zip.org/FAQ.html#limits
-static const u8 kMaximumOutputSize = std::numeric_limits<uint32_t>::max();
+static const size_t kMaximumOutputSize = std::numeric_limits<uint32_t>::max();
+
+static const u4 kDefaultTimestamp =
+    30 << 25 | 1 << 21 | 1 << 16;  // January 1, 2010 in DOS time
 
 //
 // A class representing a ZipFile for reading. Its public API is exposed
@@ -79,8 +83,7 @@ static const u8 kMaximumOutputSize = std::numeric_limits<uint32_t>::max();
 //
 class InputZipFile : public ZipExtractor {
  public:
-  InputZipFile(ZipExtractorProcessor *processor, int fd, off_t in_length,
-               off_t in_offset, const u1* zipdata_in, const u1* central_dir);
+  InputZipFile(ZipExtractorProcessor *processor, const char* filename);
   virtual ~InputZipFile();
 
   virtual const char* GetError() {
@@ -90,10 +93,11 @@ class InputZipFile : public ZipExtractor {
     return errmsg;
   }
 
+  bool Open();
   virtual bool ProcessNext();
   virtual void Reset();
   virtual size_t GetSize() {
-    return in_length_;
+    return input_file_->Length();
   }
 
   virtual u8 CalculateOutputLength();
@@ -105,17 +109,16 @@ class InputZipFile : public ZipExtractor {
 
  private:
   ZipExtractorProcessor *processor;
-
-  int fd_in;  // Input file descripor
+  const char* filename_;
+  MappedInputFile *input_file_;
 
   // InputZipFile is responsible for maintaining the following
   // pointers. They are allocated by the Create() method before
   // the object is actually created using mmap.
-  const u1 * const zipdata_in_;   // start of input file mmap
-  const u1 * zipdata_in_mapped_;  // start of still mapped region
-  const u1 * const central_dir_;  // central directory in input file
+  const u1 * zipdata_in_;   // start of input file mmap
+  size_t bytes_unmapped_;         // bytes that have already been unmapped
+  const u1 * central_dir_;  // central directory in input file
 
-  size_t in_length_;  // size of the input file
   size_t in_offset_;  // offset  the input file
 
   const u1 *p;  // input cursor
@@ -127,11 +130,11 @@ class InputZipFile : public ZipExtractor {
   // not enough, we bail out. We only decompress class files, so they should
   // be smaller than 64K anyway, but we give a little leeway.
   // MAX_BUFFER_SIZE must be bigger than the size of the biggest file in the
-  // ZIP. It is set to 256M here so we can uncompress the Bazel server with
-  // this library.
-  static const size_t INITIAL_BUFFER_SIZE = 256 * 1024;  // 256K
-  static const size_t MAX_BUFFER_SIZE = 256 * 1024 * 1024;
-  static const size_t MAX_MAPPED_REGION = 32 * 1024 * 1024;
+  // ZIP. It is set to 2GB here because no one has audited the code for 64-bit
+  // cleanliness.
+  static constexpr size_t INITIAL_BUFFER_SIZE = 256 * 1024;  // 256K
+  static constexpr size_t MAX_BUFFER_SIZE = std::numeric_limits<int32_t>::max();
+  static constexpr size_t MAX_MAPPED_REGION = 32 * 1024 * 1024;
 
   // These metadata fields are the fields of the ZIP header of the file being
   // processed.
@@ -145,13 +148,6 @@ class InputZipFile : public ZipExtractor {
   const u1 *file_name_;
   const u1 *extra_field_;
 
-  // Administration of memory reserved for decompressed data. We use the same
-  // buffer for each file to avoid some malloc()/free() calls and free the
-  // memory only in the dtor. C-style memory management is used so that we
-  // can call realloc.
-  u1 *uncompressed_data_;
-  size_t uncompressed_data_allocated_;
-
   // Copy of the last filename entry - Null-terminated.
   char filename[PATH_MAX];
   // The external file attribute field
@@ -159,6 +155,8 @@ class InputZipFile : public ZipExtractor {
 
   // last error
   char errmsg[4*PATH_MAX];
+
+  Decompressor *decompressor_;
 
   int error(const char *fmt, ...) {
     va_list ap;
@@ -173,7 +171,7 @@ class InputZipFile : public ZipExtractor {
   // we're about to read, for diagnostics.
   int EnsureRemaining(size_t n, const char *state) {
     size_t in_offset = p - zipdata_in_;
-    size_t remaining = in_length_ - in_offset;
+    size_t remaining = input_file_->Length() - in_offset;
     if (n > remaining) {
       return error("Premature end of file (at offset %zd, state=%s); "
                    "expected %zd more bytes but found %zd.\n",
@@ -202,10 +200,11 @@ class InputZipFile : public ZipExtractor {
 //
 class OutputZipFile : public ZipBuilder {
  public:
-  OutputZipFile(int fd, u1 * const zipdata_out) :
-      fd_out(fd),
-      zipdata_out_(zipdata_out),
-      q(zipdata_out) {
+  OutputZipFile(const char *filename, size_t estimated_size)
+      : output_file_(NULL),
+        filename_(filename),
+        estimated_size_(estimated_size),
+        finished_(false) {
     errmsg[0] = 0;
   }
 
@@ -228,6 +227,7 @@ class OutputZipFile : public ZipBuilder {
     return entries_.size();
   }
   virtual int Finish();
+  bool Open();
 
  private:
   struct LocalFileEntry {
@@ -256,12 +256,15 @@ class OutputZipFile : public ZipBuilder {
     u2 extra_field_length;
   };
 
-  int fd_out;  // file descriptor for the output file
+  MappedOutputFile* output_file_;
+  const char* filename_;
+  size_t estimated_size_;
+  bool finished_;
 
   // OutputZipFile is responsible for maintaining the following
   // pointers. They are allocated by the Create() method before
   // the object is actually created using mmap.
-  u1 * const zipdata_out_;        // start of output file mmap
+  u1 *zipdata_out_;        // start of output file mmap
   u1 *q;  // output cursor
 
   u1 *header_ptr;  // Current pointer to "compression method" entry.
@@ -318,10 +321,8 @@ bool InputZipFile::ProcessNext() {
   }
 
   // There might be an offset specified in the central directory that does
-  // not match the file offset, if so, correct the pointer.
-  if (offset != 0 && (p != (zipdata_in_ + in_offset_ + offset))) {
-    p = zipdata_in_ + offset;
-  }
+  // not match the file offset, so always update our pointer.
+  p = zipdata_in_ + in_offset_ + offset;
 
   if (EnsureRemaining(4, "signature") < 0) {
     return false;
@@ -424,9 +425,10 @@ int InputZipFile::ProcessLocalFileEntry(
     }
   }
 
-  if (p > zipdata_in_mapped_ + MAX_MAPPED_REGION) {
-    munmap(const_cast<u1 *>(zipdata_in_mapped_), MAX_MAPPED_REGION);
-    zipdata_in_mapped_ += MAX_MAPPED_REGION;
+  size_t bytes_processed = p - zipdata_in_;
+  if (bytes_processed > bytes_unmapped_ + MAX_MAPPED_REGION) {
+    input_file_->Discard(MAX_MAPPED_REGION);
+    bytes_unmapped_ += MAX_MAPPED_REGION;
   }
 
   return 0;
@@ -451,74 +453,21 @@ int InputZipFile::SkipFile(const bool compressed) {
 
 u1* InputZipFile::UncompressFile() {
   size_t in_offset = p - zipdata_in_;
-  size_t remaining = in_length_ - in_offset;
-  z_stream stream;
-
-  stream.zalloc = Z_NULL;
-  stream.zfree = Z_NULL;
-  stream.opaque = Z_NULL;
-  stream.avail_in = remaining;
-  stream.next_in = (Bytef *) p;
-
-  int ret = inflateInit2(&stream, -MAX_WBITS);
-  if (ret != Z_OK) {
-    error("inflateInit: %d\n", ret);
-    return NULL;
-  }
-
-  int uncompressed_until_now = 0;
-
-  while (true) {
-    stream.avail_out = uncompressed_data_allocated_ - uncompressed_until_now;
-    stream.next_out = uncompressed_data_ + uncompressed_until_now;
-    int old_avail_out = stream.avail_out;
-
-    ret = inflate(&stream, Z_SYNC_FLUSH);
-    int uncompressed_now = old_avail_out - stream.avail_out;
-    uncompressed_until_now += uncompressed_now;
-
-    switch (ret) {
-      case Z_STREAM_END: {
-        // zlib said that there is no more data to decompress.
-
-        u1 *new_p = reinterpret_cast<u1*>(stream.next_in);
-        compressed_size_ = new_p - p;
-        uncompressed_size_ = uncompressed_until_now;
-        p = new_p;
-        inflateEnd(&stream);
-        return uncompressed_data_;
-      }
-
-      case Z_OK: {
-        // zlib said that there is no more room in the buffer allocated for
-        // the decompressed data. Enlarge that buffer and try again.
-
-        if (uncompressed_data_allocated_ == MAX_BUFFER_SIZE) {
-          error("ijar does not support decompressing files "
-                "larger than %dMB.\n",
-                (int) (MAX_BUFFER_SIZE/(1024*1024)));
-          return NULL;
-        }
-
-        uncompressed_data_allocated_ *= 2;
-        if (uncompressed_data_allocated_ > MAX_BUFFER_SIZE) {
-          uncompressed_data_allocated_ = MAX_BUFFER_SIZE;
-        }
-
-        uncompressed_data_ = reinterpret_cast<u1*>(
-            realloc(uncompressed_data_, uncompressed_data_allocated_));
-        break;
-      }
-
-      case Z_DATA_ERROR:
-      case Z_BUF_ERROR:
-      case Z_STREAM_ERROR:
-      case Z_NEED_DICT:
-      default: {
-        error("zlib returned error code %d during inflate.\n", ret);
-        return NULL;
-      }
+  size_t remaining = input_file_->Length() - in_offset;
+  DecompressedFile *decompressed_file =
+      decompressor_->UncompressFile(p, remaining);
+  if (decompressed_file == NULL) {
+    if (decompressor_->GetError() != NULL) {
+      error(decompressor_->GetError());
     }
+    return NULL;
+  } else {
+    compressed_size_ = decompressed_file->compressed_size;
+    uncompressed_size_ = decompressed_file->uncompressed_size;
+    u1 *uncompressed_data = decompressed_file->uncompressed_data;
+    free(decompressed_file);
+    p += compressed_size_;
+    return uncompressed_data;
   }
 }
 
@@ -626,7 +575,7 @@ u8 InputZipFile::CalculateOutputLength() {
   // The worst case is when the output is simply the input uncompressed. The
   // metadata in the zip file will stay the same, so the file will grow by the
   // difference between the compressed and uncompressed sizes.
-  return (u8) in_length_ - skipped_compressed_size
+  return (u8) input_file_->Length() - skipped_compressed_size
       + (uncompressed_size - compressed_size);
 }
 
@@ -642,7 +591,7 @@ struct EndOfCentralDirectoryRecord {
 
 // Checks for a zip64 end of central directory record. If a valid zip64 EOCD is
 // found, updates the original EOCD record and returns true.
-bool MaybeReadZip64CentralDirectory(const u1 *bytes, size_t in_length,
+bool MaybeReadZip64CentralDirectory(const u1 *bytes, size_t /*in_length*/,
                                     const u1 *current,
                                     const u1 **end_of_central_dir,
                                     EndOfCentralDirectoryRecord *cd) {
@@ -823,7 +772,7 @@ bool FindZipCentralDirectory(const u1 *bytes, size_t in_length, u4 *offset,
 
 void InputZipFile::Reset() {
   central_dir_current_ = central_dir_;
-  zipdata_in_mapped_ = zipdata_in_;
+  bytes_unmapped_ = 0;
   p = zipdata_in_ + in_offset_;
 }
 
@@ -837,55 +786,66 @@ int ZipExtractor::ProcessAll() {
 
 ZipExtractor* ZipExtractor::Create(const char* filename,
                                    ZipExtractorProcessor *processor) {
-  int fd_in = open(filename, O_RDONLY);
-  if (fd_in < 0) {
+  InputZipFile* result = new InputZipFile(processor, filename);
+  if (!result->Open()) {
+    fprintf(stderr, "Opening zip \"%s\": %s\n", filename, result->GetError());
+    delete result;
     return NULL;
   }
 
-  off_t length = lseek(fd_in, 0, SEEK_END);
-  if (length < 0) {
-    return NULL;
+  return result;
+}
+
+// zipdata_in_, in_offset_, p, central_dir_current_
+
+InputZipFile::InputZipFile(ZipExtractorProcessor *processor,
+                           const char* filename)
+    : processor(processor), filename_(filename), input_file_(NULL),
+      bytes_unmapped_(0) {
+  decompressor_ = new Decompressor();
+  errmsg[0] = 0;
+}
+
+bool InputZipFile::Open() {
+  MappedInputFile* input_file = new MappedInputFile(filename_);
+  if (!input_file->Opened()) {
+    snprintf(errmsg, sizeof(errmsg), "%s", input_file->Error());
+    delete input_file;
+    return false;
   }
 
-  void *zipdata_in = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd_in, 0);
-  if (zipdata_in == MAP_FAILED) {
-    return NULL;
-  }
-
+  void *zipdata_in = input_file->Buffer();
   u4 central_dir_offset;
   const u1 *central_dir = NULL;
 
   if (!devtools_ijar::FindZipCentralDirectory(
-          static_cast<const u1*>(zipdata_in), length,
+          static_cast<const u1*>(zipdata_in), input_file->Length(),
           &central_dir_offset, &central_dir)) {
     errno = EIO;  // we don't really have a good error number
-    return NULL;
+    error("Cannot find central directory");
+    delete input_file;
+    return false;
   }
   const u1 *zipdata_start = static_cast<const u1*>(zipdata_in);
-  off_t offset = - static_cast<off_t>(zipdata_start
-                                      + central_dir_offset
-                                      - central_dir);
+  in_offset_ = - static_cast<off_t>(zipdata_start
+                                    + central_dir_offset
+                                    - central_dir);
 
-  return new InputZipFile(processor, fd_in, length, offset,
-                          zipdata_start, central_dir);
-}
-
-InputZipFile::InputZipFile(ZipExtractorProcessor *processor, int fd,
-                           off_t in_length, off_t in_offset,
-                           const u1* zipdata_in, const u1* central_dir)
-  : processor(processor), fd_in(fd),
-    zipdata_in_(zipdata_in), zipdata_in_mapped_(zipdata_in),
-    central_dir_(central_dir), in_length_(in_length), in_offset_(in_offset),
-    p(zipdata_in + in_offset), central_dir_current_(central_dir) {
-  uncompressed_data_allocated_ = INITIAL_BUFFER_SIZE;
-  uncompressed_data_ =
-    reinterpret_cast<u1*>(malloc(uncompressed_data_allocated_));
+  input_file_ = input_file;
+  zipdata_in_ = zipdata_start;
+  central_dir_ = central_dir;
+  central_dir_current_ = central_dir;
+  p = zipdata_in_ + in_offset_;
   errmsg[0] = 0;
+  return true;
 }
 
 InputZipFile::~InputZipFile() {
-  free(uncompressed_data_);
-  close(fd_in);
+  delete decompressor_;
+  if (input_file_ != NULL) {
+    input_file_->Close();
+    delete input_file_;
+  }
 }
 
 
@@ -906,8 +866,7 @@ int OutputZipFile::WriteEmptyFile(const char *filename) {
   put_u2le(q, 10);  // extract_version
   put_u2le(q, 0);  // general_purpose_bit_flag
   put_u2le(q, 0);  // compression_method
-  put_u2le(q, 0);  // last_mod_file_time
-  put_u2le(q, 0);  // last_mod_file_date
+  put_u4le(q, kDefaultTimestamp);  // last_mod_file date and time
   put_u4le(q, entry->crc32);  // crc32
   put_u4le(q, 0);  // compressed_size
   put_u4le(q, 0);  // uncompressed_size
@@ -933,13 +892,12 @@ void OutputZipFile::WriteCentralDirectory() {
   for (size_t ii = 0; ii < entries_.size(); ++ii) {
     LocalFileEntry *entry = entries_[ii];
     put_u4le(q, CENTRAL_FILE_HEADER_SIGNATURE);
-    put_u2le(q, 0);  // version made by
+    put_u2le(q, UNIX_ZIP_FILE_VERSION);
 
     put_u2le(q, ZIP_VERSION_TO_EXTRACT);  // version to extract
     put_u2le(q, 0);  // general purpose bit flag
     put_u2le(q, entry->compression_method);  // compression method:
-    put_u2le(q, 0);                          // last_mod_file_time
-    put_u2le(q, 0);  // last_mod_file_date
+    put_u4le(q, kDefaultTimestamp);          // last_mod_file date and time
     put_u4le(q, entry->crc32);  // crc32
     put_u4le(q, entry->compressed_length);    // compressed_size
     put_u4le(q, entry->uncompressed_length);  // uncompressed_size
@@ -965,7 +923,7 @@ void OutputZipFile::WriteCentralDirectory() {
     put_u4le(q, ZIP64_EOCD_SIGNATURE);
     // signature and size field doesn't count towards size
     put_u8le(q, ZIP64_EOCD_FIXED_SIZE - 12);
-    put_u2le(q, 0);  // version made by
+    put_u2le(q, UNIX_ZIP_FILE_VERSION);  // version made by
     put_u2le(q, 0);  // version needed to extract
     put_u4le(q, 0);  // number of this disk
     put_u4le(q, 0);  // # of the disk with the start of the central directory
@@ -1022,6 +980,7 @@ u1* OutputZipFile::WriteLocalFileHeader(const char* filename, const u4 attr) {
   memcpy(entry->file_name, filename, file_name_length_);
   entry->extra_field_length = 0;
   entry->extra_field = (const u1 *)"";
+  entry->crc32 = 0;
 
   // Output the ZIP local_file_header:
   put_u4le(q, LOCAL_FILE_HEADER_SIGNATURE);
@@ -1029,8 +988,7 @@ u1* OutputZipFile::WriteLocalFileHeader(const char* filename, const u4 attr) {
   put_u2le(q, 0);                          // general purpose bit flag
   u1 *header_ptr = q;
   put_u2le(q, COMPRESSION_METHOD_STORED);  // compression method = placeholder
-  put_u2le(q, 0);                          // last_mod_file_time
-  put_u2le(q, 0);                          // last_mod_file_date
+  put_u4le(q, kDefaultTimestamp);          // last_mod_file date and time
   put_u4le(q, entry->crc32);               // crc32
   put_u4le(q, 0);  // compressed_size = placeholder
   put_u4le(q, 0);  // uncompressed_size = placeholder
@@ -1042,46 +1000,6 @@ u1* OutputZipFile::WriteLocalFileHeader(const char* filename, const u4 attr) {
   entries_.push_back(entry);
 
   return header_ptr;
-}
-
-// Try to compress a file entry in memory using the deflate algorithm.
-// It will compress buf (of size length) unless the compressed size is bigger
-// than the input size. The result will overwrite the content of buf and the
-// final size is returned.
-size_t TryDeflate(u1 *buf, size_t length) {
-  u1 *outbuf = reinterpret_cast<u1 *>(malloc(length));
-  z_stream stream;
-
-  // Initialize the z_stream strcut for reading from buf and wrinting in outbuf.
-  stream.zalloc = Z_NULL;
-  stream.zfree = Z_NULL;
-  stream.opaque = Z_NULL;
-  stream.total_in = length;
-  stream.avail_in = length;
-  stream.total_out = length;
-  stream.avail_out = length;
-  stream.next_in = buf;
-  stream.next_out = outbuf;
-
-  // deflateInit2 negative windows size prevent the zlib wrapper to be used.
-  if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                  -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-    // Failure to compress => return the buffer uncompressed
-    free(outbuf);
-    return length;
-  }
-
-  if (deflate(&stream, Z_FINISH) == Z_STREAM_END) {
-    // Compression successful and fits in outbuf, let's copy the result in buf.
-    length = stream.total_out;
-    memcpy(buf, outbuf, length);
-  }
-
-  deflateEnd(&stream);
-  free(outbuf);
-
-  // Return the length of the resulting buffer
-  return length;
 }
 
 size_t OutputZipFile::WriteFileSizeInLocalFileHeader(u1 *header_ptr,
@@ -1106,16 +1024,17 @@ size_t OutputZipFile::WriteFileSizeInLocalFileHeader(u1 *header_ptr,
 }
 
 int OutputZipFile::Finish() {
-  if (fd_out > 0) {
-    WriteCentralDirectory();
-    if (ftruncate(fd_out, GetSize()) < 0) {
-      return error("ftruncate(fd_out, GetSize()): %s", strerror(errno));
-    }
-    if (close(fd_out) < 0) {
-      return error("close(fd_out): %s", strerror(errno));
-    }
-    fd_out = -1;
+  if (finished_) {
+    return 0;
   }
+
+  finished_ = true;
+  WriteCentralDirectory();
+  if (output_file_->Close(GetSize()) < 0) {
+    return error("%s", output_file_->Error());
+  }
+  delete output_file_;
+  output_file_ = NULL;
   return 0;
 }
 
@@ -1128,10 +1047,21 @@ int OutputZipFile::FinishFile(size_t filelength, bool compress,
                               bool compute_crc) {
   u4 crc = 0;
   if (compute_crc) {
-    crc = crc32(crc, q, filelength);
+    crc = ComputeCrcChecksum(q, filelength);
+
+    if (filelength > 0 && crc == 0) {
+      fprintf(stderr, "Error calculating CRC32 checksum.\n");
+      return -1;
+    }
   }
   size_t compressed_size =
       WriteFileSizeInLocalFileHeader(header_ptr, filelength, compress, crc);
+
+  if (compressed_size == 0 && filelength > 0) {
+    fprintf(stderr, "Error compressing files.\n");
+    return -1;
+  }
+
   entries_.back()->crc32 = crc;
   entries_.back()->compressed_length = compressed_size;
   entries_.back()->uncompressed_length = filelength;
@@ -1144,53 +1074,56 @@ int OutputZipFile::FinishFile(size_t filelength, bool compress,
   return 0;
 }
 
-ZipBuilder* ZipBuilder::Create(const char* zip_file, u8 estimated_size) {
-  if (estimated_size > kMaximumOutputSize) {
+bool OutputZipFile::Open() {
+  if (estimated_size_ > kMaximumOutputSize) {
     fprintf(stderr,
-            "Uncompressed input jar has size %llu, "
-            "which exceeds the maximum supported output size %llu.\n"
+            "Uncompressed input jar has size %zu, "
+            "which exceeds the maximum supported output size %zu.\n"
             "Assuming that ijar will be smaller and hoping for the best.\n",
-            estimated_size, kMaximumOutputSize);
-    estimated_size = kMaximumOutputSize;
+            estimated_size_, kMaximumOutputSize);
+    estimated_size_ = kMaximumOutputSize;
   }
 
-  int fd_out = open(zip_file, O_CREAT|O_RDWR|O_TRUNC, 0644);
-  if (fd_out < 0) {
-    return NULL;
+  MappedOutputFile* output_file = new MappedOutputFile(
+      filename_, estimated_size_);
+  if (!output_file->Opened()) {
+    snprintf(errmsg, sizeof(errmsg), "%s", output_file->Error());
+    delete output_file;
+    return false;
   }
 
-  // Create mmap-able sparse file
-  if (ftruncate(fd_out, estimated_size) < 0) {
-    return NULL;
-  }
-
-  // Ensure that any buffer overflow in JarStripper will result in
-  // SIGSEGV or SIGBUS by over-allocating beyond the end of the file.
-  size_t mmap_length = std::min(estimated_size + sysconf(_SC_PAGESIZE),
-                                (u8) std::numeric_limits<size_t>::max());
-
-  void *zipdata_out = mmap(NULL, mmap_length, PROT_WRITE,
-                           MAP_SHARED, fd_out, 0);
-  if (zipdata_out == MAP_FAILED) {
-    fprintf(stderr, "output_length=%llu\n", estimated_size);
-    return NULL;
-  }
-
-  return new OutputZipFile(fd_out, (u1*) zipdata_out);
+  output_file_ = output_file;
+  q = output_file->Buffer();
+  zipdata_out_ = output_file->Buffer();
+  return true;
 }
 
-u8 ZipBuilder::EstimateSize(char **files) {
-  struct stat statst;
+ZipBuilder *ZipBuilder::Create(const char *zip_file, size_t estimated_size) {
+  OutputZipFile* result = new OutputZipFile(zip_file, estimated_size);
+  if (!result->Open()) {
+    fprintf(stderr, "%s\n", result->GetError());
+    delete result;
+    return NULL;
+  }
+
+  return result;
+}
+
+u8 ZipBuilder::EstimateSize(char const* const* files,
+                            char const* const* zip_paths,
+                            int nb_entries) {
+  Stat file_stat;
   // Digital signature field size = 6, End of central directory = 22, Total = 28
   u8 size = 28;
   // Count the size of all the files in the input to estimate the size of the
   // output.
-  for (int i = 0; files[i] != NULL; i++) {
-    if (stat(files[i], &statst) != 0) {
+  for (int i = 0; i < nb_entries; i++) {
+    file_stat.total_size = 0;
+    if (files[i] != NULL && !stat_file(files[i], &file_stat)) {
       fprintf(stderr, "File %s does not seem to exist.", files[i]);
       return 0;
     }
-    size += statst.st_size;
+    size += file_stat.total_size;
     // Add sizes of Zip meta data
     // local file header = 30 bytes
     // data descriptor = 12 bytes
@@ -1199,7 +1132,7 @@ u8 ZipBuilder::EstimateSize(char **files) {
     size += 88;
     // The filename is stored twice (once in the central directory
     // and once in the local file header).
-    size += strlen(files[i]) * 2;
+    size += strlen((zip_paths[i] != NULL) ? zip_paths[i] : files[i]) * 2;
   }
   return size;
 }

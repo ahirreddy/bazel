@@ -16,10 +16,26 @@ licenses(["notice"])  # Apache License 2.0
 
 exports_files(["LICENSE"])
 
-J2_DIR = "j2objc-0.9.8.1/"
+J2_DIR = "j2objc-1.0.1/"
 
 package(
     default_visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "jre_emul_jar",
+    srcs = [J2_DIR + "lib/jre_emul.jar"],
+    outs = ["jre_emul.jar"],
+    cmd = "cp $< $@",
+)
+
+filegroup(
+    name = "jre_emul_module",
+    srcs = [
+        J2_DIR + "lib/jre_emul_module/lib/jrt-fs.jar",
+        J2_DIR + "lib/jre_emul_module/lib/modules",
+        J2_DIR + "lib/jre_emul_module/release",
+    ],
 )
 
 java_import(
@@ -33,15 +49,21 @@ java_import(
     exports = [":annotations"],
 )
 
+objc_import(
+    name = "jre_core_lib",
+    hdrs = glob([J2_DIR + "include/**"]),
+    includes = [J2_DIR + "include"],
+    archives = [J2_DIR + "lib/libjre_core.a"],
+)
+
 filegroup(
-    name = "jre_emul_headers",
-    #srcs = glob([J2_DIR + "include/IOSClass.h"]),
-    srcs = [J2_DIR + "include/IOSClass.h"],
+    name = "proto_plugin",
+    srcs = [J2_DIR + "j2objc_protoc_plugin"]
 )
 
 objc_import(
-    name = "jre_emul_archive",
+    name = "proto_runtime",
     hdrs = glob([J2_DIR + "include/**"]),
     includes = [J2_DIR + "include"],
-    archives = [J2_DIR + "lib/libjre_emul.a"],
+    archives = [J2_DIR + "lib/libprotobuf_runtime.a"],
 )

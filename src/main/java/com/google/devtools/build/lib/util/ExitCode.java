@@ -15,9 +15,9 @@
 package com.google.devtools.build.lib.util;
 
 import com.google.common.base.Objects;
-
 import java.util.Collection;
 import java.util.HashMap;
+import javax.annotation.Nullable;
 
 /**
  *  <p>Anything marked FAILURE is generally from a problem with the source code
@@ -30,6 +30,10 @@ import java.util.HashMap;
  *
  *  <p>Note that these exit codes should be kept consistent with the codes
  *  returned by Blaze's launcher in //devtools/blaze/main:blaze.cc
+ *  Blaze exit codes should be consistently classified as permanent vs.
+ *  transient (i.e. retriable) vs. unknown transient/permanent because users,
+ *  in particular infrastructure users, will use the exit code to decide whether
+ *  the request should be retried or not.
  */
 public class ExitCode {
   // Tracks all exit codes defined here and elsewhere in Bazel.
@@ -46,12 +50,26 @@ public class ExitCode {
   public static final ExitCode RUN_FAILURE = ExitCode.create(6, "RUN_FAILURE");
   public static final ExitCode ANALYSIS_FAILURE = ExitCode.create(7, "ANALYSIS_FAILURE");
   public static final ExitCode INTERRUPTED = ExitCode.create(8, "INTERRUPTED");
+  public static final ExitCode LOCK_HELD_NOBLOCK_FOR_LOCK =
+      ExitCode.create(9, "LOCK_HELD_NOBLOCK_FOR_LOCK");
+
+  public static final ExitCode REMOTE_ENVIRONMENTAL_ERROR =
+      ExitCode.createInfrastructureFailure(32, "REMOTE_ENVIRONMENTAL_ERROR");
   public static final ExitCode OOM_ERROR = ExitCode.createInfrastructureFailure(33, "OOM_ERROR");
+
+  public static final ExitCode REMOTE_ERROR =
+      ExitCode.createInfrastructureFailure(34, "REMOTE_ERROR");
   public static final ExitCode LOCAL_ENVIRONMENTAL_ERROR =
       ExitCode.createInfrastructureFailure(36, "LOCAL_ENVIRONMENTAL_ERROR");
   public static final ExitCode BLAZE_INTERNAL_ERROR =
       ExitCode.createInfrastructureFailure(37, "BLAZE_INTERNAL_ERROR");
+  public static final ExitCode TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR =
+      ExitCode.createInfrastructureFailure(38, "PUBLISH_ERROR");
+  public static final ExitCode PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR =
+      ExitCode.create(45, "PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR");
+
   public static final ExitCode RESERVED = ExitCode.createInfrastructureFailure(40, "RESERVED");
+
   /*
     exit codes [50..60] and 253 are reserved for site specific wrappers to Bazel.
    */
@@ -111,6 +129,18 @@ public class ExitCode {
   public static Collection<ExitCode> values() {
     synchronized (exitCodeRegistry) {
       return exitCodeRegistry.values();
+    }
+  }
+
+  /**
+   * Returns a registered {@link ExitCode} with the given {@code code}.
+   *
+   * <p>Note that there *are* unregistered ExitCodes. This will never return them.
+   */
+  @Nullable
+  static ExitCode forCode(int code) {
+    synchronized (exitCodeRegistry) {
+      return exitCodeRegistry.get(code);
     }
   }
 

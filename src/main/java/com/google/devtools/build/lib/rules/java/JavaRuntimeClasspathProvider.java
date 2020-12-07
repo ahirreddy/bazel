@@ -16,21 +16,21 @@ package com.google.devtools.build.lib.rules.java;
 
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-
-import com.google.devtools.build.lib.syntax.SkylarkCallable;
-import com.google.devtools.build.lib.syntax.SkylarkModule;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skylarkbuildapi.java.JavaRuntimeClasspathProviderApi;
 
 /**
  * Provider for the runtime classpath contributions of a Java binary.
  *
- * Used to exclude already-available artifacts from related binaries
- * (e.g. plugins).
+ * <p>Used to exclude already-available artifacts from related binaries (e.g. plugins).
  */
 @Immutable
-@SkylarkModule(name = "JavaRuntimeClasspathProvider", doc = "")
-public final class JavaRuntimeClasspathProvider implements TransitiveInfoProvider {
+@AutoCodec
+public final class JavaRuntimeClasspathProvider
+    implements TransitiveInfoProvider, JavaRuntimeClasspathProviderApi {
 
   private final NestedSet<Artifact> runtimeClasspath;
 
@@ -38,11 +38,13 @@ public final class JavaRuntimeClasspathProvider implements TransitiveInfoProvide
     this.runtimeClasspath = runtimeClasspath;
   }
 
-  /**
-   * Returns the artifacts included on the runtime classpath of this binary.
-   */
-  @SkylarkCallable(name = "runtime_classpath", doc = "", structField = true)
-  public NestedSet<Artifact> getRuntimeClasspath() {
+  /** Returns the artifacts included on the runtime classpath of this binary. */
+  @Override
+  public Depset /*<Artifact>*/ getRuntimeClasspath() {
+    return Depset.of(Artifact.TYPE, runtimeClasspath);
+  }
+
+  public NestedSet<Artifact> getRuntimeClasspathNestedSet() {
     return runtimeClasspath;
   }
 }

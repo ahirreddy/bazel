@@ -1,9 +1,16 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 # Description:
 #   Zip provides a library for reading and writing zip files, allowing more
 #   advanced manipulation than the JDK equivalents by providing detailed zip
 #   entry data and raw file access.
-#   Open-sourced as part of Bazel.
-package(default_visibility = ["//src:__subpackages__"])
+package(default_visibility = ["//src/java_tools/singlejar:singlejar_package_group"])
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
+)
 
 # Necessary for the bootstrap compilation.
 filegroup(
@@ -14,10 +21,6 @@ filegroup(
 java_library(
     name = "zip",
     srcs = glob(["*.java"]),
+    visibility = ["//visibility:public"],
     deps = ["//third_party:jsr305"],
-)
-
-filegroup(
-    name = "srcs",
-    srcs = glob(["**"]),
 )

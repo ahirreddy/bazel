@@ -14,19 +14,19 @@
 
 package com.google.devtools.build.lib.syntax;
 
-/**
- * A TokenKind is an enumeration of each different kind of lexical symbol.
- */
+/** A TokenKind represents the kind of a lexical token. */
 public enum TokenKind {
-
-  ASSERT("assert"),
+  AMPERSAND("&"),
+  AMPERSAND_EQUALS("&="),
   AND("and"),
   AS("as"),
+  ASSERT("assert"),
   BREAK("break"),
+  CARET("^"),
+  CARET_EQUALS("^="),
   CLASS("class"),
   COLON(":"),
   COMMA(","),
-  COMMENT("comment"),
   CONTINUE("continue"),
   DEF("def"),
   DEL("del"),
@@ -43,21 +43,27 @@ public enum TokenKind {
   GLOBAL("global"),
   GREATER(">"),
   GREATER_EQUALS(">="),
+  GREATER_GREATER(">>"),
+  GREATER_GREATER_EQUALS(">>="),
   IDENTIFIER("identifier"),
   IF("if"),
   ILLEGAL("illegal character"),
   IMPORT("import"),
   IN("in"),
   INDENT("indent"),
-  INT("integer"),
+  INT("integer literal"),
   IS("is"),
   LAMBDA("lambda"),
   LBRACE("{"),
   LBRACKET("["),
   LESS("<"),
   LESS_EQUALS("<="),
+  LESS_LESS("<<"),
+  LESS_LESS_EQUALS("<<="),
+  LOAD("load"),
   LPAREN("("),
   MINUS("-"),
+  MINUS_EQUALS("-="),
   NEWLINE("newline"),
   NONLOCAL("nonlocal"),
   NOT("not"),
@@ -67,7 +73,9 @@ public enum TokenKind {
   OUTDENT("outdent"),
   PASS("pass"),
   PERCENT("%"),
+  PERCENT_EQUALS("%="),
   PIPE("|"),
+  PIPE_EQUALS("|="),
   PLUS("+"),
   PLUS_EQUALS("+="),
   RAISE("raise"),
@@ -77,24 +85,27 @@ public enum TokenKind {
   RPAREN(")"),
   SEMI(";"),
   SLASH("/"),
+  SLASH_EQUALS("/="),
+  SLASH_SLASH("//"),
+  SLASH_SLASH_EQUALS("//="),
   STAR("*"),
+  STAR_EQUALS("*="),
   STAR_STAR("**"),
-  STRING("string"),
+  STRING("string literal"),
+  TILDE("~"),
   TRY("try"),
   WHILE("while"),
   WITH("with"),
   YIELD("yield");
 
-  private final String prettyName;
+  private final String name;
 
-  private TokenKind(String prettyName) {
-    this.prettyName = prettyName;
+  private TokenKind(String name) {
+    this.name = name;
   }
 
-  /**
-   * Returns the pretty name for this token, for use in error messages for the user.
-   */
-  public String getPrettyName() {
-    return prettyName;
+  @Override
+  public String toString() {
+    return name;
   }
 }

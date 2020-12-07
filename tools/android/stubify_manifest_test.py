@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,14 +15,23 @@
 
 """Unit tests for stubify_application_manifest."""
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import unittest
 from xml.etree import ElementTree
 
+# Do not edit this line. Copybara replaces it with PY2 migration helper.
+import six
+
 from tools.android.stubify_manifest import ANDROID
 from tools.android.stubify_manifest import BadManifestException
+from tools.android.stubify_manifest import INSTANT_RUN_BOOTSTRAP_APPLICATION
+from tools.android.stubify_manifest import MOBILE_INSTALL_STUB_APPLICATION
 from tools.android.stubify_manifest import READ_EXTERNAL_STORAGE
-from tools.android.stubify_manifest import STUB_APPLICATION
-from tools.android.stubify_manifest import Stubify
+from tools.android.stubify_manifest import StubifyInstantRun
+from tools.android.stubify_manifest import StubifyMobileInstall
 
 
 MANIFEST_WITH_APPLICATION = """
@@ -73,7 +83,16 @@ MULTIPLE_APPLICATIONS = """
 """
 
 
-class StubifyTest(unittest.TestCase):
+NO_PACKAGE_MANIFEST = """
+<manifest
+  xmlns:android="http://schemas.android.com/apk/res/android">
+  <application android:name="old.application">
+  </application>
+</manifest>
+"""
+
+
+class StubifyMobileInstallTest(unittest.TestCase):
 
   def GetApplication(self, manifest_string):
     manifest = ElementTree.fromstring(manifest_string)
@@ -81,21 +100,25 @@ class StubifyTest(unittest.TestCase):
     return application.get("{%s}name" % ANDROID)
 
   def testReplacesOldApplication(self):
-    new_manifest, old_application, app_pkg = Stubify(MANIFEST_WITH_APPLICATION)
+    new_manifest, old_application, app_pkg = StubifyMobileInstall(
+        MANIFEST_WITH_APPLICATION)
     self.assertEqual("com.google.package", app_pkg)
     self.assertEqual("old.application", old_application)
-    self.assertEqual(STUB_APPLICATION, self.GetApplication(new_manifest))
+    self.assertEqual(
+        MOBILE_INSTALL_STUB_APPLICATION, self.GetApplication(new_manifest))
 
   def testAddsNewAplication(self):
     new_manifest, old_application, app_pkg = (
-        Stubify(MANIFEST_WITHOUT_APPLICATION))
+        StubifyMobileInstall(MANIFEST_WITHOUT_APPLICATION))
     self.assertEqual("com.google.package", app_pkg)
     self.assertEqual("android.app.Application", old_application)
-    self.assertEqual(STUB_APPLICATION, self.GetApplication(new_manifest))
+    self.assertEqual(
+        MOBILE_INSTALL_STUB_APPLICATION, self.GetApplication(new_manifest))
 
   def testRemovesHasCode(self):
-    new_manifest, _, _ = Stubify(MANIFEST_WITH_HASCODE)
-    application = ElementTree.fromstring(new_manifest).find("application")
+    new_manifest, _, _ = StubifyMobileInstall(MANIFEST_WITH_HASCODE)
+    application = ElementTree.fromstring(
+        six.ensure_str(new_manifest)).find("application")
     self.assertFalse(("{%s}hasCode" % ANDROID) in application.attrib)
 
   def assertHasPermission(self, manifest_string, permission):
@@ -107,19 +130,44 @@ class StubifyTest(unittest.TestCase):
 
   def testAddsPermission(self):
     self.assertHasPermission(
-        Stubify(MANIFEST_WITH_APPLICATION)[0], READ_EXTERNAL_STORAGE)
+        StubifyMobileInstall(
+            MANIFEST_WITH_APPLICATION)[0], READ_EXTERNAL_STORAGE)
 
   def testDoesNotDuplicatePermission(self):
     self.assertHasPermission(
-        Stubify(MANIFEST_WITH_PERMISSION)[0], READ_EXTERNAL_STORAGE)
+        StubifyMobileInstall(
+            MANIFEST_WITH_PERMISSION)[0], READ_EXTERNAL_STORAGE)
 
   def testBadManifest(self):
     with self.assertRaises(BadManifestException):
-      Stubify(BAD_MANIFEST)
+      StubifyMobileInstall(BAD_MANIFEST)
 
   def testTooManyApplications(self):
     with self.assertRaises(BadManifestException):
-      Stubify(MULTIPLE_APPLICATIONS)
+      StubifyMobileInstall(MULTIPLE_APPLICATIONS)
+
+  def testNoPackageInManifest(self):
+    with self.assertRaises(BadManifestException):
+      StubifyMobileInstall(NO_PACKAGE_MANIFEST)
+
+
+class StubifyInstantRunTest(unittest.TestCase):
+
+  def testReplacesOldApplication(self):
+    new_manifest = StubifyInstantRun(MANIFEST_WITH_APPLICATION)
+    manifest = ElementTree.fromstring(new_manifest)
+    application = manifest.find("application")
+    self.assertEqual(INSTANT_RUN_BOOTSTRAP_APPLICATION,
+                     application.get("{%s}name" % ANDROID))
+    self.assertEqual("old.application", application.get("name"))
+
+  def testReplacesAndSavesOldApplication(self):
+    new_manifest = StubifyInstantRun(MANIFEST_WITHOUT_APPLICATION)
+    manifest = ElementTree.fromstring(new_manifest)
+    application = manifest.find("application")
+    self.assertEqual(INSTANT_RUN_BOOTSTRAP_APPLICATION,
+                     application.get("{%s}name" % ANDROID))
+    self.assertEqual(None, application.get("name"))
 
 
 if __name__ == "__main__":

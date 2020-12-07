@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs;
 
+import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.IOException;
 import java.io.OutputStream;
 
@@ -20,7 +21,11 @@ import java.io.OutputStream;
  * Functionally like a {@link ReadonlyFileSystem} and a {@link AbstractFileSystemWithCustomStat}.
  */
 public abstract class ReadonlyFileSystemWithCustomStat extends AbstractFileSystemWithCustomStat {
-  protected ReadonlyFileSystemWithCustomStat() {
+
+  protected ReadonlyFileSystemWithCustomStat() throws DefaultHashFunctionNotSetException {}
+
+  public ReadonlyFileSystemWithCustomStat(DigestHashFunction hashFunction) {
+    super(hashFunction);
   }
 
   protected IOException modificationException() {
@@ -41,7 +46,7 @@ public abstract class ReadonlyFileSystemWithCustomStat extends AbstractFileSyste
   }
 
   @Override
-  protected void setWritable(Path path, boolean writable) throws IOException {
+  public void setWritable(Path path, boolean writable) throws IOException {
     throw modificationException();
   }
 
@@ -51,17 +56,32 @@ public abstract class ReadonlyFileSystemWithCustomStat extends AbstractFileSyste
   }
 
   @Override
-  public boolean supportsModifications() {
+  public boolean supportsModifications(Path path) {
     return false;
   }
 
   @Override
-  public boolean supportsSymbolicLinks() {
+  public boolean supportsSymbolicLinksNatively(Path path) {
     return false;
   }
 
   @Override
-  protected boolean createDirectory(Path path) throws IOException {
+  public boolean supportsHardLinksNatively(Path path) {
+    return false;
+  }
+
+  @Override
+  public boolean isFilePathCaseSensitive() {
+    return true;
+  }
+
+  @Override
+  public boolean createDirectory(Path path) throws IOException {
+    throw modificationException();
+  }
+
+  @Override
+  public void createDirectoryAndParents(Path path) throws IOException {
     throw modificationException();
   }
 
@@ -71,17 +91,23 @@ public abstract class ReadonlyFileSystemWithCustomStat extends AbstractFileSyste
   }
 
   @Override
-  protected void renameTo(Path sourcePath, Path targetPath) throws IOException {
+  protected void createFSDependentHardLink(Path linkPath, Path originalPath)
+      throws IOException {
     throw modificationException();
   }
 
   @Override
-  protected boolean delete(Path path) throws IOException {
+  public void renameTo(Path sourcePath, Path targetPath) throws IOException {
     throw modificationException();
   }
 
   @Override
-  protected void setLastModifiedTime(Path path, long newTime) throws IOException {
+  public boolean delete(Path path) throws IOException {
+    throw modificationException();
+  }
+
+  @Override
+  public void setLastModifiedTime(Path path, long newTime) throws IOException {
     throw modificationException();
   }
 }

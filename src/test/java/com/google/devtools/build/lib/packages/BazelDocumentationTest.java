@@ -16,18 +16,16 @@ package com.google.devtools.build.lib.packages;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Files;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-
-import com.google.devtools.build.lib.bazel.BazelMain;
+import com.google.devtools.build.lib.bazel.Bazel;
 import com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider;
 import com.google.devtools.build.lib.packages.util.DocumentationTestUtil;
-
+import com.google.devtools.build.runfiles.Runfiles;
+import java.io.File;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.io.File;
 
 /**
  * Test for Bazel documentation.
@@ -35,15 +33,18 @@ import java.io.File;
 @RunWith(JUnit4.class)
 public class BazelDocumentationTest {
   /**
-   * Checks that the blaze-user-manual is in sync with the
-   * {@link BuildConfiguration}.
+   * Checks that the user-manual is in sync with the {@link
+   * com.google.devtools.build.lib.analysis.config.BuildConfiguration}.
    */
   @Test
   public void testBazelUserManual() throws Exception {
-    final File documentationFile = new File("site/docs/bazel-user-manual.html");
+    Runfiles runfiles = Runfiles.create();
+    String documentationFilePath = runfiles.rlocation("io_bazel/site/docs/user-manual.html");
+    final File documentationFile = new File(documentationFilePath);
     DocumentationTestUtil.validateUserManual(
-        BazelMain.BAZEL_MODULES,
+        Bazel.BAZEL_MODULES,
         BazelRuleClassProvider.create(),
-        Files.asCharSource(documentationFile, UTF_8).read());
+        Files.asCharSource(documentationFile, UTF_8).read(),
+        ImmutableSet.of());
   }
 }

@@ -29,4 +29,16 @@ public interface Version {
    * See http://en.wikipedia.org/wiki/Partially_ordered_set.
    */
   boolean atMost(Version other);
+
+  /**
+   * Returns whether {@code this < other} in the partial order of versions, similarly to {@link
+   * #atMost}.
+   *
+   * <p>Returns true iff the 2 versions are comparable in the partial order and {@code this} is
+   * strictly lower than {@code other}. False result means that either the elements are comparable
+   * and {@code this >= other} or the versions are not comparable in the partial order.
+   */
+  default boolean lowerThan(Version other) {
+    return atMost(other) && !equals(other);
+  }
 }

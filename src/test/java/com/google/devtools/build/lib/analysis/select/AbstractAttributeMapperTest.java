@@ -14,44 +14,29 @@
 package com.google.devtools.build.lib.analysis.select;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.util.EventCollectionApparatus;
 import com.google.devtools.build.lib.packages.AbstractAttributeMapper;
-import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeContainer;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.util.PackageFactoryApparatus;
-import com.google.devtools.build.lib.syntax.Type;
-import com.google.devtools.build.lib.testutil.FoundationTestCaseForJunit4;
-import com.google.devtools.build.lib.testutil.Scratch;
-import com.google.devtools.build.lib.vfs.Path;
-
+import com.google.devtools.build.lib.packages.Type;
+import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.util.List;
-
-/**
- * Unit tests for {@link AbstractAttributeMapper}.
- */
+/** Unit tests for {@link AbstractAttributeMapper}. */
 @RunWith(JUnit4.class)
-public class AbstractAttributeMapperTest extends FoundationTestCaseForJunit4 {
+public class AbstractAttributeMapperTest extends BuildViewTestCase {
 
-  private Package pkg;
   protected Rule rule;
   protected AbstractAttributeMapper mapper;
 
@@ -62,36 +47,31 @@ public class AbstractAttributeMapperTest extends FoundationTestCaseForJunit4 {
     }
   }
 
-  protected Rule createRule(String pkgPath, String ruleName, String... ruleDef) throws Exception  {
-    Scratch scratch = new Scratch();
-    EventCollectionApparatus events = new EventCollectionApparatus();
-    PackageFactoryApparatus packages = new PackageFactoryApparatus(events.reporter());
-
-    Path buildFile = scratch.file(pkgPath + "/BUILD", ruleDef);
-    pkg = packages.createPackage(pkgPath, buildFile);
-    return pkg.getRule(ruleName);
-  }
-
   @Before
   public final void initializeRuleAndMapper() throws Exception {
-    rule = createRule("x", "myrule",
+    rule = scratchRule("p", "myrule",
         "cc_binary(name = 'myrule',",
         "          srcs = ['a', 'b', 'c'])");
     RuleClass ruleClass = rule.getRuleClassObject();
-    mapper = new TestMapper(pkg, ruleClass, rule.getLabel(), rule.getAttributeContainer());
+    mapper =
+        new TestMapper(rule.getPackage(), ruleClass, rule.getLabel(), rule.getAttributeContainer());
   }
 
   @Test
   public void testRuleProperties() throws Exception {
-    assertEquals(rule.getName(), mapper.getName());
-    assertEquals(rule.getLabel(), mapper.getLabel());
+    assertThat(mapper.getName()).isEqualTo(rule.getName());
+    assertThat(mapper.getLabel()).isEqualTo(rule.getLabel());
   }
 
   @Test
   public void testPackageDefaultProperties() throws Exception {
-    assertEquals(pkg.getDefaultHdrsCheck(), mapper.getPackageDefaultHdrsCheck());
-    assertEquals(pkg.getDefaultTestOnly(), mapper.getPackageDefaultTestOnly());
-    assertEquals(pkg.getDefaultDeprecation(), mapper.getPackageDefaultDeprecation());
+    rule = scratchRule("a", "myrule",
+        "cc_binary(name = 'myrule',",
+        "          srcs = ['a', 'b', 'c'])");
+    Package pkg = rule.getPackage();
+    assertThat(mapper.getPackageDefaultHdrsCheck()).isEqualTo(pkg.getDefaultHdrsCheck());
+    assertThat(mapper.getPackageDefaultTestOnly()).isEqualTo(pkg.getDefaultTestOnly());
+    assertThat(mapper.getPackageDefaultDeprecation()).isEqualTo(pkg.getDefaultDeprecation());
   }
 
   @Test
@@ -100,65 +80,50 @@ public class AbstractAttributeMapperTest extends FoundationTestCaseForJunit4 {
     mapper.get("srcs", BuildType.LABEL_LIST);
 
     // Bad typing:
-    try {
-      mapper.get("srcs", Type.BOOLEAN);
-      fail("Expected type mismatch to trigger an exception");
-    } catch (IllegalArgumentException e) {
-      // Expected.
-    }
+    assertThrows(
+        "Expected type mismatch to trigger an exception",
+        IllegalArgumentException.class,
+        () -> mapper.get("srcs", Type.BOOLEAN));
 
     // Unknown attribute:
-    try {
-      mapper.get("nonsense", Type.BOOLEAN);
-      fail("Expected non-existent type to trigger an exception");
-    } catch (IllegalArgumentException e) {
-      // Expected.
-    }
+    assertThrows(
+        "Expected type mismatch to trigger an exception",
+        IllegalArgumentException.class,
+        () -> mapper.get("nonsense", Type.BOOLEAN));
   }
 
   @Test
   public void testGetAttributeType() throws Exception {
-    assertEquals(BuildType.LABEL_LIST, mapper.getAttributeType("srcs"));
-    assertNull(mapper.getAttributeType("nonsense"));
+    assertThat(mapper.getAttributeType("srcs")).isEqualTo(BuildType.LABEL_LIST);
+    assertThat(mapper.getAttributeType("nonsense")).isNull();
   }
 
   @Test
   public void testGetAttributeDefinition() {
-    assertEquals("srcs", mapper.getAttributeDefinition("srcs").getName());
-    assertNull(mapper.getAttributeDefinition("nonsense"));
+    assertThat(mapper.getAttributeDefinition("srcs").getName()).isEqualTo("srcs");
+    assertThat(mapper.getAttributeDefinition("nonsense")).isNull();
   }
 
   @Test
   public void testIsAttributeExplicitlySpecified() throws Exception {
-    assertTrue(mapper.isAttributeValueExplicitlySpecified("srcs"));
-    assertFalse(mapper.isAttributeValueExplicitlySpecified("deps"));
-    assertFalse(mapper.isAttributeValueExplicitlySpecified("nonsense"));
-  }
-
-  protected static class VisitationRecorder implements AttributeMap.AcceptsLabelAttribute {
-    public List<String> labelsVisited = Lists.newArrayList();
-    @Override
-    public void acceptLabelAttribute(Label label, Attribute attribute) {
-      if (attribute.getName().equals("srcs")) {
-        labelsVisited.add(label.toString());
-      }
-    }
+    assertThat(mapper.isAttributeValueExplicitlySpecified("srcs")).isTrue();
+    assertThat(mapper.isAttributeValueExplicitlySpecified("deps")).isFalse();
+    assertThat(mapper.isAttributeValueExplicitlySpecified("nonsense")).isFalse();
   }
 
   @Test
   public void testVisitation() throws Exception {
-    VisitationRecorder recorder = new VisitationRecorder();
-    mapper.visitLabels(recorder);
-    assertThat(recorder.labelsVisited)
-        .containsExactlyElementsIn(ImmutableList.of("//x:a", "//x:b", "//x:c"));
+    assertThat(getLabelsForAttribute(mapper, "srcs")).containsExactly("//p:a", "//p:b", "//p:c");
   }
 
-  @Test
-  public void testComputedDefault() throws Exception {
-    // Should return a valid ComputedDefault instance since this is a computed default:
-    assertThat(mapper.getComputedDefault("$stl", BuildType.LABEL))
-        .isInstanceOf(Attribute.ComputedDefault.class);
-    // Should return null since this *isn't* a computed default:
-    assertNull(mapper.getComputedDefault("srcs", BuildType.LABEL_LIST));
+  protected static List<String> getLabelsForAttribute(
+      AttributeMap attributeMap, String attributeName) throws InterruptedException {
+    return attributeMap
+        .visitLabels()
+        .stream()
+        .filter((d) -> d.getAttribute().getName().equals(attributeName))
+        .map(AttributeMap.DepEdge::getLabel)
+        .map(Label::toString)
+        .collect(Collectors.toList());
   }
 }

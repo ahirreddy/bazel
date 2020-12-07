@@ -14,59 +14,127 @@
 
 package com.google.devtools.build.lib.rules.java;
 
+import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skylarkbuildapi.java.JavaAnnotationProcessingApi;
+import java.util.List;
 import javax.annotation.Nullable;
 
-/**
- * The collection of gen jars from the transitive closure.
- */
+/** The collection of gen jars from the transitive closure. */
 @Immutable
-public final class JavaGenJarsProvider implements TransitiveInfoProvider {
+@AutoCodec
+public final class JavaGenJarsProvider
+    implements TransitiveInfoProvider, JavaAnnotationProcessingApi<Artifact> {
 
   private final boolean usesAnnotationProcessing;
-  @Nullable
-  private final Artifact genClassJar;
-  @Nullable
-  private final Artifact genSourceJar;
+  @Nullable private final Artifact genClassJar;
+  @Nullable private final Artifact genSourceJar;
+
+  private final NestedSet<Artifact> processorClasspath;
+  private final NestedSet<String> processorClassNames;
+
   private final NestedSet<Artifact> transitiveGenClassJars;
   private final NestedSet<Artifact> transitiveGenSourceJars;
 
-  public JavaGenJarsProvider(
+  static JavaGenJarsProvider create(
       boolean usesAnnotationProcessing,
       @Nullable Artifact genClassJar,
       @Nullable Artifact genSourceJar,
+      JavaPluginInfoProvider plugins,
+      List<JavaGenJarsProvider> transitiveJavaGenJars) {
+    NestedSetBuilder<Artifact> classJarsBuilder = NestedSetBuilder.stableOrder();
+    NestedSetBuilder<Artifact> sourceJarsBuilder = NestedSetBuilder.stableOrder();
+
+    if (genClassJar != null) {
+      classJarsBuilder.add(genClassJar);
+    }
+    if (genSourceJar != null) {
+      sourceJarsBuilder.add(genSourceJar);
+    }
+    for (JavaGenJarsProvider dep : transitiveJavaGenJars) {
+      classJarsBuilder.addTransitive(dep.getTransitiveGenClassJars());
+      sourceJarsBuilder.addTransitive(dep.getTransitiveGenSourceJars());
+    }
+    return new JavaGenJarsProvider(
+        usesAnnotationProcessing,
+        genClassJar,
+        genSourceJar,
+        plugins.plugins().processorClasspath(),
+        plugins.plugins().processorClasses(),
+        classJarsBuilder.build(),
+        sourceJarsBuilder.build());
+  }
+
+  // Package-private for @AutoCodec
+  JavaGenJarsProvider(
+      boolean usesAnnotationProcessing,
+      @Nullable Artifact genClassJar,
+      @Nullable Artifact genSourceJar,
+      NestedSet<Artifact> processorClasspath,
+      NestedSet<String> processorClassNames,
       NestedSet<Artifact> transitiveGenClassJars,
       NestedSet<Artifact> transitiveGenSourceJars) {
     this.usesAnnotationProcessing = usesAnnotationProcessing;
     this.genClassJar = genClassJar;
     this.genSourceJar = genSourceJar;
+    this.processorClasspath = processorClasspath;
+    this.processorClassNames = processorClassNames;
     this.transitiveGenClassJars = transitiveGenClassJars;
     this.transitiveGenSourceJars = transitiveGenSourceJars;
   }
 
+  @Override
   public boolean usesAnnotationProcessing() {
     return usesAnnotationProcessing;
   }
 
+  @Override
   @Nullable
   public Artifact getGenClassJar() {
     return genClassJar;
   }
 
+  @Override
   @Nullable
   public Artifact getGenSourceJar() {
     return genSourceJar;
   }
 
-  public NestedSet<Artifact> getTransitiveGenClassJars() {
+  @Override
+  public Depset /*<Artifact>*/ getTransitiveGenClassJarsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveGenClassJars);
+  }
+
+  NestedSet<Artifact> getTransitiveGenClassJars() {
     return transitiveGenClassJars;
   }
 
-  public NestedSet<Artifact> getTransitiveGenSourceJars() {
+  @Override
+  public Depset /*<Artifact>*/ getTransitiveGenSourceJarsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveGenSourceJars);
+  }
+
+  NestedSet<Artifact> getTransitiveGenSourceJars() {
     return transitiveGenSourceJars;
+  }
+
+  @Override
+  public Depset /*<Artifact>*/ getProcessorClasspathForStarlark() {
+    return Depset.of(Artifact.TYPE, processorClasspath);
+  }
+
+  NestedSet<Artifact> getProcessorClasspath() {
+    return processorClasspath;
+  }
+
+  @Override
+  public ImmutableList<String> getProcessorClassNames() {
+    return processorClassNames.toList();
   }
 }

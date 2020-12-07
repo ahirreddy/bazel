@@ -14,20 +14,31 @@
 package com.google.devtools.build.lib.query2.engine;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 
-/**
- * A class used for deduplication of {@code Iterable}s. If called with repeated elements or multiple
- * times with repeated elements between calls, it guarantees to output only those elements exactly once.
- */
+/** A helper for deduping values. */
+@ThreadSafe
 public interface Uniquifier<T> {
+  /**
+   * Returns whether {@code newElement} has been seen before by {@link #unique(T)} or
+   * {@link #unique(Iterable)}.
+   *
+   * <p>Please note the difference between this method and {@link #unique(T)}!
+   *
+   * <p>This method is inherently racy wrt {@link #unique(T)} and {@link #unique(Iterable)}. Only
+   * use it if you know what you are doing.
+   */
+  boolean uniquePure(T newElement);
 
   /**
-   * Receives an iterable and returns the list of elements that were not already seen. The
-   * uniqueness need to be guaranteed for elements of the same iterable and multiple calls to the
-   * {@code unique} method.
-   *
-   * @param newElements The new elements to process.
-   * @return The subset of elements not already seen by this Uniquifier.
+   * Returns whether {@code newElement} has been seen before by {@link #unique(T)} or {@link
+   * #unique(Iterable)}.
    */
-  ImmutableList<T> unique(Iterable<T> newElements);
+  boolean unique(T newElement) throws QueryException;
+
+  /**
+   * Returns the subset of {@code newElements} that haven't been seen before by {@link #unique(T)}
+   * or {@link #unique(Iterable)}.
+   */
+  ImmutableList<T> unique(Iterable<T> newElements) throws QueryException;
 }

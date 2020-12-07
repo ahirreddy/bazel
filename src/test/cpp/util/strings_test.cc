@@ -12,11 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "src/main/cpp/util/strings.h"
-#include "gtest/gtest.h"
 
-using std::vector;
+#include <wchar.h>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "googletest/include/gtest/gtest.h"
 
 namespace blaze_util {
+
+using std::string;
+using std::vector;
 
 TEST(BlazeUtil, JoinStrings) {
   vector<string> pieces;
@@ -40,42 +48,42 @@ TEST(BlazeUtil, JoinStrings) {
 TEST(BlazeUtil, Split) {
   string lines = "";
   vector<string> pieces = Split(lines, '\n');
-  ASSERT_EQ(0, pieces.size());
+  ASSERT_EQ(size_t(0), pieces.size());
 
   lines = "foo";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "\nfoo";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "\n\n\nfoo";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo\n";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo\n\n\n";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo\nbar";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(2, pieces.size());
+  ASSERT_EQ(size_t(2), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
   ASSERT_EQ("bar", pieces[1]);
 
   lines = "foo\n\nbar";
   pieces = Split(lines, '\n');
-  ASSERT_EQ(2, pieces.size());
+  ASSERT_EQ(size_t(2), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
   ASSERT_EQ("bar", pieces[1]);
 }
@@ -126,91 +134,91 @@ TEST(BlazeUtil, Tokenize) {
   vector<string> result;
   string str = "a b c";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(3, result.size());
+  ASSERT_EQ(size_t(3), result.size());
   EXPECT_EQ("a", result[0]);
   EXPECT_EQ("b", result[1]);
   EXPECT_EQ("c", result[2]);
 
   str = "a 'b c'";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(2, result.size());
+  ASSERT_EQ(size_t(2), result.size());
   EXPECT_EQ("a", result[0]);
   EXPECT_EQ("b c", result[1]);
 
   str = "foo# bar baz";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(1, result.size());
+  ASSERT_EQ(size_t(1), result.size());
   EXPECT_EQ("foo", result[0]);
 
   str = "foo # bar baz";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(1, result.size());
+  ASSERT_EQ(size_t(1), result.size());
   EXPECT_EQ("foo", result[0]);
 
   str = "#bar baz";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(0, result.size());
+  ASSERT_EQ(size_t(0), result.size());
 
   str = "#";
   Tokenize(str, '#', &result);
-  ASSERT_EQ(0, result.size());
+  ASSERT_EQ(size_t(0), result.size());
 
   str = " \tfirst second /    ";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(3, result.size());
+  ASSERT_EQ(size_t(3), result.size());
   EXPECT_EQ("first", result[0]);
   EXPECT_EQ("second", result[1]);
   EXPECT_EQ("/", result[2]);
 
   str = " \tfirst second /    ";
   Tokenize(str, '/', &result);
-  ASSERT_EQ(2, result.size());
+  ASSERT_EQ(size_t(2), result.size());
   EXPECT_EQ("first", result[0]);
   EXPECT_EQ("second", result[1]);
 
   str = "first \"second' third\" fourth";
   Tokenize(str, '/', &result);
-  ASSERT_EQ(3, result.size());
+  ASSERT_EQ(size_t(3), result.size());
   EXPECT_EQ("first", result[0]);
   EXPECT_EQ("second' third", result[1]);
   EXPECT_EQ("fourth", result[2]);
 
   str = "first 'second\" third' fourth";
   Tokenize(str, '/', &result);
-  ASSERT_EQ(3, result.size());
+  ASSERT_EQ(size_t(3), result.size());
   EXPECT_EQ("first", result[0]);
   EXPECT_EQ("second\" third", result[1]);
   EXPECT_EQ("fourth", result[2]);
 
   str = "\\ this\\ is\\ one\\'\\ token";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(1, result.size());
+  ASSERT_EQ(size_t(1), result.size());
   EXPECT_EQ(" this is one' token", result[0]);
 
   str = "\\ this\\ is\\ one\\'\\ token\\";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(1, result.size());
+  ASSERT_EQ(size_t(1), result.size());
   EXPECT_EQ(" this is one' token", result[0]);
 
   str = "unterminated \" runs to end of line";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(2, result.size());
+  ASSERT_EQ(size_t(2), result.size());
   EXPECT_EQ("unterminated", result[0]);
   EXPECT_EQ(" runs to end of line", result[1]);
 
   str = "";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(0, result.size());
+  ASSERT_EQ(size_t(0), result.size());
 
   str = "one two\'s three";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(2, result.size());
+  ASSERT_EQ(size_t(2), result.size());
   EXPECT_EQ("one", result[0]);
   EXPECT_EQ("twos three", result[1]);
 
   str = "one \'two three";
   Tokenize(str, 0, &result);
-  ASSERT_EQ(2, result.size());
+  ASSERT_EQ(size_t(2), result.size());
   EXPECT_EQ("one", result[0]);
   EXPECT_EQ("two three", result[1]);
 }
@@ -225,66 +233,66 @@ static vector<string> SplitQuoted(const string &contents,
 TEST(BlazeUtil, SplitQuoted) {
   string lines = "";
   vector<string> pieces = SplitQuoted(lines, '\n');
-  ASSERT_EQ(0, pieces.size());
+  ASSERT_EQ(size_t(0), pieces.size());
 
   // Same behaviour without quotes as Split
   lines = "foo";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = " foo";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "   foo";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo ";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo   ";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
 
   lines = "foo bar";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(2, pieces.size());
+  ASSERT_EQ(size_t(2), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
   ASSERT_EQ("bar", pieces[1]);
 
   lines = "foo  bar";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(2, pieces.size());
+  ASSERT_EQ(size_t(2), pieces.size());
   ASSERT_EQ("foo", pieces[0]);
   ASSERT_EQ("bar", pieces[1]);
 
   // Test with quotes
   lines = "' 'foo";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("' 'foo", pieces[0]);
 
   lines = " ' ' foo";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(2, pieces.size());
+  ASSERT_EQ(size_t(2), pieces.size());
   ASSERT_EQ("' '", pieces[0]);
   ASSERT_EQ("foo", pieces[1]);
 
   lines = "foo' \\' ' ";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo' \\' '", pieces[0]);
 
   lines = "foo'\\'\" ' ";
   pieces = SplitQuoted(lines, ' ');
-  ASSERT_EQ(1, pieces.size());
+  ASSERT_EQ(size_t(1), pieces.size());
   ASSERT_EQ("foo'\\'\" '", pieces[0]);
 }
 
@@ -292,6 +300,33 @@ TEST(BlazeUtil, StringPrintf) {
   string out;
   StringPrintf(&out, "%s %s", "a", "b");
   EXPECT_EQ("a b", out);
+}
+
+TEST(BlazeUtil, EndsWithTest) {
+  ASSERT_TRUE(ends_with("", ""));
+  ASSERT_TRUE(ends_with(L"", L""));
+
+  ASSERT_TRUE(ends_with("abc", "bc"));
+  ASSERT_TRUE(ends_with(L"abc", L"bc"));
+
+  // prefix matches but suffix doesn't
+  ASSERT_FALSE(ends_with("abc", "bd"));
+  ASSERT_FALSE(ends_with(L"abc", L"bd"));
+
+  // suffix matches but prefix doesn't
+  ASSERT_FALSE(ends_with("abc", "dc"));
+  ASSERT_FALSE(ends_with(L"abc", L"dc"));
+
+  // full match
+  ASSERT_TRUE(ends_with("abc", "abc"));
+  ASSERT_TRUE(ends_with(L"abc", L"abc"));
+
+  // bigger "needle" than "haystack"
+  ASSERT_FALSE(ends_with("bc", "abc"));
+  ASSERT_FALSE(ends_with(L"bc", L"abc"));
+
+  ASSERT_FALSE(ends_with("bc", "def"));
+  ASSERT_FALSE(ends_with(L"bc", L"def"));
 }
 
 }  // namespace blaze_util

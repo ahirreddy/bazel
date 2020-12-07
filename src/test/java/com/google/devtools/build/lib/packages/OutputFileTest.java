@@ -13,31 +13,25 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertSame;
+import static com.google.common.truth.Truth.assertThat;
 
+import com.google.common.testing.EqualsTester;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.packages.util.PackageLoadingTestCaseForJunit4;
-import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
+import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
 import com.google.devtools.build.lib.vfs.Path;
-
+import com.google.devtools.build.lib.vfs.RootedPath;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 @RunWith(JUnit4.class)
-public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
-
-  private PackageFactory packageFactory;
+public class OutputFileTest extends PackageLoadingTestCase {
   private Package pkg;
   private Rule rule;
 
   @Before
   public final void createRule() throws Exception {
-    packageFactory = new PackageFactory(TestRuleClassProvider.getRuleClassProvider());
-
     Path buildfile =
         scratch.file(
             "pkg/BUILD",
@@ -47,27 +41,30 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
             "        outs=['x', 'subdir/y'])");
     this.pkg =
         packageFactory.createPackageForTesting(
-            PackageIdentifier.createInDefaultRepo("pkg"), buildfile, getPackageManager(), reporter);
+            PackageIdentifier.createInMainRepo("pkg"),
+            RootedPath.toRootedPath(root, buildfile),
+            getPackageManager(),
+            reporter);
     assertNoEvents();
 
     this.rule = (Rule) pkg.getTarget("foo");
   }
 
   private void checkTargetRetainsGeneratingRule(OutputFile output) throws Exception {
-    assertSame(rule, output.getGeneratingRule());
+    assertThat(output.getGeneratingRule()).isSameInstanceAs(rule);
   }
 
   private void checkName(OutputFile output, String expectedName) throws Exception {
-    assertEquals(expectedName, output.getName());
+    assertThat(output.getName()).isEqualTo(expectedName);
   }
 
   private void checkLabel(OutputFile output, String expectedLabelString) throws Exception {
-    assertEquals(expectedLabelString, output.getLabel().toString());
+    assertThat(output.getLabel().toString()).isEqualTo(expectedLabelString);
   }
 
   @Test
   public void testGetAssociatedRule() throws Exception {
-    assertSame(rule, pkg.getTarget("x").getAssociatedRule());
+    assertThat(pkg.getTarget("x").getAssociatedRule()).isSameInstanceAs(rule);
   }
 
   @Test
@@ -76,7 +73,7 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
     checkTargetRetainsGeneratingRule(outputFileX);
     checkName(outputFileX, "x");
     checkLabel(outputFileX, "//pkg:x");
-    assertEquals("generated file", outputFileX.getTargetKind());
+    assertThat(outputFileX.getTargetKind()).isEqualTo("generated file");
   }
 
   @Test
@@ -93,16 +90,12 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
     OutputFile outputFileX2 = (OutputFile) pkg.getTarget("x");
     OutputFile outputFileY1 = (OutputFile) pkg.getTarget("subdir/y");
     OutputFile outputFileY2 = (OutputFile) pkg.getTarget("subdir/y");
-    assertSame(outputFileX1, outputFileX2);
-    assertSame(outputFileY1, outputFileY2);
-    assertEquals(outputFileX1, outputFileX2);
-    assertEquals(outputFileX2, outputFileX1);
-    assertEquals(outputFileY1, outputFileY2);
-    assertEquals(outputFileY2, outputFileY1);
-    assertFalse(outputFileX1.equals(outputFileY1));
-    assertFalse(outputFileY1.equals(outputFileX1));
-    assertEquals(outputFileX1.hashCode(), outputFileX2.hashCode());
-    assertEquals(outputFileY1.hashCode(), outputFileY2.hashCode());
+    assertThat(outputFileX2).isSameInstanceAs(outputFileX1);
+    assertThat(outputFileY2).isSameInstanceAs(outputFileY1);
+    new EqualsTester()
+        .addEqualityGroup(outputFileX1, outputFileX2)
+        .addEqualityGroup(outputFileY1, outputFileY2)
+        .testEquals();
   }
 
   @Test
@@ -120,8 +113,8 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("two_outs"),
-        buildfile,
+        PackageIdentifier.createInMainRepo("two_outs"),
+        RootedPath.toRootedPath(root, buildfile),
         getPackageManager(),
         reporter);
     assertContainsEvent(
@@ -144,8 +137,8 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("out_is_rule"),
-        buildfile,
+        PackageIdentifier.createInMainRepo("out_is_rule"),
+        RootedPath.toRootedPath(root, buildfile),
         getPackageManager(),
         reporter);
     assertContainsEvent("generated file 'a' in rule 'b' conflicts with existing genrule rule");
@@ -162,8 +155,8 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("two_outs"),
-        buildfile,
+        PackageIdentifier.createInMainRepo("two_outs"),
+        RootedPath.toRootedPath(root, buildfile),
         getPackageManager(),
         reporter);
     assertContainsEvent(
@@ -178,15 +171,15 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
             "bad_out_name/BUILD",
             "genrule(name='a',",
             "        cmd='ls',",
-            "        outs=['!@#'])");
+            "        outs=['!@#:'])");
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("bad_out_name"),
-        buildfile,
+        PackageIdentifier.createInMainRepo("bad_out_name"),
+        RootedPath.toRootedPath(root, buildfile),
         getPackageManager(),
         reporter);
-    assertContainsEvent("illegal output file name '!@#' in rule //bad_out_name:a");
+    assertContainsEvent("illegal output file name '!@#:' in rule //bad_out_name:a");
   }
 
   @Test
@@ -200,8 +193,8 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("cross_package_out"),
-        buildfile,
+        PackageIdentifier.createInMainRepo("cross_package_out"),
+        RootedPath.toRootedPath(root, buildfile),
         getPackageManager(),
         reporter);
     assertContainsEvent("label '//foo:bar' is not in the current package");
@@ -218,8 +211,10 @@ public class OutputFileTest extends PackageLoadingTestCaseForJunit4 {
 
     reporter.removeHandler(failFastHandler);
     packageFactory.createPackageForTesting(
-        PackageIdentifier.createInDefaultRepo("output_called_build"), buildfile,
-        getPackageManager(), reporter);
+        PackageIdentifier.createInMainRepo("output_called_build"),
+        RootedPath.toRootedPath(root, buildfile),
+        getPackageManager(),
+        reporter);
     assertContainsEvent("generated file 'BUILD' in rule 'a' conflicts with existing source file");
   }
 }

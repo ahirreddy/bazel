@@ -14,11 +14,10 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.base.Functions;
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -26,49 +25,68 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.testing.EqualsTester;
+import com.google.devtools.build.lib.actions.FileStateValue;
+import com.google.devtools.build.lib.actions.FileValue;
+import com.google.devtools.build.lib.actions.InconsistentFilesystemException;
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
+import com.google.devtools.build.lib.analysis.ServerDirectories;
+import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.NullEventHandler;
+import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
+import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
+import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
 import com.google.devtools.build.lib.skyframe.GlobValue.InvalidGlobPatternException;
+import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.testutil.ManualClock;
-import com.google.devtools.build.lib.util.BlazeClock;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.build.skyframe.ErrorInfo;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
 import com.google.devtools.build.skyframe.RecordingDifferencer;
+import com.google.devtools.build.skyframe.SequencedRecordingDifferencer;
 import com.google.devtools.build.skyframe.SequentialBuildDriver;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
-
 import javax.annotation.Nullable;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests for {@link GlobFunction}.
  */
 public abstract class GlobFunctionTest {
+  private static final EvaluationContext EVALUATION_OPTIONS =
+      EvaluationContext.newBuilder()
+          .setKeepGoing(false)
+          .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
+          .setEventHander(NullEventHandler.INSTANCE)
+          .build();
+
   @RunWith(JUnit4.class)
   public static class GlobFunctionAlwaysUseDirListingTest extends GlobFunctionTest {
     @Override
@@ -94,30 +112,32 @@ public abstract class GlobFunctionTest {
   private Path outputBase;
   private Path pkgPath;
   private AtomicReference<PathPackageLocator> pkgLocator;
-  private TimestampGranularityMonitor tsgm;
 
-  private static final PackageIdentifier PKG_PATH_ID = PackageIdentifier.createInDefaultRepo("pkg");
+  private static final PackageIdentifier PKG_ID = PackageIdentifier.createInMainRepo("pkg");
 
   @Before
   public final void setUp() throws Exception  {
     fs = new CustomInMemoryFs(new ManualClock());
-    root = fs.getRootDirectory().getRelative("root/workspace");
-    writableRoot = fs.getRootDirectory().getRelative("writableRoot/workspace");
-    outputBase = fs.getRootDirectory().getRelative("output_base");
-    pkgPath = root.getRelative(PKG_PATH_ID.getPackageFragment());
+    root = fs.getPath("/root/workspace");
+    writableRoot = fs.getPath("/writableRoot/workspace");
+    outputBase = fs.getPath("/output_base");
+    pkgPath = root.getRelative(PKG_ID.getPackageFragment());
 
     pkgLocator =
         new AtomicReference<>(
-            new PathPackageLocator(outputBase, ImmutableList.of(writableRoot, root)));
-    tsgm = new TimestampGranularityMonitor(BlazeClock.instance());
+            new PathPackageLocator(
+                outputBase,
+                ImmutableList.of(Root.fromPath(writableRoot), Root.fromPath(root)),
+                BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY));
 
-    differencer = new RecordingDifferencer();
+    differencer = new SequencedRecordingDifferencer();
     evaluator = new InMemoryMemoizingEvaluator(createFunctionMap(), differencer);
     driver = new SequentialBuildDriver(evaluator);
     PrecomputedValue.BUILD_ID.set(differencer, UUID.randomUUID());
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
-    PrecomputedValue.BLACKLISTED_PACKAGE_PREFIXES_FILE.set(
-        differencer, PathFragment.EMPTY_FRAGMENT);
+    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT_SEMANTICS);
+    RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE.set(
+        differencer, Optional.<RootedPath>absent());
 
     createTestFiles();
   }
@@ -125,22 +145,66 @@ public abstract class GlobFunctionTest {
   private Map<SkyFunctionName, SkyFunction> createFunctionMap() {
     AtomicReference<ImmutableSet<PackageIdentifier>> deletedPackages =
         new AtomicReference<>(ImmutableSet.<PackageIdentifier>of());
-    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(pkgLocator);
+    BlazeDirectories directories =
+        new BlazeDirectories(
+            new ServerDirectories(root, root, root),
+            root,
+            /* defaultSystemJavabase= */ null,
+            TestConstants.PRODUCT_NAME);
+    ExternalFilesHelper externalFilesHelper =
+        ExternalFilesHelper.createForTesting(
+            pkgLocator,
+            ExternalFileAction.DEPEND_ON_EXTERNAL_PKG_FOR_EXTERNAL_REPO_PATHS,
+            directories);
 
     Map<SkyFunctionName, SkyFunction> skyFunctions = new HashMap<>();
     skyFunctions.put(SkyFunctions.GLOB, new GlobFunction(alwaysUseDirListing()));
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
-    skyFunctions.put(SkyFunctions.PACKAGE_LOOKUP, new PackageLookupFunction(deletedPackages));
-    skyFunctions.put(SkyFunctions.BLACKLISTED_PACKAGE_PREFIXES,
-        new BlacklistedPackagePrefixesFunction());
     skyFunctions.put(
-        SkyFunctions.FILE_STATE,
+        SkyFunctions.PACKAGE_LOOKUP,
+        new PackageLookupFunction(
+            deletedPackages,
+            CrossRepositoryLabelViolationStrategy.ERROR,
+            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
+            BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
+    skyFunctions.put(
+        SkyFunctions.BLACKLISTED_PACKAGE_PREFIXES,
+        BazelSkyframeExecutorConstants.BLACKLISTED_PACKAGE_PREFIXES_FUNCTION);
+    skyFunctions.put(
+        FileStateValue.FILE_STATE,
         new FileStateFunction(
-            new TimestampGranularityMonitor(BlazeClock.instance()), externalFilesHelper));
-    skyFunctions.put(SkyFunctions.FILE, new FileFunction(pkgLocator, tsgm, externalFilesHelper));
+            new AtomicReference<TimestampGranularityMonitor>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
+    skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
+    skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
+    skyFunctions.put(
+        SkyFunctions.DIRECTORY_LISTING_STATE,
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
+
+    AnalysisMock analysisMock = AnalysisMock.get();
+    RuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
+    skyFunctions.put(SkyFunctions.WORKSPACE_AST, new WorkspaceASTFunction(ruleClassProvider));
+    skyFunctions.put(
+        WorkspaceFileValue.WORKSPACE_FILE,
+        new WorkspaceFileFunction(
+            ruleClassProvider,
+            analysisMock
+                .getPackageFactoryBuilderForTesting(directories)
+                .build(ruleClassProvider, fs),
+            directories,
+            /*starlarkImportLookupFunctionForInlining=*/ null));
+    skyFunctions.put(
+        SkyFunctions.EXTERNAL_PACKAGE,
+        new ExternalPackageFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
+    skyFunctions.put(
+        SkyFunctions.LOCAL_REPOSITORY_LOOKUP,
+        new LocalRepositoryLookupFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
     return skyFunctions;
   }
 
@@ -166,6 +230,27 @@ public abstract class GlobFunctionTest {
   @Test
   public void testSimple() throws Exception {
     assertGlobMatches("food", /* => */ "food");
+  }
+
+  @Test
+  public void testBlacklist() throws Exception {
+    FileSystemUtils.writeContentAsLatin1(root.getRelative(".bazelignore"), "pkg/foo/bar");
+    assertGlobMatches("foo/**", "foo/barnacle/wiz", "foo/barnacle", "foo");
+    differencer.invalidate(
+        ImmutableList.of(
+            FileStateValue.key(
+                RootedPath.toRootedPath(
+                    Root.fromPath(root), PathFragment.create(".bazelignore")))));
+
+    FileSystemUtils.createEmptyFile(root.getRelative(".bazelignore"));
+    assertGlobMatches(
+        "foo/**",
+        "foo/bar/wiz",
+        "foo/bar/wiz/file",
+        "foo/bar",
+        "foo/barnacle/wiz",
+        "foo/barnacle",
+        "foo");
   }
 
   @Test
@@ -267,33 +352,6 @@ public abstract class GlobFunctionTest {
   }
 
   @Test
-  public void testGlobMissingPackage() throws Exception {
-    // This is a malformed value key, because "missing" is not a package. Nevertheless, we have a
-    // sanity check that building the corresponding GlobValue fails loudly. The test depends on
-    // implementation details of ParallelEvaluator and GlobFunction.
-    SkyKey skyKey =
-        GlobValue.key(
-            PackageIdentifier.createInDefaultRepo("missing"),
-            "foo",
-            false,
-            PathFragment.EMPTY_FRAGMENT);
-    try {
-      driver.evaluate(
-          ImmutableList.of(skyKey),
-          false,
-          SkyframeExecutor.DEFAULT_THREAD_COUNT,
-          NullEventHandler.INSTANCE);
-      fail();
-    } catch (RuntimeException e) {
-      assertThat(e.getMessage())
-          .contains("Unrecoverable error while evaluating node '" + skyKey + "'");
-      Throwable cause = e.getCause();
-      assertThat(cause).isInstanceOf(IllegalStateException.class);
-      assertThat(cause.getMessage()).contains("isn't an existing package");
-    }
-  }
-
-  @Test
   public void testGlobDoesNotCrossPackageBoundary() throws Exception {
     FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/BUILD"));
     // "foo/bar" should not be in the results because foo is a separate package.
@@ -311,7 +369,7 @@ public abstract class GlobFunctionTest {
   public void testStarStarDoesNotCrossPackageBoundary() throws Exception {
     FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/bar/BUILD"));
     // "foo/bar" should not be in the results because foo/bar is a separate package.
-    assertGlobMatches("foo/**", /* => */ "foo", "foo/barnacle", "foo/barnacle/wiz");
+    assertGlobMatches("foo/**", /* => */ "foo/barnacle/wiz", "foo/barnacle", "foo");
   }
 
   @Test
@@ -320,53 +378,91 @@ public abstract class GlobFunctionTest {
     FileSystemUtils.createEmptyFile(writableRoot.getRelative("pkg/foo/bar/BUILD"));
     // "foo/bar" should not be in the results because foo/bar is detected as a separate package,
     // even though it is under a different package path.
-    assertGlobMatches("foo/**", /* => */ "foo", "foo/barnacle", "foo/barnacle/wiz");
+    assertGlobMatches("foo/**", /* => */ "foo/barnacle/wiz", "foo/barnacle", "foo");
+  }
+
+  @Test
+  public void testGlobDoesNotCrossRepositoryBoundary() throws Exception {
+    FileSystemUtils.appendIsoLatin1(
+        root.getRelative("WORKSPACE"), "local_repository(name='local', path='pkg/foo')");
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/WORKSPACE"));
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/BUILD"));
+    // "foo/bar" should not be in the results because foo is a separate repository.
+    assertGlobMatches("f*/*", /* => */ "food/barnacle", "fool/barnacle");
+  }
+
+  @Test
+  public void testGlobDirectoryMatchDoesNotCrossRepositoryBoundary() throws Exception {
+    FileSystemUtils.appendIsoLatin1(
+        root.getRelative("WORKSPACE"), "local_repository(name='local', path='pkg/foo/bar')");
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/bar/WORKSPACE"));
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/bar/BUILD"));
+    // "foo/bar" should not be in the results because foo/bar is a separate repository.
+    assertGlobMatches("foo/*", /* => */ "foo/barnacle");
+  }
+
+  @Test
+  public void testStarStarDoesNotCrossRepositoryBoundary() throws Exception {
+    FileSystemUtils.appendIsoLatin1(
+        root.getRelative("WORKSPACE"), "local_repository(name='local', path='pkg/foo/bar')");
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/bar/WORKSPACE"));
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("foo/bar/BUILD"));
+    // "foo/bar" should not be in the results because foo/bar is a separate repository.
+    assertGlobMatches("foo/**", /* => */ "foo/barnacle/wiz", "foo/barnacle", "foo");
+  }
+
+  @Test
+  public void testGlobDoesNotCrossRepositoryBoundaryUnderOtherPackagePath() throws Exception {
+    FileSystemUtils.appendIsoLatin1(
+        root.getRelative("WORKSPACE"),
+        "local_repository(name='local', path='"
+            + writableRoot.getRelative("pkg/foo/bar").getPathString()
+            + "')");
+    FileSystemUtils.createDirectoryAndParents(writableRoot.getRelative("pkg/foo/bar"));
+    FileSystemUtils.createEmptyFile(writableRoot.getRelative("pkg/foo/bar/WORKSPACE"));
+    FileSystemUtils.createEmptyFile(writableRoot.getRelative("pkg/foo/bar/BUILD"));
+    // "foo/bar" should not be in the results because foo/bar is detected as a separate package,
+    // even though it is under a different package path.
+    assertGlobMatches("foo/**", /* => */ "foo/barnacle/wiz", "foo/barnacle", "foo");
   }
 
   private void assertGlobMatches(String pattern, String... expecteds) throws Exception {
     assertGlobMatches(false, pattern, expecteds);
   }
 
-  private void assertGlobWithoutDirsMatches(String pattern, String... expecteds) throws Exception {
-    assertGlobMatches(true, pattern, expecteds);
-  }
-
   private void assertGlobMatches(boolean excludeDirs, String pattern, String... expecteds)
       throws Exception {
+    // The order requirement is not strictly necessary -- a change to GlobFunction semantics that
+    // changes the output order is fine, but we require that the order be the same here to detect
+    // potential non-determinism in output order, which would be bad.
+    // The current order in the case of "**" or "*" is roughly that of nestedset.Order.STABLE_ORDER,
+    // putting subdirectories before directories, but putting ordinary files after their parent
+    // directories.
     assertThat(
             Iterables.transform(
-                runGlob(excludeDirs, pattern).getMatches(), Functions.toStringFunction()))
-        .containsExactlyElementsIn(ImmutableList.copyOf(expecteds));
+                runGlob(excludeDirs, pattern).getMatches().toList(), Functions.toStringFunction()))
+        .containsExactlyElementsIn(ImmutableList.copyOf(expecteds))
+        .inOrder();
+  }
+
+  private void assertGlobWithoutDirsMatches(String pattern, String... expecteds) throws Exception {
+    assertGlobMatches(true, pattern, expecteds);
   }
 
   private void assertGlobsEqual(String pattern1, String pattern2) throws Exception {
     GlobValue value1 = runGlob(false, pattern1);
     GlobValue value2 = runGlob(false, pattern2);
-    assertEquals(
-        "GlobValues "
-            + value1.getMatches()
-            + " and "
-            + value2.getMatches()
-            + " should be equal. "
-            + "Patterns: "
-            + pattern1
-            + ","
-            + pattern2,
-        value1,
-        value2);
-    // Just to be paranoid:
-    assertEquals(value1, value1);
-    assertEquals(value2, value2);
+    new EqualsTester()
+        .addEqualityGroup(value1, value2)
+        .testEquals();
   }
 
   private GlobValue runGlob(boolean excludeDirs, String pattern) throws Exception {
-    SkyKey skyKey = GlobValue.key(PKG_PATH_ID, pattern, excludeDirs, PathFragment.EMPTY_FRAGMENT);
+    SkyKey skyKey =
+        GlobValue.key(
+            PKG_ID, Root.fromPath(root), pattern, excludeDirs, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<SkyValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
     if (result.hasError()) {
       throw result.getError().getException();
     }
@@ -387,28 +483,32 @@ public abstract class GlobFunctionTest {
       differencer.invalidate(
           ImmutableList.of(
               FileStateValue.key(
-                  RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz/file")))));
+                  RootedPath.toRootedPath(
+                      Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz/file")))));
       // The result should not rely on the FileStateValue, so it's still a cache hit.
       assertGlobMatches(pattern, "foo/bar/wiz/file");
 
       differencer.invalidate(
           ImmutableList.of(
               DirectoryListingStateValue.key(
-                  RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz")))));
+                  RootedPath.toRootedPath(
+                      Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz")))));
       // This should have invalidated the glob result.
       assertGlobMatches(pattern /* => nothing */);
     } else {
       differencer.invalidate(
           ImmutableList.of(
               DirectoryListingStateValue.key(
-                  RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz")))));
+                  RootedPath.toRootedPath(
+                      Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz")))));
       // The result should not rely on the DirectoryListingValue, so it's still a cache hit.
       assertGlobMatches(pattern, "foo/bar/wiz/file");
 
       differencer.invalidate(
           ImmutableList.of(
               FileStateValue.key(
-                  RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz/file")))));
+                  RootedPath.toRootedPath(
+                      Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz/file")))));
       // This should have invalidated the glob result.
       assertGlobMatches(pattern /* => nothing */);
     }
@@ -416,9 +516,6 @@ public abstract class GlobFunctionTest {
 
   @Test
   public void testIllegalPatterns() throws Exception {
-    assertIllegalPattern("(illegal) pattern");
-    assertIllegalPattern("[illegal pattern");
-    assertIllegalPattern("}illegal pattern");
     assertIllegalPattern("foo**bar");
     assertIllegalPattern("?");
     assertIllegalPattern("");
@@ -443,12 +540,12 @@ public abstract class GlobFunctionTest {
   }
 
   private void assertIllegalPattern(String pattern) {
-    try {
-      GlobValue.key(PKG_PATH_ID, pattern, false, PathFragment.EMPTY_FRAGMENT);
-      fail("invalid pattern not detected: " + pattern);
-    } catch (InvalidGlobPatternException e) {
-      // Expected.
-    }
+    assertThrows(
+        "invalid pattern not detected: " + pattern,
+        InvalidGlobPatternException.class,
+        () ->
+            GlobValue.key(
+                PKG_ID, Root.fromPath(root), pattern, false, PathFragment.EMPTY_FRAGMENT));
   }
 
   /**
@@ -467,7 +564,7 @@ public abstract class GlobFunctionTest {
 
   @Test
   public void testMatchesCallWithNoCache() {
-    assertTrue(UnixGlob.matches("*a*b", "CaCb", null));
+    assertThat(UnixGlob.matches("*a*b", "CaCb", null)).isTrue();
   }
 
   @Test
@@ -477,7 +574,7 @@ public abstract class GlobFunctionTest {
     }
     // Note that these are not in the result: ".", ".."
     assertGlobMatches(
-        "*", "a1", "a2", "not.hidden", "foo", "fool", "food", "BUILD", ".hidden", "..also.hidden");
+        "*", "..also.hidden", ".hidden", "BUILD", "a1", "a2", "foo", "food", "fool", "not.hidden");
     assertGlobMatches("*.hidden", "not.hidden");
   }
 
@@ -485,65 +582,63 @@ public abstract class GlobFunctionTest {
   public void testDoubleStar() throws Exception {
     assertGlobMatches(
         "**",
-        "",
-        "BUILD",
-        "a1",
-        "a1/b1",
         "a1/b1/c",
+        "a1/b1",
+        "a1",
         "a2",
-        "foo",
-        "foo/bar",
         "foo/bar/wiz",
         "foo/bar/wiz/file",
-        "foo/barnacle",
+        "foo/bar",
         "foo/barnacle/wiz",
-        "food",
-        "food/barnacle",
+        "foo/barnacle",
+        "foo",
         "food/barnacle/wiz",
-        "fool",
+        "food/barnacle",
+        "food",
+        "fool/barnacle/wiz",
         "fool/barnacle",
-        "fool/barnacle/wiz");
+        "fool",
+        "BUILD");
   }
 
   @Test
   public void testDoubleStarExcludeDirs() throws Exception {
-    assertGlobWithoutDirsMatches("**", "BUILD", "foo/bar/wiz/file");
+    assertGlobWithoutDirsMatches("**", "foo/bar/wiz/file", "BUILD");
   }
 
   @Test
   public void testDoubleDoubleStar() throws Exception {
     assertGlobMatches(
         "**/**",
-        "",
-        "BUILD",
-        "a1",
-        "a1/b1",
         "a1/b1/c",
+        "a1/b1",
+        "a1",
         "a2",
-        "foo",
-        "foo/bar",
         "foo/bar/wiz",
         "foo/bar/wiz/file",
-        "foo/barnacle",
+        "foo/bar",
         "foo/barnacle/wiz",
-        "food",
-        "food/barnacle",
+        "foo/barnacle",
+        "foo",
         "food/barnacle/wiz",
-        "fool",
+        "food/barnacle",
+        "food",
+        "fool/barnacle/wiz",
         "fool/barnacle",
-        "fool/barnacle/wiz");
+        "fool",
+        "BUILD");
   }
 
   @Test
   public void testDirectoryWithDoubleStar() throws Exception {
     assertGlobMatches(
         "foo/**",
-        "foo",
-        "foo/bar",
         "foo/bar/wiz",
         "foo/bar/wiz/file",
+        "foo/bar",
+        "foo/barnacle/wiz",
         "foo/barnacle",
-        "foo/barnacle/wiz");
+        "foo");
   }
 
   @Test
@@ -564,8 +659,8 @@ public abstract class GlobFunctionTest {
     assertGlobMatches(
         "foo/**/wiz",
         "foo/bar/wiz",
-        "foo/barnacle/baz/wiz",
         "foo/barnacle/wiz",
+        "foo/barnacle/baz/wiz",
         "foo/barnacle/wiz/wiz");
   }
 
@@ -582,31 +677,27 @@ public abstract class GlobFunctionTest {
   /** Regression test for b/13319874: Directory listing crash. */
   @Test
   public void testResilienceToFilesystemInconsistencies_DirectoryExistence() throws Exception {
-    long nodeId = pkgPath.getRelative("BUILD").stat().getNodeId();
     // Our custom filesystem says "pkgPath/BUILD" exists but "pkgPath" does not exist.
     fs.stubStat(pkgPath, null);
-    RootedPath pkgRootedPath = RootedPath.toRootedPath(root, pkgPath);
-    FileStateValue pkgDirFileStateValue = FileStateValue.create(pkgRootedPath, tsgm);
+    RootedPath pkgRootedPath = RootedPath.toRootedPath(Root.fromPath(root), pkgPath);
+    FileStateValue pkgDirFileStateValue = FileStateValue.create(pkgRootedPath, null);
     FileValue pkgDirValue =
-        FileValue.value(pkgRootedPath, pkgDirFileStateValue, pkgRootedPath, pkgDirFileStateValue);
+        FileValue.value(
+            ImmutableList.of(pkgRootedPath),
+            pkgRootedPath,
+            pkgDirFileStateValue,
+            pkgRootedPath,
+            pkgDirFileStateValue);
     differencer.inject(ImmutableMap.of(FileValue.key(pkgRootedPath), pkgDirValue));
-    String expectedMessage =
-        "Some filesystem operations implied /root/workspace/pkg/BUILD was a "
-            + "regular file with size of 0 and mtime of 0 and nodeId of "
-            + nodeId
-            + " and mtime of 0 "
-            + "but others made us think it was a nonexistent path";
-    SkyKey skyKey = GlobValue.key(PKG_PATH_ID, "*/foo", false, PathFragment.EMPTY_FRAGMENT);
+    String expectedMessage = "/root/workspace/pkg is no longer an existing directory";
+    SkyKey skyKey =
+        GlobValue.key(PKG_ID, Root.fromPath(root), "*/foo", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
-    assertTrue(result.hasError());
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
+    assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
-    assertThat(errorInfo.getException().getMessage()).contains(expectedMessage);
+    assertThat(errorInfo.getException()).hasMessageThat().contains(expectedMessage);
   }
 
   @Test
@@ -615,7 +706,7 @@ public abstract class GlobFunctionTest {
     // direct stat on "pkgPath/foo/bar/wiz" says it does not exist.
     Path fooBarDir = pkgPath.getRelative("foo/bar");
     fs.stubStat(fooBarDir.getRelative("wiz"), null);
-    RootedPath fooBarDirRootedPath = RootedPath.toRootedPath(root, fooBarDir);
+    RootedPath fooBarDirRootedPath = RootedPath.toRootedPath(Root.fromPath(root), fooBarDir);
     SkyValue fooBarDirListingValue =
         DirectoryListingStateValue.create(
             ImmutableList.of(new Dirent("wiz", Dirent.Type.DIRECTORY)));
@@ -623,24 +714,22 @@ public abstract class GlobFunctionTest {
         ImmutableMap.of(
             DirectoryListingStateValue.key(fooBarDirRootedPath), fooBarDirListingValue));
     String expectedMessage = "/root/workspace/pkg/foo/bar/wiz is no longer an existing directory.";
-    SkyKey skyKey = GlobValue.key(PKG_PATH_ID, "**/wiz", false, PathFragment.EMPTY_FRAGMENT);
+    SkyKey skyKey =
+        GlobValue.key(PKG_ID, Root.fromPath(root), "**/wiz", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
-    assertTrue(result.hasError());
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
+    assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
-    assertThat(errorInfo.getException().getMessage()).contains(expectedMessage);
+    assertThat(errorInfo.getException()).hasMessageThat().contains(expectedMessage);
   }
 
   @Test
   public void testResilienceToFilesystemInconsistencies_SymlinkType() throws Exception {
-    RootedPath wizRootedPath = RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz"));
+    RootedPath wizRootedPath =
+        RootedPath.toRootedPath(Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz"));
     RootedPath fileRootedPath =
-        RootedPath.toRootedPath(root, pkgPath.getRelative("foo/bar/wiz/file"));
+        RootedPath.toRootedPath(Root.fromPath(root), pkgPath.getRelative("foo/bar/wiz/file"));
     final FileStatus realStat = fileRootedPath.asPath().stat();
     fs.stubStat(
         fileRootedPath.asPath(),
@@ -695,20 +784,27 @@ public abstract class GlobFunctionTest {
         ImmutableMap.of(DirectoryListingStateValue.key(wizRootedPath), wizDirListingValue));
     String expectedMessage =
         "readdir and stat disagree about whether " + fileRootedPath.asPath() + " is a symlink";
-    SkyKey skyKey = GlobValue.key(PKG_PATH_ID, "foo/bar/wiz/*", false, PathFragment.EMPTY_FRAGMENT);
+    SkyKey skyKey =
+        GlobValue.key(
+            PKG_ID, Root.fromPath(root), "foo/bar/wiz/*", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
-    assertTrue(result.hasError());
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
+    assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
-    assertThat(errorInfo.getException().getMessage()).contains(expectedMessage);
+    assertThat(errorInfo.getException()).hasMessageThat().contains(expectedMessage);
   }
 
-  private class CustomInMemoryFs extends InMemoryFileSystem {
+  @Test
+  public void testSymlinks() throws Exception {
+    FileSystemUtils.createDirectoryAndParents(pkgPath.getRelative("symlinks"));
+    FileSystemUtils.ensureSymbolicLink(pkgPath.getRelative("symlinks/dangling.txt"), "nope");
+    FileSystemUtils.createEmptyFile(pkgPath.getRelative("symlinks/yup"));
+    FileSystemUtils.ensureSymbolicLink(pkgPath.getRelative("symlinks/existing.txt"), "yup");
+    assertGlobMatches("symlinks/*.txt", "symlinks/existing.txt");
+  }
+
+  private static final class CustomInMemoryFs extends InMemoryFileSystem {
 
     private Map<Path, FileStatus> stubbedStats = Maps.newHashMap();
 
@@ -721,11 +817,11 @@ public abstract class GlobFunctionTest {
     }
 
     @Override
-    public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
+    public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
       if (stubbedStats.containsKey(path)) {
         return stubbedStats.get(path);
       }
-      return super.stat(path, followSymlinks);
+      return super.statIfFound(path, followSymlinks);
     }
   }
 }

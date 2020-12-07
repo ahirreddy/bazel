@@ -13,13 +13,11 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
-import com.google.common.base.Supplier;
 import com.google.devtools.build.lib.concurrent.ThreadSafety;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
 
-/**
- * Receiver to inform callers which values have been invalidated. Values may be invalidated and then
- * re-validated if they have been found not to be changed.
- */
+/** Receiver for various stages of the lifetime of a skyframe node evaluation. */
 @ThreadSafety.ThreadSafe
 public interface EvaluationProgressReceiver {
   /**
@@ -30,6 +28,26 @@ public interface EvaluationProgressReceiver {
     BUILT,
     /** The value is clean or re-validated. */
     CLEAN,
+  }
+
+  /** Whether or not evaluation of this node succeeded. */
+  enum EvaluationSuccessState {
+    SUCCESS(true),
+    FAILURE(false);
+
+    EvaluationSuccessState(boolean succeeded) {
+      this.succeeded = succeeded;
+    }
+
+    private final boolean succeeded;
+
+    public boolean succeeded() {
+      return succeeded;
+    }
+
+    public Supplier<EvaluationSuccessState> supplier() {
+      return () -> this;
+    }
   }
 
   /**
@@ -43,11 +61,28 @@ public interface EvaluationProgressReceiver {
   }
 
   /**
+   * Overall state of the node while it is being evaluated.
+   */
+  enum NodeState {
+    /** The node is undergoing a dirtiness check and may be re-validated. */
+    CHECK_DIRTY,
+    /** The node is prepping for evaluation. */
+    INITIALIZING_ENVIRONMENT,
+    /** The node is in compute(). */
+    COMPUTE,
+    /** The node is done evaluation and committing the result. */
+    COMMIT,
+  }
+
+  /**
    * Notifies that the node named by {@code key} has been invalidated.
    *
    * <p>{@code state} indicates the new state of the value.
    *
-   * <p>May be called concurrently from multiple threads, possibly with the same {@code key}.
+   * <p>May be called concurrently from multiple threads.
+   *
+   * <p>If {@code state} is {@link InvalidationState#DIRTY}, should only be called after a
+   * successful {@link ThinNodeEntry#markDirty} call: a call that returns a non-null value.
    */
   void invalidated(SkyKey skyKey, InvalidationState state);
 
@@ -62,20 +97,65 @@ public interface EvaluationProgressReceiver {
   void enqueueing(SkyKey skyKey);
 
   /**
-   * Notifies that {@code skyFunction.compute(skyKey, ...)} has just been called, for some
-   * appropriate {@link SkyFunction} {@code skyFunction}.
+   * Notifies that a node corresponding to {@code skyKey} is about to enter the given
+   * {@code nodeState}.
    *
-   * <p>Notably, this includes {@link SkyFunction#compute} calls due to Skyframe restarts.
+   * <p>Notably, this includes {@link SkyFunction#compute} calls due to Skyframe restarts, but also
+   * dirtiness checking and node completion.
    */
-  void computed(SkyKey skyKey, long elapsedTimeNanos);
+  void stateStarting(SkyKey skyKey, NodeState nodeState);
+
+  /**
+   * Notifies that a node corresponding to {@code skyKey} is about to complete the given
+   * {@code nodeState}.
+   *
+   * <p>Always called symmetrically with {@link #stateStarting(SkyKey, NodeState)}}.
+   *
+   * <p>{@code elapsedTimeNanos} is either the elapsed time in the {@code nodeState} or -1 if the
+   * timing was not recorded.
+   */
+  void stateEnding(SkyKey skyKey, NodeState nodeState, long elapsedTimeNanos);
 
   /**
    * Notifies that the node for {@code skyKey} has been evaluated.
    *
    * <p>{@code state} indicates the new state of the node.
    *
-   * <p>If the value builder threw an error when building this node, then
-   * {@code valueSupplier.get()} evaluates to null.
+   * <p>If the value builder threw an error when building this node, then {@code
+   * valueSupplier.get()} evaluates to null.
+   *
+   * @param value The sky value. Only available if just evaluated, eg. on success *and* <code>
+   *     state == EvalutionState.BUILT</code>
    */
-  void evaluated(SkyKey skyKey, Supplier<SkyValue> valueSupplier, EvaluationState state);
+  void evaluated(
+      SkyKey skyKey,
+      @Nullable SkyValue value,
+      Supplier<EvaluationSuccessState> evaluationSuccessState,
+      EvaluationState state);
+
+  /** An {@link EvaluationProgressReceiver} that does nothing. */
+  class NullEvaluationProgressReceiver implements EvaluationProgressReceiver {
+    @Override
+    public void invalidated(SkyKey skyKey, InvalidationState state) {
+    }
+
+    @Override
+    public void enqueueing(SkyKey skyKey) {
+    }
+
+    @Override
+    public void stateStarting(SkyKey skyKey, NodeState nodeState) {
+    }
+
+    @Override
+    public void stateEnding(SkyKey skyKey, NodeState nodeState, long elapsedTimeNanos) {
+    }
+
+    @Override
+    public void evaluated(
+        SkyKey skyKey,
+        @Nullable SkyValue value,
+        Supplier<EvaluationSuccessState> evaluationSuccessState,
+        EvaluationState state) {}
+  }
 }

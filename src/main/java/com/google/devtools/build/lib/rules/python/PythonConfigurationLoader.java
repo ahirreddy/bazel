@@ -13,69 +13,37 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.python;
 
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationEnvironment;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
-import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
-import com.google.devtools.build.lib.rules.cpp.CppOptions;
-import com.google.devtools.build.lib.rules.cpp.CrosstoolConfigurationLoader;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig;
-
-import javax.annotation.Nullable;
 
 /**
  * A factory implementation for {@link PythonConfiguration} objects.
  */
 public class PythonConfigurationLoader implements ConfigurationFragmentFactory {
-  private final Function<String, String> cpuTransformer;
-
-  public PythonConfigurationLoader(Function<String, String> cpuTransformer) {
-    this.cpuTransformer = cpuTransformer;
-  }
-
   @Override
   public ImmutableSet<Class<? extends FragmentOptions>> requiredOptions() {
-    return ImmutableSet.of(PythonOptions.class, CppOptions.class);
-  }
-
-  @Nullable
-  private CrosstoolConfig.CToolchain getToolchain(
-      ConfigurationEnvironment env, BuildOptions buildOptions, Label crosstoolTop)
-      throws InvalidConfigurationException {
-    CrosstoolConfigurationLoader.CrosstoolFile file =
-        CrosstoolConfigurationLoader.readCrosstool(env, crosstoolTop);
-    if (file == null) {
-      return null;
-    }
-    return CrosstoolConfigurationLoader.selectToolchain(
-        file.getProto(), buildOptions, cpuTransformer);
+    return ImmutableSet.of(PythonOptions.class);
   }
 
   @Override
-  public PythonConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions)
+  public PythonConfiguration create(BuildOptions buildOptions)
       throws InvalidConfigurationException {
     PythonOptions pythonOptions = buildOptions.get(PythonOptions.class);
-    CppConfiguration cppConfiguration = env.getFragment(buildOptions, CppConfiguration.class);
-    if (cppConfiguration == null) {
-      return null;
-    }
-
-    CrosstoolConfig.CToolchain toolchain = getToolchain(
-        env, buildOptions, buildOptions.get(CppOptions.class).crosstoolTop);
-    if (toolchain == null) {
-      return null;
-    }
-
-    boolean ignorePythonVersionAttribute = pythonOptions.forcePython != null;
     PythonVersion pythonVersion = pythonOptions.getPythonVersion();
-
-    return new PythonConfiguration(pythonVersion, ignorePythonVersionAttribute);
+    return new PythonConfiguration(
+        pythonVersion,
+        pythonOptions.getDefaultPythonVersion(),
+        pythonOptions.buildPythonZip,
+        pythonOptions.buildTransitiveRunfilesTrees,
+        /*py2OutputsAreSuffixed=*/ pythonOptions.incompatiblePy2OutputsAreSuffixed,
+        /*disallowLegacyPyProvider=*/ pythonOptions.incompatibleDisallowLegacyPyProvider,
+        /*useToolchains=*/ pythonOptions.incompatibleUsePythonToolchains,
+        /*loadPythonRulesFromBzl=*/ pythonOptions.loadPythonRulesFromBzl,
+        /*defaultToExplicitInitPy=*/ pythonOptions.incompatibleDefaultToExplicitInitPy);
   }
 
   @Override

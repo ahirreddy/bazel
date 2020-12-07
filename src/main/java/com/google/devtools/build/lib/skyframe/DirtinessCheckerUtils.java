@@ -13,24 +13,26 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import static com.google.devtools.build.lib.actions.FileStateValue.FILE_STATE;
 import static com.google.devtools.build.lib.skyframe.SkyFunctions.DIRECTORY_LISTING_STATE;
-import static com.google.devtools.build.lib.skyframe.SkyFunctions.FILE_STATE;
 
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.FileStateValue;
+import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.FileType;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import java.io.IOException;
+import java.util.EnumSet;
 import java.util.Set;
-
 import javax.annotation.Nullable;
 
 /** Utilities for checking dirtiness of keys (mainly filesystem keys) in the graph. */
-class DirtinessCheckerUtils {
+public class DirtinessCheckerUtils {
   private DirtinessCheckerUtils() {}
 
   static class FileDirtinessChecker extends SkyValueDirtinessChecker {
@@ -45,7 +47,7 @@ class DirtinessCheckerUtils {
       RootedPath rootedPath = (RootedPath) key.argument();
       try {
         return FileStateValue.create(rootedPath, tsgm);
-      } catch (InconsistentFilesystemException | IOException e) {
+      } catch (IOException e) {
         // TODO(bazel-team): An IOException indicates a failure to get a file digest or a symlink
         // target, not a missing file. Such a failure really shouldn't happen, so failing early
         // may be better here.
@@ -91,16 +93,65 @@ class DirtinessCheckerUtils {
   }
 
   static final class MissingDiffDirtinessChecker extends BasicFilesystemDirtinessChecker {
-    private final Set<Path> missingDiffPaths;
+    private final Set<Root> missingDiffPackageRoots;
 
-    MissingDiffDirtinessChecker(final Set<Path> missingDiffPaths) {
-      this.missingDiffPaths = missingDiffPaths;
+    MissingDiffDirtinessChecker(final Set<Root> missingDiffPackageRoots) {
+      this.missingDiffPackageRoots = missingDiffPackageRoots;
     }
 
     @Override
     public boolean applies(SkyKey key) {
       return super.applies(key)
-          && missingDiffPaths.contains(((RootedPath) key.argument()).getRoot());
+          && missingDiffPackageRoots.contains(((RootedPath) key.argument()).getRoot());
+    }
+  }
+
+  /**
+   * Serves for tracking whether there are external and output files {@see ExternalFilesKnowledge}.
+   * Filtering of files, for which the new values should not be injected into evaluator, is done in
+   * SequencedSkyframeExecutor.handleChangedFiles().
+   */
+  static final class ExternalDirtinessChecker extends BasicFilesystemDirtinessChecker {
+    private final ExternalFilesHelper externalFilesHelper;
+    private final EnumSet<FileType> fileTypesToCheck;
+
+    ExternalDirtinessChecker(ExternalFilesHelper externalFilesHelper,
+        EnumSet<FileType> fileTypesToCheck) {
+      this.externalFilesHelper = externalFilesHelper;
+      this.fileTypesToCheck = fileTypesToCheck;
+    }
+
+    @Override
+    public boolean applies(SkyKey key) {
+      if (!super.applies(key)) {
+        return false;
+      }
+      FileType fileType = externalFilesHelper.getAndNoteFileType((RootedPath) key.argument());
+      return fileTypesToCheck.contains(fileType);
+    }
+
+    @Nullable
+    @Override
+    public SkyValue createNewValue(SkyKey key, @Nullable TimestampGranularityMonitor tsgm) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public SkyValueDirtinessChecker.DirtyResult check(
+        SkyKey skyKey, SkyValue oldValue, @Nullable TimestampGranularityMonitor tsgm) {
+      SkyValue newValue = super.createNewValue(skyKey, tsgm);
+      if (Objects.equal(newValue, oldValue)) {
+        return SkyValueDirtinessChecker.DirtyResult.notDirty(oldValue);
+      }
+      FileType fileType = externalFilesHelper.getAndNoteFileType((RootedPath) skyKey.argument());
+      if (fileType == FileType.EXTERNAL_REPO
+          || fileType == FileType.EXTERNAL_IN_MANAGED_DIRECTORY) {
+        // Files under output_base/external have a dependency on the WORKSPACE file, so we don't add
+        // a new SkyValue to the graph yet because it might change once the WORKSPACE file has been
+        // parsed.
+        return SkyValueDirtinessChecker.DirtyResult.dirty(oldValue);
+      }
+      return SkyValueDirtinessChecker.DirtyResult.dirtyWithNewValue(oldValue, newValue);
     }
   }
 

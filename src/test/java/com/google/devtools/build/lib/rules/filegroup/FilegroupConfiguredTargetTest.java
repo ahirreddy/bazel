@@ -14,27 +14,26 @@
 package com.google.devtools.build.lib.rules.filegroup;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.FileConfiguredTarget;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.devtools.build.lib.analysis.MiddlemanProvider;
+import com.google.devtools.build.lib.analysis.OutputGroupInfo;
+import com.google.devtools.build.lib.analysis.configuredtargets.FileConfiguredTarget;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.rules.java.JavaSemantics;
 import com.google.devtools.build.lib.util.FileType;
-
+import java.io.IOException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.io.IOException;
-import java.util.Arrays;
 
 /**
  * Tests for {@link Filegroup}.
  */
 @RunWith(JUnit4.class)
-public class FilegroupConfiguredTargetTest extends BuildViewTestCaseForJunit4 {
+public class FilegroupConfiguredTargetTest extends BuildViewTestCase {
 
   @Test
   public void testGroup() throws Exception {
@@ -42,23 +41,24 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCaseForJunit4 {
         "filegroup(name  = 'staticdata',",
         "          srcs = ['staticdata/spam.txt', 'staticdata/good.txt'])");
     ConfiguredTarget groupTarget = getConfiguredTarget("//nevermore:staticdata");
-    assertEquals(Arrays.asList("nevermore/staticdata/spam.txt",
-                               "nevermore/staticdata/good.txt"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(groupTarget)));
+    assertThat(ActionsTestUtil.prettyArtifactNames(getFilesToBuild(groupTarget)))
+        .containsExactly("nevermore/staticdata/spam.txt", "nevermore/staticdata/good.txt");
   }
 
   @Test
   public void testDependencyGraph() throws Exception {
-    scratch.file("java/com/google/test/BUILD",
+    scratch.file(
+        "java/com/google/test/BUILD",
         "java_binary(name  = 'test_app',",
         "    resources = [':data'],",
+        "    create_executable = 0,",
         "    srcs  = ['InputFile.java', 'InputFile2.java'])",
         "filegroup(name  = 'data',",
         "          srcs = ['b.txt', 'a.txt'])");
     FileConfiguredTarget appOutput =
         getFileConfiguredTarget("//java/com/google/test:test_app.jar");
-    assertEquals("b.txt a.txt", actionsTestUtil().predecessorClosureOf(
-        appOutput.getArtifact(), FileType.of(".txt")));
+    assertThat(actionsTestUtil().predecessorClosureOf(appOutput.getArtifact(), FileType.of(".txt")))
+        .isEqualTo("b.txt a.txt");
   }
 
   @Test
@@ -92,38 +92,42 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCaseForJunit4 {
   @Test
   public void testFileCanBeSrcsOfMultipleRules() throws Exception {
     writeTest();
-    assertEquals(Arrays.asList("test/a.txt"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:a"))));
-    assertEquals(Arrays.asList("test/a.txt"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:b"))));
+    assertThat(
+            ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:a"))))
+        .containsExactly("test/a.txt");
+    assertThat(
+            ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:b"))))
+        .containsExactly("test/a.txt");
   }
 
   @Test
   public void testRuleCanBeSrcsOfOtherRule() throws Exception {
     writeTest();
-    assertEquals(Arrays.asList("test/a.txt", "test/b.txt"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:c"))));
+    assertThat(
+            ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:c"))))
+        .containsExactly("test/a.txt", "test/b.txt");
   }
 
   @Test
   public void testOtherPackageCanBeSrcsOfRule() throws Exception {
     writeTest();
-    assertEquals(Arrays.asList("another/another.txt"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:d"))));
+    assertThat(
+            ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//test:d"))))
+        .containsExactly("another/another.txt");
   }
 
   @Test
   public void testIsNotExecutable() throws Exception {
     scratch.file("x/BUILD",
                 "filegroup(name = 'not_exec_two_files', srcs = ['bin', 'bin.sh'])");
-    assertNull(getExecutable("//x:not_exec_two_files"));
+    assertThat(getExecutable("//x:not_exec_two_files")).isNull();
   }
 
   @Test
   public void testIsExecutable() throws Exception {
     scratch.file("x/BUILD",
                 "filegroup(name = 'exec', srcs = ['bin'])");
-    assertEquals("x/bin", getExecutable("//x:exec").getExecPath().getPathString());
+    assertThat(getExecutable("//x:exec").getExecPath().getPathString()).isEqualTo("x/bin");
   }
 
   @Test
@@ -132,8 +136,8 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCaseForJunit4 {
                 "filegroup(name = 'a', srcs = ['file'])",
                 "filegroup(name = 'b', srcs = ['file'])",
                 "filegroup(name = 'c', srcs = [':a', ':b'])");
-    assertEquals(Arrays.asList("x/file"),
-        ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//x:c"))));
+    assertThat(ActionsTestUtil.prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//x:c"))))
+        .containsExactly("x/file");
   }
 
   @Test
@@ -144,5 +148,58 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCaseForJunit4 {
                 "filegroup(name = 'file_or_rule', srcs = ['a.txt'])",
                 "filegroup(name = 'my_rule', srcs = glob(['file_or_rule']))");
     assertThat(ActionsTestUtil.baseArtifactNames(getFilesToBuild(target))).containsExactly("a.txt");
+  }
+
+  @Test
+  public void testOutputGroupExtractsCorrectArtifacts() throws Exception {
+    scratch.file("pkg/a.java");
+    scratch.file("pkg/b.java");
+    scratch.file("pkg/in_ouput_group_a");
+    scratch.file("pkg/in_ouput_group_b");
+
+    scratch.file(
+        "pkg/BUILD",
+        "java_library(name='lib_a', srcs=['a.java'])",
+        "java_library(name='lib_b', srcs=['b.java'])",
+        "filegroup(name='group', srcs=[':lib_a', ':lib_b'],"
+            + String.format("output_group='%s')", JavaSemantics.SOURCE_JARS_OUTPUT_GROUP));
+
+    ConfiguredTarget group = getConfiguredTarget("//pkg:group");
+    assertThat(ActionsTestUtil.prettyArtifactNames(getFilesToBuild(group)))
+        .containsExactly("pkg/liblib_a-src.jar", "pkg/liblib_b-src.jar");
+  }
+
+  @Test
+  public void testErrorForIllegalOutputGroup() throws Exception {
+    scratch.file("pkg/a.cc");
+    scratch.file(
+        "pkg/BUILD",
+        "cc_library(name='lib_a', srcs=['a.cc'])",
+        String.format(
+            "filegroup(name='group', srcs=[':lib_a'], output_group='%s')",
+            OutputGroupInfo.HIDDEN_TOP_LEVEL));
+    AssertionError e = assertThrows(AssertionError.class, () -> getConfiguredTarget("//pkg:group"));
+    assertThat(e)
+        .hasMessageThat()
+        .contains(
+            String.format(Filegroup.ILLEGAL_OUTPUT_GROUP_ERROR, OutputGroupInfo.HIDDEN_TOP_LEVEL));
+  }
+
+  @Test
+  public void create_disableMiddlemanArtifact() throws Exception {
+    useConfiguration("--noexperimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNull();
+  }
+
+  @Test
+  public void create_enableMiddlemanArtifact() throws Exception {
+    useConfiguration("--experimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNotNull();
   }
 }

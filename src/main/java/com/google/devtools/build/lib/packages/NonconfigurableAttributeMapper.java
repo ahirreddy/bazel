@@ -41,9 +41,10 @@ public class NonconfigurableAttributeMapper extends AbstractAttributeMapper {
   }
 
   @Override
-  public <T> T get(String attributeName, com.google.devtools.build.lib.syntax.Type<T> type) {
+  public <T> T get(String attributeName, com.google.devtools.build.lib.packages.Type<T> type) {
+    T attr = super.get(attributeName, type);
     Preconditions.checkState(!getAttributeDefinition(attributeName).isConfigurable(),
         "Attribute '%s' is potentially configurable - not allowed here", attributeName);
-    return super.get(attributeName, type);
+    return attr;
   }
 }

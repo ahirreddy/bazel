@@ -14,11 +14,16 @@
 
 package com.google.devtools.build.lib.bazel.rules.python;
 
+import static com.google.devtools.build.lib.packages.Attribute.attr;
+import static com.google.devtools.build.lib.packages.BuildType.LABEL;
+
+import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.bazel.rules.BazelBaseRuleClasses;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.bazel.rules.python.BazelPyRuleClasses.PyBinaryBaseRule;
 import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.rules.python.PyRuleClasses;
 import com.google.devtools.build.lib.rules.python.PythonConfiguration;
 
 /**
@@ -35,6 +40,16 @@ public final class BazelPyBinaryRule implements RuleDefinition {
     <!-- #END_BLAZE_RULE.NAME --> */
     return builder
         .requiresConfigurationFragments(PythonConfiguration.class, BazelPythonConfiguration.class)
+        .cfg(PyRuleClasses.VERSION_TRANSITION)
+        .add(
+            attr("$zipper", LABEL)
+                .cfg(HostTransition.createFactory())
+                .exec()
+                .value(env.getToolsLabel("//tools/zip:zipper")))
+        .add(
+            attr("$launcher", LABEL)
+                .cfg(HostTransition.createFactory())
+                .value(env.getToolsLabel("//tools/launcher:launcher")))
         .build();
   }
 
@@ -42,15 +57,13 @@ public final class BazelPyBinaryRule implements RuleDefinition {
   public Metadata getMetadata() {
     return RuleDefinition.Metadata.builder()
         .name("py_binary")
-        .ancestors(PyBinaryBaseRule.class, BazelBaseRuleClasses.BinaryBaseRule.class)
+        .ancestors(PyBinaryBaseRule.class, BaseRuleClasses.BinaryBaseRule.class)
         .factoryClass(BazelPyBinary.class)
         .build();
   }
 }
 
 /*<!-- #BLAZE_RULE (NAME = py_binary, TYPE = BINARY, FAMILY = Python) -->
-
-${ATTRIBUTE_SIGNATURE}
 
 <p>
   A <code>py_binary</code> is an executable Python program consisting
@@ -60,8 +73,6 @@ ${ATTRIBUTE_SIGNATURE}
   program at run-time, and a stub script that starts up the program with
   the correct initial environment and data.
 </p>
-
-${ATTRIBUTE_DEFINITION}
 
 <h4 id="py_binary_examples">Examples</h4>
 

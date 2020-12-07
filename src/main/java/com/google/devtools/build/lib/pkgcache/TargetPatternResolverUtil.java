@@ -13,15 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.pkgcache;
 
-import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.cmdline.LabelValidator;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.cmdline.ResolvedTargets;
 import com.google.devtools.build.lib.cmdline.TargetParsingException;
-import com.google.devtools.build.lib.cmdline.TargetPatternResolver;
+import com.google.devtools.build.lib.collect.compacthashset.CompactHashSet;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import java.util.Collection;
 
 /**
  * Common utility methods for target pattern resolution.
@@ -39,38 +37,21 @@ public final class TargetPatternResolverUtil {
     }
   }
 
-  public static ResolvedTargets<Target> resolvePackageTargets(Package pkg,
-                                                              FilteringPolicy policy) {
-    ResolvedTargets.Builder<Target> builder = ResolvedTargets.builder();
-    for (Target target : pkg.getTargets()) {
+  public static Collection<Target> resolvePackageTargets(Package pkg, FilteringPolicy policy) {
+    if (policy == FilteringPolicies.NO_FILTER) {
+      return pkg.getTargets().values();
+    }
+    CompactHashSet<Target> builder = CompactHashSet.create();
+    for (Target target : pkg.getTargets().values()) {
       if (policy.shouldRetain(target, false)) {
         builder.add(target);
       }
     }
-    return builder.build();
-  }
-
-  public static void validatePatternPackage(String originalPattern,
-      PathFragment packageNameFragment, TargetPatternResolver<?> resolver)
-      throws TargetParsingException {
-    String packageName = packageNameFragment.toString();
-    // It's possible for this check to pass, but for
-    // Label.validatePackageNameFull to report an error because the
-    // package name is illegal.  That's a little weird, but we can live with
-    // that for now--see test case: testBadPackageNameButGoodEnoughForALabel.
-    if (LabelValidator.validatePackageName(packageName) != null) {
-      throw new TargetParsingException("'" + packageName + "' is not a valid package name");
-    }
-    if (!resolver.isPackage(PackageIdentifier.createInDefaultRepo(packageName))) {
-      throw new TargetParsingException(
-          TargetPatternResolverUtil.getParsingErrorMessage(
-              "no such package '" + packageName + "': BUILD file not found on package path",
-              originalPattern));
-    }
+    return builder;
   }
 
   public static PathFragment getPathFragment(String pathPrefix) throws TargetParsingException {
-    PathFragment directory = new PathFragment(pathPrefix);
+    PathFragment directory = PathFragment.create(pathPrefix);
     if (directory.containsUplevelReferences()) {
       throw new TargetParsingException("up-level references are not permitted: '"
           + directory.getPathString() + "'");
@@ -79,14 +60,5 @@ public final class TargetPatternResolverUtil {
       throw new TargetParsingException("'" + pathPrefix + "' is not a valid package name");
     }
     return directory;
-  }
-
-  public static ImmutableSet<PathFragment> getPathFragments(ImmutableSet<String> pathPrefixes)
-      throws TargetParsingException {
-    ImmutableSet.Builder<PathFragment> pathFragmentsBuilder = ImmutableSet.builder();
-    for (String pathPrefix : pathPrefixes) {
-      pathFragmentsBuilder.add(TargetPatternResolverUtil.getPathFragment(pathPrefix));
-    }
-    return pathFragmentsBuilder.build();
   }
 }

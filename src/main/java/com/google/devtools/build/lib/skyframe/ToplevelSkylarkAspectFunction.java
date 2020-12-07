@@ -14,30 +14,25 @@
 
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.causes.LabelCause;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.packages.AspectParameters;
-import com.google.devtools.build.lib.rules.SkylarkRuleClassFunctions.SkylarkAspect;
-import com.google.devtools.build.lib.skyframe.AspectValue.SkylarkAspectLoadingKey;
-import com.google.devtools.build.lib.skyframe.SkylarkImportLookupFunction.SkylarkImportFailedException;
-import com.google.devtools.build.lib.syntax.Type.ConversionException;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.packages.SkylarkAspect;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.SkylarkAspectLoadingKey;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import javax.annotation.Nullable;
 
 /**
- * SkyFunction to load aspects from Skylark extensions and calculate their values.
+ * SkyFunction to load aspects from Starlark extensions and calculate their values.
  *
- * Used for loading top-level aspects. At top level, in
- * {@link com.google.devtools.build.lib.analysis.BuildView}, we cannot invoke two SkyFunctions
- * one after another, so BuildView calls this function to do the work.
+ * <p>Used for loading top-level aspects. At top level, in {@link
+ * com.google.devtools.build.lib.analysis.BuildView}, we cannot invoke two SkyFunctions one after
+ * another, so BuildView calls this function to do the work.
  */
 public class ToplevelSkylarkAspectFunction implements SkyFunction {
+  ToplevelSkylarkAspectFunction() {}
 
   @Nullable
   @Override
@@ -45,36 +40,23 @@ public class ToplevelSkylarkAspectFunction implements SkyFunction {
       throws LoadSkylarkAspectFunctionException, InterruptedException {
     SkylarkAspectLoadingKey aspectLoadingKey = (SkylarkAspectLoadingKey) skyKey.argument();
     String skylarkValueName = aspectLoadingKey.getSkylarkValueName();
-    PathFragment extensionFile = aspectLoadingKey.getExtensionFile();
-    
-    // Find label corresponding to skylark file, if one exists.
-    ImmutableMap<PathFragment, Label> labelLookupMap;
-    try {
-      labelLookupMap =
-          SkylarkImportLookupFunction.labelsForAbsoluteImports(ImmutableSet.of(extensionFile), env);
-    } catch (SkylarkImportFailedException e) {
-      throw new LoadSkylarkAspectFunctionException(e, skyKey);
-    }
-    if (labelLookupMap == null) {
-      return null;
-    }
+    Label skylarkFileLabel = aspectLoadingKey.getSkylarkFileLabel();
 
-    SkylarkAspect skylarkAspect = null;
+    SkylarkAspect skylarkAspect;
     try {
-      skylarkAspect = AspectFunction.loadSkylarkAspect(
-          env, labelLookupMap.get(extensionFile), skylarkValueName);
-    } catch (ConversionException e) {
-      throw new LoadSkylarkAspectFunctionException(e, skyKey);
+      skylarkAspect = AspectFunction.loadSkylarkAspect(env, skylarkFileLabel, skylarkValueName);
+      if (skylarkAspect == null) {
+        return null;
+      }
+      if (!skylarkAspect.getParamAttributes().isEmpty()) {
+        String msg = "Cannot instantiate parameterized aspect " + skylarkAspect.getName()
+            + " at the top level.";
+        throw new AspectCreationException(msg, new LabelCause(skylarkFileLabel, msg));
+      }
+    } catch (AspectCreationException e) {
+      throw new LoadSkylarkAspectFunctionException(e);
     }
-    if (skylarkAspect == null) {
-      return null;
-    }
-    SkyKey aspectKey =
-        AspectValue.key(
-            aspectLoadingKey.getTargetLabel(),
-            aspectLoadingKey.getTargetConfiguration(),
-            skylarkAspect.getAspectClass(),
-            AspectParameters.EMPTY);
+    SkyKey aspectKey = aspectLoadingKey.toAspectKey(skylarkAspect.getAspectClass());
 
     return env.getValue(aspectKey);
   }
@@ -89,12 +71,7 @@ public class ToplevelSkylarkAspectFunction implements SkyFunction {
    * Exceptions thrown from ToplevelSkylarkAspectFunction.
    */
   public class LoadSkylarkAspectFunctionException extends SkyFunctionException {
-
-    public LoadSkylarkAspectFunctionException(Exception cause, SkyKey childKey) {
-      super(cause, childKey);
-    }
-
-    public LoadSkylarkAspectFunctionException(Exception cause) {
+    public LoadSkylarkAspectFunctionException(AspectCreationException cause) {
       super(cause, Transience.PERSISTENT);
     }
   }

@@ -14,52 +14,37 @@
 
 package com.google.devtools.build.lib.syntax;
 
-import com.google.common.base.Optional;
-import com.google.devtools.build.lib.syntax.compiler.DebugInfo;
-import com.google.devtools.build.lib.syntax.compiler.LoopLabels;
-import com.google.devtools.build.lib.syntax.compiler.VariableScope;
-
-import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-
-/**
- * Syntax node for a function call statement. Used for build rules.
- */
+/** Syntax node for a statement consisting of an expression evaluated for effect. */
 public final class ExpressionStatement extends Statement {
 
-  private final Expression expr;
+  private final Expression expression;
 
-  public ExpressionStatement(Expression expr) {
-    this.expr = expr;
+  ExpressionStatement(FileLocations locs, Expression expression) {
+    super(locs);
+    this.expression = expression;
   }
 
   public Expression getExpression() {
-    return expr;
+    return expression;
   }
 
   @Override
-  public String toString() {
-    return expr.toString() + '\n';
-  }
-
-  @Override
-  void doExec(Environment env) throws EvalException, InterruptedException {
-    expr.eval(env);
-  }
-
-  @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
-  void validate(ValidationEnvironment env) throws EvalException {
-    expr.validate(env);
+  public int getStartOffset() {
+    return expression.getStartOffset();
   }
 
   @Override
-  ByteCodeAppender compile(
-      VariableScope scope, Optional<LoopLabels> loopLabels, DebugInfo debugInfo)
-      throws EvalException {
-    return expr.compile(scope, debugInfo);
+  public int getEndOffset() {
+    return expression.getEndOffset();
+  }
+
+  @Override
+  public Kind kind() {
+    return Kind.EXPRESSION;
   }
 }

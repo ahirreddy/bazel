@@ -13,19 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
-import com.google.common.collect.ArrayListMultimap;
+import static com.google.common.collect.Iterables.getOnlyElement;
+
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Multimap;
-
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import java.util.Objects;
-
-import javax.annotation.Nullable;
 
 /**
  * Objects of this class contain values of some attributes of rules. Used for passing this
  * information to the aspects.
  */
+@AutoCodec
 public final class AspectParameters {
   private final ImmutableMultimap<String, String> attributes;
 
@@ -33,13 +33,23 @@ public final class AspectParameters {
     this.attributes = ImmutableMultimap.copyOf(attributes);
   }
 
-  public static final AspectParameters EMPTY = new AspectParameters.Builder().build();
+  public static final AspectParameters EMPTY = new AspectParameters(ImmutableMultimap.of());
+
+  @AutoCodec.Instantiator
+  @AutoCodec.VisibleForSerialization
+  static AspectParameters create(ImmutableMultimap<String, String> attributes) {
+    if (attributes.isEmpty()) {
+      return EMPTY;
+    }
+    return new AspectParameters(attributes);
+  }
 
   /**
    * A builder for @{link {@link AspectParameters} class.
    */
   public static class Builder {
-    private final Multimap<String, String> attributes = ArrayListMultimap.create();
+    private final ImmutableMultimap.Builder<String, String> attributes =
+        ImmutableMultimap.builder();
 
     /**
      * Adds a new pair of attribute-value.
@@ -53,16 +63,29 @@ public final class AspectParameters {
      * Creates a new instance of {@link AspectParameters} class.
      */
     public AspectParameters build() {
-      return new AspectParameters(attributes);
+      return create(attributes.build());
     }
   }
 
   /**
-   * Returns collection of values for specified key, or null if key is missing.
+   * Returns collection of values for specified key, or an empty collection if key is missing.
    */
-  @Nullable
   public ImmutableCollection<String> getAttribute(String key) {
     return attributes.get(key);
+  }
+
+  public ImmutableMultimap<String, String> getAttributes() {
+    return attributes;
+  }
+
+  /**
+   * Similar to {@link #getAttribute}}, but asserts that there's only one value for the provided
+   * key.
+   * Uses Guava's {@link Iterables#getOnlyElement}, which may throw exceptions if there isn't
+   * exactly one element.
+   */
+  public String getOnlyValueOfAttribute(String key) {
+    return getOnlyElement(getAttribute(key));
   }
 
   public boolean isEmpty() {

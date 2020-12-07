@@ -13,177 +13,85 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import static com.google.devtools.build.lib.syntax.compiler.ByteCodeUtils.append;
-
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.syntax.compiler.ByteCodeUtils;
-import com.google.devtools.build.lib.syntax.compiler.DebugInfo;
-import com.google.devtools.build.lib.syntax.compiler.Jump;
-import com.google.devtools.build.lib.syntax.compiler.Jump.PrimitiveComparison;
-import com.google.devtools.build.lib.syntax.compiler.LabelAdder;
-import com.google.devtools.build.lib.syntax.compiler.LoopLabels;
-import com.google.devtools.build.lib.syntax.compiler.VariableScope;
-
-import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-
-import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nullable;
 
-/**
- * Syntax node for an if/else statement.
- */
+/** Syntax node for an if or elif statement. */
 public final class IfStatement extends Statement {
 
-  /**
-   * Syntax node for an [el]if statement.
-   */
-  static final class ConditionalStatements extends Statement {
+  private final TokenKind token; // IF or ELIF
+  private final int ifOffset;
+  private final Expression condition;
+  // These blocks may be non-null but empty after a misparse:
+  private final ImmutableList<Statement> thenBlock; // non-empty
+  @Nullable ImmutableList<Statement> elseBlock; // non-empty if non-null; set after construction
 
-    private final Expression condition;
-    private final ImmutableList<Statement> stmts;
-
-    public ConditionalStatements(Expression condition, List<Statement> stmts) {
-      this.condition = Preconditions.checkNotNull(condition);
-      this.stmts = ImmutableList.copyOf(stmts);
-    }
-
-    @Override
-    void doExec(Environment env) throws EvalException, InterruptedException {
-      for (Statement stmt : stmts) {
-        stmt.exec(env);
-      }
-    }
-
-    @Override
-    public String toString() {
-      return "[el]if " + condition + ": " + stmts + "\n";
-    }
-
-    @Override
-    public void accept(SyntaxTreeVisitor visitor) {
-      visitor.visit(this);
-    }
-
-    Expression getCondition() {
-      return condition;
-    }
-
-    ImmutableList<Statement> getStmts() {
-      return stmts;
-    }
-
-    @Override
-    void validate(ValidationEnvironment env) throws EvalException {
-      condition.validate(env);
-      validateStmts(env, stmts);
-    }
-
-    @Override
-    ByteCodeAppender compile(
-        VariableScope scope, Optional<LoopLabels> loopLabels, DebugInfo debugInfo)
-        throws EvalException {
-      List<ByteCodeAppender> code = new ArrayList<>();
-      for (Statement statement : stmts) {
-        code.add(statement.compile(scope, loopLabels, debugInfo));
-      }
-      return ByteCodeUtils.compoundAppender(code);
-    }
+  IfStatement(
+      FileLocations locs,
+      TokenKind token,
+      int ifOffset,
+      Expression condition,
+      List<Statement> thenBlock) {
+    super(locs);
+    this.token = token;
+    this.ifOffset = ifOffset;
+    this.condition = condition;
+    this.thenBlock = ImmutableList.copyOf(thenBlock);
   }
-
-  private final ImmutableList<ConditionalStatements> thenBlocks;
-  private final ImmutableList<Statement> elseBlock;
 
   /**
-   * Constructs a if-elif-else statement. The else part is mandatory, but the list may be empty.
-   * ThenBlocks has to have at least one element.
+   * Reports whether this is an 'elif' statement.
+   *
+   * <p>An elif statement may appear only as the sole statement in the "else" block of another
+   * IfStatement.
    */
-  IfStatement(List<ConditionalStatements> thenBlocks, List<Statement> elseBlock) {
-    Preconditions.checkArgument(!thenBlocks.isEmpty());
-    this.thenBlocks = ImmutableList.copyOf(thenBlocks);
-    this.elseBlock = ImmutableList.copyOf(elseBlock);
+  public boolean isElif() {
+    return token == TokenKind.ELIF;
   }
 
-  public ImmutableList<ConditionalStatements> getThenBlocks() {
-    return thenBlocks;
+  public Expression getCondition() {
+    return condition;
   }
 
+  public ImmutableList<Statement> getThenBlock() {
+    return thenBlock;
+  }
+
+  @Nullable
   public ImmutableList<Statement> getElseBlock() {
     return elseBlock;
   }
 
+  void setElseBlock(List<Statement> elseBlock) {
+    this.elseBlock = ImmutableList.copyOf(elseBlock);
+  }
+
+  @Override
+  public int getStartOffset() {
+    return ifOffset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    List<Statement> body = elseBlock != null ? elseBlock : thenBlock;
+    return body.isEmpty()
+        ? condition.getEndOffset() // wrong, but tree is ill formed
+        : body.get(body.size() - 1).getEndOffset();
+  }
+
   @Override
   public String toString() {
-    // TODO(bazel-team): if we want to print the complete statement, the function
-    // needs an extra argument to specify indentation level.
-    // As guaranteed by the constructor, there must be at least one element in thenBlocks.
-    return String.format("if %s:\n", thenBlocks.get(0).getCondition());
+    return String.format("if %s: ...\n", condition);
   }
 
   @Override
-  void doExec(Environment env) throws EvalException, InterruptedException {
-    for (ConditionalStatements stmt : thenBlocks) {
-      if (EvalUtils.toBoolean(stmt.getCondition().eval(env))) {
-        stmt.exec(env);
-        return;
-      }
-    }
-    for (Statement stmt : elseBlock) {
-      stmt.exec(env);
-    }
-  }
-
-  @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
-  void validate(ValidationEnvironment env) throws EvalException {
-    env.startTemporarilyDisableReadonlyCheckSession();
-    for (ConditionalStatements stmts : thenBlocks) {
-      stmts.validate(env);
-    }
-    validateStmts(env, elseBlock);
-    env.finishTemporarilyDisableReadonlyCheckSession();
-  }
-
-  private static void validateStmts(ValidationEnvironment env, List<Statement> stmts)
-      throws EvalException {
-    for (Statement stmt : stmts) {
-      stmt.validate(env);
-    }
-    env.finishTemporarilyDisableReadonlyCheckBranch();
-  }
-
-  @Override
-  ByteCodeAppender compile(
-      VariableScope scope, Optional<LoopLabels> loopLabels, DebugInfo debugInfo)
-      throws EvalException {
-    List<ByteCodeAppender> code = new ArrayList<>();
-    LabelAdder after = new LabelAdder();
-    LabelAdder nextConditionalOrElse;
-    for (ConditionalStatements statement : thenBlocks) {
-      nextConditionalOrElse = new LabelAdder();
-      // compile condition and convert to boolean
-      code.add(statement.getCondition().compile(scope, debugInfo));
-      append(
-          code,
-          EvalUtils.toBoolean,
-          // jump to next conditional/else block if false
-          Jump.ifIntOperandToZero(PrimitiveComparison.EQUAL).to(nextConditionalOrElse));
-      // otherwise execute the body and jump to end
-      code.add(statement.compile(scope, loopLabels, debugInfo));
-      append(code, Jump.to(after));
-      // add label for next conditional or the else block (which may be empty, but no matter)
-      append(code, nextConditionalOrElse);
-    }
-    for (Statement statement : elseBlock) {
-      code.add(statement.compile(scope, loopLabels, debugInfo));
-    }
-    append(code, after);
-
-    return ByteCodeUtils.compoundAppender(code);
+  public Kind kind() {
+    return Kind.IF;
   }
 }

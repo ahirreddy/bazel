@@ -13,9 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
-
 import com.google.common.base.Preconditions;
-
 import javax.annotation.Nullable;
 
 /**
@@ -43,13 +41,17 @@ public abstract class SkyFunctionException extends Exception {
 
   /** The transience of the error. */
   public enum Transience {
-    // An error that may or may not occur again if the computation were re-run. If a computation
-    // results in a transient error and is needed on a subsequent MemoizingEvaluator#evaluate call,
-    // it will be re-executed.
+    /**
+     * An error that may or may not occur again if the computation were re-run. If a computation
+     * results in a transient error and is needed on a subsequent MemoizingEvaluator#evaluate call,
+     * it will be re-executed.
+     */
     TRANSIENT,
 
-    // An error that is completely deterministic and persistent in terms of the computation's
-    // inputs. Persistent errors may be cached.
+    /**
+     * An error that is completely deterministic and persistent in terms of the computation's
+     * inputs. Persistent errors may be cached.
+     */
     PERSISTENT;
   }
 
@@ -60,7 +62,7 @@ public abstract class SkyFunctionException extends Exception {
   public SkyFunctionException(Exception cause, Transience transience) {
     this(cause, transience, null);
   }
-  
+
   /** Used to rethrow a child error that the parent cannot handle. */
   public SkyFunctionException(Exception cause, SkyKey childKey) {
     this(cause, Transience.PERSISTENT, childKey);
@@ -74,11 +76,11 @@ public abstract class SkyFunctionException extends Exception {
   }
 
   @Nullable
-  final SkyKey getRootCauseSkyKey() {
+  public final SkyKey getRootCauseSkyKey() {
     return rootCause;
   }
 
-  final boolean isTransient() {
+  public final boolean isTransient() {
     return transience == Transience.TRANSIENT;
   }
 
@@ -95,10 +97,6 @@ public abstract class SkyFunctionException extends Exception {
   }
 
   static <E extends Exception> void validateExceptionType(Class<E> exceptionClass) {
-    if (exceptionClass.equals(ValueOrExceptionUtils.BottomException.class)) {
-      return;
-    }
-
     if (exceptionClass.isAssignableFrom(RuntimeException.class)) {
       throw new IllegalStateException(exceptionClass.getSimpleName() + " is a supertype of "
           + "RuntimeException. Don't do this since then you would potentially swallow all "
@@ -116,18 +114,32 @@ public abstract class SkyFunctionException extends Exception {
   }
 
   /** A {@link SkyFunctionException} with a definite root cause. */
-  static class ReifiedSkyFunctionException extends SkyFunctionException {
+  public static class ReifiedSkyFunctionException extends SkyFunctionException {
     private final boolean isCatastrophic;
+    private final SkyFunctionException originalException;
 
-    ReifiedSkyFunctionException(SkyFunctionException e, SkyKey key) {
-      super(e.getCause(), e.transience, Preconditions.checkNotNull(e.getRootCauseSkyKey() == null
-          ? key : e.getRootCauseSkyKey()));
-      this.isCatastrophic = e.isCatastrophic();
+    public ReifiedSkyFunctionException(SkyFunctionException e, SkyKey key) {
+      this(e, e.transience, key, e.getRootCauseSkyKey(), e.isCatastrophic());
+    }
+
+    protected ReifiedSkyFunctionException(
+        SkyFunctionException e,
+        Transience transience,
+        SkyKey key,
+        @Nullable SkyKey rootCauseSkyKey,
+        boolean isCatastrophic) {
+      super(e.getCause(), transience, rootCauseSkyKey == null ? key : rootCauseSkyKey);
+      this.isCatastrophic = isCatastrophic;
+      this.originalException = e;
     }
 
     @Override
     public boolean isCatastrophic() {
       return isCatastrophic;
+    }
+
+    public SkyFunctionException getOriginalException() {
+      return originalException;
     }
   }
 }

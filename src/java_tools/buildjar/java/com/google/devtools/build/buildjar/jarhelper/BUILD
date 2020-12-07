@@ -1,31 +1,35 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+package(default_visibility = ["//src/java_tools/buildjar:buildjar_package_group"])
+
 filegroup(
     name = "srcs",
-    # include this BUILD file for the default android tools repository
-    srcs = glob(["**"]),
-    visibility = ["//src:__pkg__"],
+    srcs = glob(["*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
 )
 
-JARHELPER_SRCS = [
-    "JarHelper.java",
-    "JarCreator.java",
-]
-
-# for bootstrap_java_binary
-exports_files(
-    JARHELPER_SRCS,
-    visibility = ["//src/java_tools/buildjar:__pkg__"],
-)
-
-# JarHelper library for GenClass so it can create the gen jar.
 java_library(
     name = "jarhelper",
-    srcs = JARHELPER_SRCS,
-    visibility = [
-        "//src/java_tools/buildjar:__pkg__",
-        "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/genclass:__pkg__",
-        "//src/tools/android/java/com/google/devtools/build/android/idlclass:__pkg__",
+    srcs = [
+        "JarCreator.java",
+        "JarHelper.java",
     ],
+)
+
+#
+## Bootstrapping using Starlark rules
+#
+
+load("//tools/build_rules:java_rules_skylark.bzl", "bootstrap_java_library")
+
+bootstrap_java_library(
+    name = "bootstrap_jarhelper",
+    srcs = [
+        "JarCreator.java",
+        "JarHelper.java",
+    ],
+    tags = ["manual"],
     deps = [
-        "//third_party:guava",
+        "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar:skylark-deps",
     ],
 )

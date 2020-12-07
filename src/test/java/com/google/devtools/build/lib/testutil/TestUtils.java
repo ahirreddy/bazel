@@ -50,7 +50,7 @@ public class TestUtils {
   }
 
   public static String tmpDir() {
-    return tmpDirFile().getAbsolutePath();
+    return tmpDirFile().getAbsolutePath().replaceAll("\\\\", "/");
   }
 
   static String getUserValue(String key) {
@@ -112,7 +112,7 @@ public class TestUtils {
         randomSeed = Integer.parseInt(value);
       } catch (NumberFormatException e) {
         // throw new AssertionError("TEST_RANDOM_SEED must be an integer");
-        throw new RuntimeException("TEST_RANDOM_SEED must be an integer");
+        throw new RuntimeException("TEST_RANDOM_SEED must be an integer", e);
       }
     }
 

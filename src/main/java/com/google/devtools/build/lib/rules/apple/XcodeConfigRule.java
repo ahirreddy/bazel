@@ -17,54 +17,73 @@ package com.google.devtools.build.lib.rules.apple;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
 
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 
 /**
  * Rule definition for {@code xcode_config} rule.
  */
 public class XcodeConfigRule implements RuleDefinition {
 
+  public static final String XCODE_CONFIG_ATTR_NAME = ":xcode_config";
   static final String DEFAULT_ATTR_NAME = "default";
   static final String VERSIONS_ATTR_NAME = "versions";
-  static final String REQUIRE_DEFINED_VERSIONS_ATTR_NAME = "require_defined_version";
+  static final String REMOTE_VERSIONS_ATTR_NAME = "remote_versions";
+  static final String LOCAL_VERSIONS_ATTR_NAME = "local_versions";
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
         .requiresConfigurationFragments(AppleConfiguration.class)
-        /* <!-- #BLAZE_RULE(proto_library).ATTRIBUTE(version) -->
+        .exemptFromConstraintChecking(
+            "this rule refines configuration variables and does not build actual content")
+        /* <!-- #BLAZE_RULE(xcode_config).ATTRIBUTE(version) -->
         The default official version of xcode to use.
-        ${SYNOPSIS}
         The version specified by the provided <code>xcode_version</code> target is to be used if
-        no <code>xcode_version</code> build flag is specified.
+        no <code>xcode_version</code> build flag is specified. This is required if any
+        <code>versions</code> are set. This may not be set if <code>remote_versions</code> or
+        <code>local_versions</code> is set.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr(DEFAULT_ATTR_NAME, LABEL)
-            .allowedRuleClasses("xcode_version")
-            .allowedFileTypes())
-        /* <!-- #BLAZE_RULE(proto_library).ATTRIBUTE(version) -->
+        .add(
+            attr(DEFAULT_ATTR_NAME, LABEL)
+                .allowedRuleClasses("xcode_version")
+                .allowedFileTypes()
+                .nonconfigurable("this rule determines configuration"))
+        /* <!-- #BLAZE_RULE(xcode_config).ATTRIBUTE(version) -->
         Accepted <code>xcode_version<code> targets that may be used.
-        ${SYNOPSIS}
         If the value of the <code>xcode_version</code> build flag matches one of the aliases
         or version number of any of the given <code>xcode_version</code> targets, the matching
-        target will be used.
+        target will be used. This may not be set if <code>remote_versions</code> or
+        <code>local_versions</code> is set.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr(VERSIONS_ATTR_NAME, LABEL_LIST)
-            .allowedRuleClasses("xcode_version")
-            .allowedFileTypes())
-        /* <!-- #BLAZE_RULE(proto_library).ATTRIBUTE(version) -->
-        Whether to require the build's xcode version match one of the declared targets.
-        ${SYNOPSIS}
-        If true, this will raise an error if either the <code>xcode_version</code> flag value
-        or <code>default</code> attribute value do not match one of the versions declared
-        among <code>xcode_verison</code> targets.
+        .add(
+            attr(VERSIONS_ATTR_NAME, LABEL_LIST)
+                .allowedRuleClasses("xcode_version")
+                .allowedFileTypes()
+                .nonconfigurable("this rule determines configuration"))
+        /* <!-- #BLAZE_RULE(xcode_config).ATTRIBUTE(remote_versions) -->
+        The <code>xcode_version<code> targets that are available remotely.
+        These are used along with <code>remote_versions</code> to select a mutually available
+        version. This may not be set if <code>versions</code> is set.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr(REQUIRE_DEFINED_VERSIONS_ATTR_NAME, BOOLEAN).value(false))
+        .add(
+            attr(REMOTE_VERSIONS_ATTR_NAME, LABEL)
+                .allowedRuleClasses("available_xcodes")
+                .allowedFileTypes()
+                .nonconfigurable("this rule determines configuration"))
+        /* <!-- #BLAZE_RULE(xcode_config).ATTRIBUTE(local_versions) -->
+        The <code>xcode_version<code> targets that are available locally.
+        These are used along with <code>local_versions</code> to select a mutually available
+        version. This may not be set if <code>versions</code> is set.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(
+            attr(LOCAL_VERSIONS_ATTR_NAME, LABEL)
+                .allowedRuleClasses("available_xcodes")
+                .allowedFileTypes()
+                .nonconfigurable("this rule determines configuration"))
         .build();
   }
 
@@ -80,12 +99,8 @@ public class XcodeConfigRule implements RuleDefinition {
 
 /*<!-- #BLAZE_RULE (NAME = xcode_config, TYPE = OTHER, FAMILY = Workspace)[GENERIC_RULE] -->
 
-${ATTRIBUTE_SIGNATURE}
-
-<p>A single target of this rule can be referenced by the <code>--xcode_config</code> build flag to
-translate the <code>--xcode_version</code> flag into an accepted official xcode version. This
-allows selection of a an official xcode version from a number of registered aliases.</p>
-
-${ATTRIBUTE_DEFINITION}
+<p>A single target of this rule can be referenced by the <code>--xcode_version_config</code> build
+flag to translate the <code>--xcode_version</code> flag into an accepted official xcode version.
+This allows selection of an official xcode version from a number of registered aliases.</p>
 
 <!-- #END_BLAZE_RULE -->*/

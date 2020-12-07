@@ -58,24 +58,23 @@ public class RelativePackageNameResolver {
       relativePkg = pkg.substring(2);
     } else if (pkg.startsWith("/")) {
       throw new InvalidPackageNameException(
-          PackageIdentifier.createInDefaultRepo(pkg),
+          PackageIdentifier.createInMainRepo(pkg),
           "package name cannot start with a single slash");
     } else {
       isAbsolute = false;
       relativePkg = pkg;
     }
 
-    PathFragment relative = new PathFragment(relativePkg);
+    PathFragment relative = PathFragment.create(relativePkg);
 
     if (discardBuild && relative.getBaseName().equals("BUILD")) {
       relative = relative.getParentDirectory();
     }
 
     PathFragment result = isAbsolute ? relative : offset.getRelative(relative);
-    result = result.normalize();
     if (result.containsUplevelReferences()) {
       throw new InvalidPackageNameException(
-          PackageIdentifier.createInDefaultRepo(pkg),
+          PackageIdentifier.createInMainRepo(pkg),
           "package name contains too many '..' segments");
     }
 

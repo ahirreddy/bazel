@@ -16,53 +16,54 @@ package com.google.devtools.build.lib.analysis.config;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableCollection;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
-import com.google.devtools.build.lib.syntax.ClassObject;
-import com.google.devtools.build.lib.syntax.SkylarkModule;
-
+import com.google.devtools.build.lib.skylarkbuildapi.FragmentCollectionApi;
+import com.google.devtools.build.lib.syntax.EvalException;
 import javax.annotation.Nullable;
 
-/**
- * Represents a collection of configuration fragments in Skylark.
- */
+/** Represents a collection of configuration fragments in Starlark. */
 // Documentation can be found at ctx.fragments
 @Immutable
-@SkylarkModule(name = "fragments", documented = false, doc = "")
-public class FragmentCollection implements ClassObject {
+public class FragmentCollection implements FragmentCollectionApi {
   private final RuleContext ruleContext;
-  private final ConfigurationTransition config;
+  private final ConfigurationTransition transition;
 
-  public FragmentCollection(RuleContext ruleContext, ConfigurationTransition config) {
+  public FragmentCollection(RuleContext ruleContext, ConfigurationTransition transition) {
     this.ruleContext = ruleContext;
-    this.config = config;
+    this.transition = transition;
   }
 
   @Override
   @Nullable
-  public Object getValue(String name) {
-    return ruleContext.getSkylarkFragment(name, config);
+  public Object getValue(String name) throws EvalException {
+    return ruleContext.getSkylarkFragment(name, transition);
   }
 
   @Override
-  public ImmutableCollection<String> getKeys() {
-    return ruleContext.getSkylarkFragmentNames(config);
+  public ImmutableCollection<String> getFieldNames() {
+    return ruleContext.getSkylarkFragmentNames(transition);
   }
 
   @Override
   @Nullable
-  public String errorMessage(String name) {
+  public String getErrorMessageForUnknownField(String name) {
     return String.format(
         "There is no configuration fragment named '%s' in %s configuration. "
         + "Available fragments: %s",
-        name, getConfigurationName(config), printKeys());
+        name, getConfigurationName(transition), fieldsToString());
   }
 
-  private String printKeys() {
-    return String.format("'%s'", Joiner.on("', '").join(getKeys()));
+  private String fieldsToString() {
+    return String.format("'%s'", Joiner.on("', '").join(getFieldNames()));
   }
 
   public static String getConfigurationName(ConfigurationTransition config) {
-    return (config == ConfigurationTransition.HOST) ? "host" : "target";
+    return config.isHostTransition() ? "host" : "target";
+  }
+
+  @Override
+  public String toString() {
+    return getConfigurationName(transition) + ": [ " + fieldsToString() + "]";
   }
 }

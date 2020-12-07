@@ -17,20 +17,22 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.Map;
 
 /** Empty implementation of RunfilesSupplier */
 public class EmptyRunfilesSupplier implements RunfilesSupplier {
 
-  public static final EmptyRunfilesSupplier INSTANCE = new EmptyRunfilesSupplier();
+  @AutoCodec public static final EmptyRunfilesSupplier INSTANCE = new EmptyRunfilesSupplier();
 
   private EmptyRunfilesSupplier() {}
 
   @Override
-  public Iterable<Artifact> getArtifacts() {
-    return ImmutableList.<Artifact>of();
+  public NestedSet<Artifact> getArtifacts() {
+    return NestedSetBuilder.<Artifact>stableOrder().build();
   }
 
   @Override
@@ -39,8 +41,23 @@ public class EmptyRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings() {
+  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings(
+      ArtifactPathResolver resolver) {
     return ImmutableMap.of();
   }
 
+  @Override
+  public ImmutableList<Artifact> getManifests() {
+    return ImmutableList.<Artifact>of();
+  }
+
+  @Override
+  public boolean isBuildRunfileLinks(PathFragment runfilesDir) {
+    return false;
+  }
+
+  @Override
+  public boolean isRunfileLinksEnabled(PathFragment runfilesDir) {
+    return false;
+  }
 }

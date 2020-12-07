@@ -25,9 +25,8 @@ import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.util.Pair;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
@@ -48,7 +47,8 @@ public class RuleSetUtils {
         RuleClassType.INVISIBLE.checkName(input);
         return true;
       } catch (IllegalArgumentException e) {
-        return input.equals("testing_dummy_rule");
+        return input.equals("testing_dummy_rule")
+            || input.equals("testing_rule_for_mandatory_providers");
       }
     }
   };
@@ -91,43 +91,21 @@ public class RuleSetUtils {
    */
   public static class HasAttributes implements Predicate<RuleClass> {
 
-    private enum Operator {
-      ANY, ALL
-    }
-
     private final List<Pair<String, Type<?>>> attributes;
-    private final Operator operator;
 
-    public HasAttributes(Collection<Pair<String, Type<?>>> attributes, Operator operator) {
+    public HasAttributes(Collection<Pair<String, Type<?>>> attributes) {
       this.attributes = ImmutableList.copyOf(attributes);
-      this.operator = operator;
     }
 
     @Override
-    public boolean apply(final RuleClass input) {
-      switch (operator) {
-        case ANY:
-          for (Pair<String, Type<?>> attribute : attributes) {
-            if (input.hasAttr(attribute.first, attribute.second)) {
-              return true;
-            }
-          }
-          return false;
-        case ALL:
-          for (Pair<String, Type<?>> attribute : attributes) {
-            if (!input.hasAttr(attribute.first, attribute.second)) {
-              return false;
-            }
-          }
-          return true;
-      }
-      return false;
+    public boolean apply(final RuleClass ruleClass) {
+      return attributes.stream().anyMatch(pair -> ruleClass.hasAttr(pair.first, pair.second));
     }
   }
 
   public static Predicate<RuleClass> hasAnyAttributes(
       Collection<Pair<String, Type<?>>> attributes) {
-    return new HasAttributes(attributes, HasAttributes.Operator.ANY);
+    return new HasAttributes(attributes);
   }
 
   /**

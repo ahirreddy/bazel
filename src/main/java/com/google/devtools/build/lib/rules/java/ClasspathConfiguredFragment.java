@@ -14,53 +14,51 @@
 
 package com.google.devtools.build.lib.rules.java;
 
-import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 
-/**
- * Represents common aspects of all JVM targeting configured targets.
- */
+/** Represents common aspects of all JVM targeting configured targets. */
 public final class ClasspathConfiguredFragment {
 
   private final NestedSet<Artifact> runtimeClasspath;
   private final NestedSet<Artifact> compileTimeClasspath;
-  private final ImmutableList<Artifact> bootClasspath;
+  private final BootClassPathInfo bootClasspath;
 
   /**
-   * Initializes the runtime and compile time classpaths for this target. This method
-   * should be called during {@code initializationHook()} once a {@link JavaTargetAttributes}
-   * object for this target is fully initialized.
+   * Initializes the runtime and compile time classpaths for this target. This method should be
+   * called during {@code initializationHook()} once a {@link JavaTargetAttributes} object for this
+   * target is fully initialized.
    *
    * @param attributes the processed attributes of this Java target
    * @param isNeverLink whether to leave runtimeClasspath empty
    */
-  public ClasspathConfiguredFragment(JavaCompilationArtifacts javaArtifacts,
-      JavaTargetAttributes attributes, boolean isNeverLink) {
+  public ClasspathConfiguredFragment(
+      JavaCompilationArtifacts javaArtifacts,
+      JavaTargetAttributes attributes,
+      boolean isNeverLink,
+      BootClassPathInfo bootClasspath) {
     if (!isNeverLink) {
       runtimeClasspath = getRuntimeClasspathList(attributes, javaArtifacts);
     } else {
       runtimeClasspath = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
     }
     compileTimeClasspath = attributes.getCompileTimeClassPath();
-    bootClasspath = attributes.getBootClassPath();
+    this.bootClasspath = bootClasspath;
   }
 
   public ClasspathConfiguredFragment() {
     runtimeClasspath = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
     compileTimeClasspath = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
-    bootClasspath = ImmutableList.of();
+    bootClasspath = BootClassPathInfo.empty();
   }
 
   /**
-   * Returns the runtime class path. It consists of the concatenation of the
-   * instrumentation class path, output jars and the runtime time class path of
-   * the transitive dependencies of this rule.
+   * Returns the runtime class path. It consists of the concatenation of the instrumentation class
+   * path, output jars and the runtime time class path of the transitive dependencies of this rule.
    *
    * @param attributes the processed attributes of this Java target
-   *
    * @return a {@List} of artifacts that comprise the runtime class path.
    */
   private NestedSet<Artifact> getRuntimeClasspathList(
@@ -87,10 +85,10 @@ public final class ClasspathConfiguredFragment {
   }
 
   /**
-   * Returns the classpath to be passed as a boot classpath to the Java compiler when compiling
-   * a target containing this fragment.
+   * Returns the classpath to be passed as a boot classpath to the Java compiler when compiling a
+   * target containing this fragment.
    */
-  public ImmutableList<Artifact> getBootClasspath() {
+  public BootClassPathInfo getBootClasspath() {
     return bootClasspath;
   }
 }

@@ -15,7 +15,6 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-
 import java.lang.management.GarbageCollectorMXBean;
 import java.util.ArrayList;
 import java.util.List;

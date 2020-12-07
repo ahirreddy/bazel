@@ -14,18 +14,29 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.truth.Truth.assertThat;
+import static com.google.devtools.build.lib.packages.Attribute.attr;
+import static com.google.devtools.build.lib.packages.BuildType.LABEL;
+import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static org.junit.Assert.assertThrows;
 
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.analysis.config.transitions.SplitTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.analysis.util.MockRule;
 import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
+import com.google.devtools.build.lib.packages.AttributeTransitionData;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Package;
-
+import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -34,7 +45,7 @@ import org.junit.runners.JUnit4;
  * Tests that check that dependency cycles are reported correctly.
  */
 @RunWith(JUnit4.class)
-public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
+public class CircularDependencyTest extends BuildViewTestCase {
 
   @Test
   public void testOneRuleCycle() throws Exception {
@@ -65,9 +76,10 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
     String expectedEvent =
         "cycle in dependency graph:\n"
             + "    //cycle:superman\n"
-            + "  * //cycle:rock\n"
-            + "    //cycle:paper\n"
-            + "    //cycle:scissors";
+            + ".-> //cycle:rock\n"
+            + "|   //cycle:paper\n"
+            + "|   //cycle:scissors\n"
+            + "`-- //cycle:rock";
     checkError(
         "cycle",
         "superman",
@@ -85,11 +97,8 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
         break;
       }
     }
-
-    assertNotNull(foundEvent);
-    Location location = foundEvent.getLocation();
-    assertEquals(3, location.getStartLineAndColumn().getLine());
-    assertEquals("/workspace/cycle/BUILD", location.getPath().toString());
+    assertThat(foundEvent).isNotNull();
+    assertThat(foundEvent.getLocation().toString()).isEqualTo("/workspace/cycle/BUILD:3:14");
   }
 
   /**
@@ -100,13 +109,8 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
     Package pkg =
         createScratchPackageForImplicitCycle(
             "cycle", "java_library(name='jcyc',", "      srcs = ['libjcyc.jar', 'foo.java'])");
-    try {
-      pkg.getTarget("jcyc");
-      fail();
-    } catch (NoSuchTargetException e) {
-      /* ok */
-    }
-    assertTrue(pkg.containsErrors());
+    assertThrows(NoSuchTargetException.class, () -> pkg.getTarget("jcyc"));
+    assertThat(pkg.containsErrors()).isTrue();
     assertContainsEvent("rule 'jcyc' has file 'libjcyc.jar' as both an" + " input and an output");
   }
 
@@ -123,7 +127,7 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
             "    srcs = ['//googledata/geo:geo_info.txt'],",
             "    outs = ['geoinfo.txt'],",
             "    cmd = '$(SRCS) > $@')");
-    assertFalse(pkg.containsErrors());
+    assertThat(pkg.containsErrors()).isFalse();
   }
 
   @Test
@@ -134,8 +138,9 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
         "a",
         "rule1",
         "in cc_library rule //a:rule1: cycle in dependency graph:\n"
-            + "  * //a:rule1\n"
-            + "    //b:rule2",
+            + ".-> //a:rule1\n"
+            + "|   //b:rule2\n"
+            + "`-- //a:rule1",
         "cc_library(name='rule1',",
         "           deps=['//b:rule2'])");
   }
@@ -186,6 +191,136 @@ public class CircularDependencyTest extends BuildViewTestCaseForJunit4 {
         "genrule(name='b', srcs=['c'], tools=['c'], outs=['b.out'], cmd=':')",
         "genrule(name='c', srcs=['b.out'], outs=[], cmd=':')");
     getConfiguredTarget("//x:b"); // doesn't crash!
-    assertContainsEvent("in genrule rule //x:b: cycle in dependency graph");
+    assertContainsEvent("cycle in dependency graph");
+  }
+
+  @Test
+  public void testAspectCycle() throws Exception {
+    reporter.removeHandler(failFastHandler);
+    scratch.file("x/BUILD",
+        "load('//x:x.bzl', 'aspected', 'plain')",
+        // Using data= makes the dependency graph clearer because then the aspect does not propagate
+        // from aspectdep through a to b (and c)
+        "plain(name = 'a', noaspect_deps = [':b'])",
+        "aspected(name = 'b', aspect_deps = ['c'])",
+        "plain(name = 'c')",
+        "plain(name = 'aspectdep', aspect_deps = ['a'])");
+
+    scratch.file(
+        "x/x.bzl",
+        "def _impl(ctx):",
+        "    return []",
+        "",
+        "rule_aspect = aspect(",
+        "    implementation = _impl,",
+        "    attr_aspects = ['aspect_deps'],",
+        "    attrs = { '_implicit': attr.label(default = Label('//x:aspectdep')) })",
+        "",
+        "plain = rule(",
+        "    implementation = _impl,",
+        "    attrs = { 'aspect_deps': attr.label_list(), 'noaspect_deps': attr.label_list() })",
+        "",
+        "aspected = rule(",
+        "    implementation = _impl,",
+        "    attrs = { 'aspect_deps': attr.label_list(aspects = [rule_aspect]) })");
+
+    getConfiguredTarget("//x:a");
+    assertContainsEvent("cycle in dependency graph");
+    assertContainsEvent("//x:c with aspect //x:x.bzl%rule_aspect");
+  }
+
+  /** A late bound dependency which depends on the 'dep' label if the 'define' is in --defines. */
+  // TODO(b/65746853): provide a way to do this without passing the entire configuration
+  private static final LabelLateBoundDefault<BuildConfiguration> LATE_BOUND_DEP =
+      LabelLateBoundDefault.fromTargetConfiguration(
+          BuildConfiguration.class,
+          null,
+          (rule, attributes, config) ->
+              config.getCommandLineBuildVariables().containsKey(attributes.get("define", STRING))
+                  ? attributes.get("dep", NODEP_LABEL)
+                  : null);
+
+  /** A rule which always depends on the given label. */
+  private static final MockRule NORMAL_DEPENDER =
+      () -> MockRule.define("normal_dep", attr("dep", LABEL).allowedFileTypes());
+
+  /** A rule which depends on a given label only if the given define is set. */
+  private static final MockRule LATE_BOUND_DEPENDER =
+      () ->
+          MockRule.define(
+              "late_bound_dep",
+              attr("define", STRING).mandatory(),
+              attr("dep", NODEP_LABEL).mandatory(),
+              attr(":late_bound_dep", LABEL).value(LATE_BOUND_DEP));
+
+  /** A rule which removes a define from the configuration of its dependency. */
+  private static final MockRule DEFINE_CLEARER =
+      () ->
+          MockRule.define(
+              "define_clearer",
+              attr("define", STRING).mandatory(),
+              attr("dep", LABEL)
+                  .mandatory()
+                  .allowedFileTypes()
+                  .cfg(
+                      new TransitionFactory<AttributeTransitionData>() {
+                        @Override
+                        public SplitTransition create(AttributeTransitionData data) {
+                          return (BuildOptions options, EventHandler eventHandler) -> {
+                            String define = data.attributes().get("define", STRING);
+                            BuildOptions newOptions = options.clone();
+                            CoreOptions optionsFragment = newOptions.get(CoreOptions.class);
+                            optionsFragment.commandLineBuildVariables =
+                                optionsFragment.commandLineBuildVariables.stream()
+                                    .filter((pair) -> !pair.getKey().equals(define))
+                                    .collect(toImmutableList());
+                            return ImmutableMap.of("define_cleaner", newOptions);
+                          };
+                        }
+
+                        @Override
+                        public boolean isSplit() {
+                          return true;
+                        }
+                      }));
+
+  @Override
+  protected ConfiguredRuleClassProvider getRuleClassProvider() {
+    ConfiguredRuleClassProvider.Builder builder =
+        new ConfiguredRuleClassProvider.Builder()
+            .addRuleDefinition(NORMAL_DEPENDER)
+            .addRuleDefinition(LATE_BOUND_DEPENDER)
+            .addRuleDefinition(DEFINE_CLEARER);
+    TestRuleClassProvider.addStandardRules(builder);
+    return builder.build();
+  }
+
+  @Test
+  public void testLateBoundTargetCycleNotConfiguredTargetCycle() throws Exception {
+    // Target graph: //a -> //b -?> //c -> //a (loop)
+    // Configured target graph: //a -> //b -> //c -> //a (2) -> //b (2)
+    scratch.file("a/BUILD", "normal_dep(name = 'a', dep = '//b')");
+    scratch.file("b/BUILD", "late_bound_dep(name = 'b', dep = '//c', define = 'CYCLE_ON')");
+    scratch.file("c/BUILD", "define_clearer(name = 'c', dep = '//a', define = 'CYCLE_ON')");
+
+    useConfiguration("--define=CYCLE_ON=yes");
+    getConfiguredTarget("//a");
+    assertNoEvents();
+  }
+
+  @Test
+  public void testSelectTargetCycleNotConfiguredTargetCycle() throws Exception {
+    // Target graph: //a -> //b -?> //c -> //a (loop)
+    // Configured target graph: //a -> //b -> //c -> //a (2) -> //b (2) -> //b:stop (2)
+    scratch.file("a/BUILD", "normal_dep(name = 'a', dep = '//b')");
+    scratch.file("b/BUILD",
+        "config_setting(name = 'cycle', define_values = {'CYCLE_ON': 'yes'})",
+        "normal_dep(name = 'stop')",
+        "normal_dep(name = 'b', dep = select({':cycle': '//c', '//conditions:default': ':stop'}))");
+    scratch.file("c/BUILD", "define_clearer(name = 'c', dep = '//a', define = 'CYCLE_ON')");
+
+    useConfiguration("--define=CYCLE_ON=yes");
+    getConfiguredTarget("//a");
+    assertNoEvents();
   }
 }

@@ -1,14 +1,21 @@
 <p>
 <code>List of strings; optional; subject to
-<a href="make-variables.html#location">$(location)</a> and
-<a href="make-variables.html">"Make variable"</a> substitution, and
+  <a href="${link make-variables#location}">$(location)</a> and
+  <a href="${link make-variables}">"Make variable"</a> substitution, and
 <a href="#sh-tokenization">Bourne shell tokenization</a></code>
 </p>
 
 <p>
-Command line arguments that bazel will pass to the target. These arguments are
-passed before the ones that are specified on the <code>bazel run</code>
-command line.
+Command line arguments that bazel will pass to the target when it is executed
+either by the <code>run</code> command or as a test. These arguments are
+passed before the ones that are specified on the <code>bazel run</code> or
+<code>bazel test</code> command line.
+</p>
+
+<p>
+<em class="harmful">NOTE: The arguments are not passed when you run the target
+outside of bazel (for example, by manually executing the binary in
+<code>bazel-bin/</code>).</em>
 </p>
 
 <p>

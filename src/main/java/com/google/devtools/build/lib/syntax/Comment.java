@@ -13,28 +13,41 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-/**
- * Syntax node for comments.
- */
-public final class Comment extends ASTNode {
 
-  protected final String value;
+/** Syntax node for comments. */
+public final class Comment extends Node {
 
-  public Comment(String value) {
-    this.value = value;
+  private final int offset;
+  private final String text;
+
+  Comment(FileLocations locs, int offset, String text) {
+    super(locs);
+    this.offset = offset;
+    this.text = text;
   }
 
-  public String getValue() {
-    return value;
+  /** Returns the text of the comment, including the leading '#' but not the trailing newline. */
+  public String getText() {
+    return text;
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getStartOffset() {
+    return offset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return offset + text.length();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
   public String toString() {
-    return value;
+    return text;
   }
 }

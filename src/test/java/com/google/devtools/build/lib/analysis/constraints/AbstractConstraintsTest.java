@@ -17,9 +17,8 @@ import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
@@ -27,7 +26,7 @@ import java.util.Set;
 /**
  * Common functionality for tests for the constraint enforcement system.
  */
-public abstract class AbstractConstraintsTest extends BuildViewTestCaseForJunit4 {
+public abstract class AbstractConstraintsTest extends BuildViewTestCase {
   /**
    * Creates an environment group on the scratch filesystem consisting of the specified
    * environments and specified defaults, set via a builder-style interface. The package name
@@ -150,7 +149,9 @@ public abstract class AbstractConstraintsTest extends BuildViewTestCaseForJunit4
    */
   protected Collection<Label> supportedEnvironments(String ruleName, String ruleDef)
       throws Exception {
-    return ConstraintSemantics.getSupportedEnvironments(
-        getRuleContext(scratchConfiguredTarget("hello", ruleName, ruleDef))).getEnvironments();
+    return (new RuleContextConstraintSemantics())
+        .getSupportedEnvironments(
+            getRuleContext(scratchConfiguredTarget("hello", ruleName, ruleDef)))
+        .getEnvironments();
   }
 }

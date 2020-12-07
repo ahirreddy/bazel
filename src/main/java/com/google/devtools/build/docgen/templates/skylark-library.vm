@@ -1,14 +1,28 @@
+---
+layout: documentation
+title: ${module.title}
+---
+
+<a href="../concepts.html">Extensions</a> &gt;
+<a href="skylark-overview.html">API reference</a> &gt;
+${module.title}
+
 <h1 id="modules.${module.name}">${module.title}</h1>
 
 ${module.documentation}
 
 #if (!$module.methods.isEmpty())
 <div class="toc">
-  <h2>Methods</h2>
+  <h2>Members</h2>
   <ul>
   #foreach ($method in $module.methods)
     #if ($method.documented())
-    <li><a href="#${method.name}">${method.name}</a></li>
+    <li>
+      <a href="#${method.name}">${method.name}</a>
+      #if (${method.deprecated})
+      (Deprecated)
+      #end
+    </li>
     #end
   #end
   </ul>
@@ -19,13 +33,14 @@ ${module.documentation}
   #if ($method.documented())
     <h2 id="${method.name}">${method.name}</h2>
     #if (!$method.signature.isEmpty())
-    <p><pre>${method.signature}</pre></p>
+    <p><pre class="rule-signature">${method.signature}</pre></p>
     #end
 
     ${method.documentation}
 
     #if (!$method.params.isEmpty())
-      <h3>Parameters</h3>
+      <!-- no_toc is a class used by the jekyll-toc plugin for docs.bazel.build -->
+      <h3 class="no_toc">Parameters</h3>
       <table class="table table-bordered table-condensed table-params">
         <colgroup>
           <col class="col-param">

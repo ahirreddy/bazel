@@ -14,11 +14,8 @@
 package com.google.devtools.build.lib.concurrent;
 
 import com.google.common.base.Preconditions;
-
+import com.google.common.flogger.GoogleLogger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
 import javax.annotation.Nullable;
 
 /**
@@ -30,8 +27,7 @@ public class ThrowableRecordingRunnableWrapper {
   private final String name;
   private AtomicReference<Throwable> errorRef = new AtomicReference<>();
 
-  private static final Logger LOG =
-      Logger.getLogger(ThrowableRecordingRunnableWrapper.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   public ThrowableRecordingRunnableWrapper(String name) {
     this.name = Preconditions.checkNotNull(name);
@@ -43,15 +39,12 @@ public class ThrowableRecordingRunnableWrapper {
   }
 
   public Runnable wrap(final Runnable runnable) {
-    return new Runnable() {
-      @Override
-      public void run() {
-        try {
-          runnable.run();
-        } catch (Throwable error) {
-          errorRef.compareAndSet(null, error);
-          LOG.log(Level.SEVERE, "Error thrown by runnable in " + name, error);
-        }
+    return () -> {
+      try {
+        runnable.run();
+      } catch (Throwable error) {
+        errorRef.compareAndSet(null, error);
+        logger.atSevere().withCause(error).log("Error thrown by runnable in %s", name);
       }
     };
   }

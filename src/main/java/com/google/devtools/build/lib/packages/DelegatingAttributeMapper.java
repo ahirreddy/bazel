@@ -16,8 +16,7 @@ package com.google.devtools.build.lib.packages;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.syntax.Type;
-
+import java.util.Collection;
 import javax.annotation.Nullable;
 
 /**
@@ -42,13 +41,18 @@ public class DelegatingAttributeMapper implements AttributeMap {
   }
 
   @Override
+  public String getRuleClassName() {
+    return delegate.getRuleClassName();
+  }
+
+  @Override
   public <T> T get(String attributeName, Type<T> type) {
     return delegate.get(attributeName, type);
   }
 
   @Override
-  public <T> boolean isConfigurable(String attributeName, Type<T> type) {
-    return delegate.isConfigurable(attributeName, type);
+  public boolean isConfigurable(String attributeName) {
+    return delegate.isConfigurable(attributeName);
   }
 
   @Override
@@ -74,8 +78,13 @@ public class DelegatingAttributeMapper implements AttributeMap {
   }
 
   @Override
-  public void visitLabels(AcceptsLabelAttribute observer) {
-    delegate.visitLabels(observer);
+  public Collection<DepEdge> visitLabels() throws InterruptedException {
+    return delegate.visitLabels();
+  }
+
+  @Override
+  public Collection<DepEdge> visitLabels(Attribute attribute) throws InterruptedException {
+    return delegate.visitLabels(attribute);
   }
 
   @Override
@@ -99,7 +108,12 @@ public class DelegatingAttributeMapper implements AttributeMap {
   }
 
   @Override
-  public boolean has(String attrName, Type<?> type) {
+  public boolean has(String attrName) {
+    return delegate.has(attrName);
+  }
+
+  @Override
+  public <T> boolean has(String attrName, Type<T> type) {
     return delegate.has(attrName, type);
   }
 }

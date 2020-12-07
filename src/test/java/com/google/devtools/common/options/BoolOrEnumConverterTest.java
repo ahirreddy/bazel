@@ -14,10 +14,8 @@
 
 package com.google.devtools.common.options;
 
-import static com.google.devtools.common.options.OptionsParser.newOptionsParser;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.fail;
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,26 +44,28 @@ public class BoolOrEnumConverterTest {
    * The test options for the CompilationMode hybrid converter.
    */
   public static class CompilationModeTestOptions extends OptionsBase {
-    @Option(name = "compile_mode",
-            converter = CompilationModeConverter.class,
-            defaultValue = "dbg")
+    @Option(
+      name = "compile_mode",
+      converter = CompilationModeConverter.class,
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.NO_OP},
+      defaultValue = "dbg"
+    )
     public CompilationMode compileMode;
   }
 
   @Test
   public void converterFromEnum() throws Exception {
     CompilationModeConverter converter = new CompilationModeConverter();
-    assertEquals(converter.convert("dbg"), CompilationMode.DBG);
-    assertEquals(converter.convert("opt"), CompilationMode.OPT);
+    assertThat(converter.convert("dbg")).isEqualTo(CompilationMode.DBG);
+    assertThat(converter.convert("opt")).isEqualTo(CompilationMode.OPT);
 
-    try {
-      converter.convert("none");
-      fail();
-    } catch (OptionsParsingException e) {
-      assertEquals(e.getMessage(),
-                   "Not a valid compilation mode: 'none' (should be dbg or opt)");
-    }
-    assertEquals("dbg or opt", converter.getTypeDescription());
+    OptionsParsingException e =
+        assertThrows(OptionsParsingException.class, () -> converter.convert("none"));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("Not a valid compilation mode: 'none' (should be dbg or opt)");
+    assertThat(converter.getTypeDescription()).isEqualTo("dbg or opt");
   }
 
   @Test
@@ -75,32 +75,34 @@ public class BoolOrEnumConverterTest {
     CompilationModeConverter converter = new CompilationModeConverter();
 
     for (String falseValue : falseValues) {
-      assertEquals(CompilationMode.OPT, converter.convert(falseValue));
+      assertThat(converter.convert(falseValue)).isEqualTo(CompilationMode.OPT);
     }
 
     for (String trueValue : trueValues) {
-      assertEquals(CompilationMode.DBG, converter.convert(trueValue));
+      assertThat(converter.convert(trueValue)).isEqualTo(CompilationMode.DBG);
     }
   }
 
   @Test
   public void prefixedWithNo() throws OptionsParsingException {
-    OptionsParser parser = newOptionsParser(CompilationModeTestOptions.class);
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(CompilationModeTestOptions.class).build();
     parser.parse("--nocompile_mode");
     CompilationModeTestOptions options =
         parser.getOptions(CompilationModeTestOptions.class);
-    assertNotNull(options.compileMode);
-    assertEquals(CompilationMode.OPT, options.compileMode);
+    assertThat(options.compileMode).isNotNull();
+    assertThat(options.compileMode).isEqualTo(CompilationMode.OPT);
   }
 
   @Test
   public void missingValueAsBoolConversion() throws OptionsParsingException {
-    OptionsParser parser = newOptionsParser(CompilationModeTestOptions.class);
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(CompilationModeTestOptions.class).build();
     parser.parse("--compile_mode");
     CompilationModeTestOptions options =
         parser.getOptions(CompilationModeTestOptions.class);
-    assertNotNull(options.compileMode);
-    assertEquals(CompilationMode.DBG, options.compileMode);
+    assertThat(options.compileMode).isNotNull();
+    assertThat(options.compileMode).isEqualTo(CompilationMode.DBG);
   }
 
 }

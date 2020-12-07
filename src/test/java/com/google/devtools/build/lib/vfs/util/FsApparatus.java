@@ -13,14 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs.util;
 
+import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.testutil.TestUtils;
-import com.google.devtools.build.lib.util.BlazeClock;
 import com.google.devtools.build.lib.util.StringUtilities;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -56,11 +55,11 @@ public class FsApparatus {
    * does not hold with our usage of Unix filesystems.
    */
   public static FsApparatus newNative() {
-    FileSystem fs = FileSystems.initDefaultAsNative();
+    FileSystem fs = FileSystems.getNativeFileSystem();
     Path wd = fs.getPath(TMP_DIR);
 
     try {
-      FileSystemUtils.deleteTree(wd);
+      wd.deleteTree();
     } catch (IOException e) {
       throw new AssertionError(e.getMessage());
     }

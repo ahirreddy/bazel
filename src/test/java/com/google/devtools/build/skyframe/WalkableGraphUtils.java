@@ -16,14 +16,20 @@ package com.google.devtools.build.skyframe;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 
-/** Utility methods for querying (r)deps of nodes from {@link WalkableGraph}s more concisely. */
+/** Utility methods for querying {@link WalkableGraph}s more concisely. */
 public class WalkableGraphUtils {
 
-  public static Iterable<SkyKey> getDirectDeps(WalkableGraph graph, SkyKey key) {
+  public static Iterable<SkyKey> getDirectDeps(WalkableGraph graph, SkyKey key)
+      throws InterruptedException {
     return Iterables.getOnlyElement(graph.getDirectDeps(ImmutableList.of(key)).values());
   }
 
-  public static Iterable<SkyKey> getReverseDeps(WalkableGraph graph, SkyKey key) {
+  public static Iterable<SkyKey> getReverseDeps(WalkableGraph graph, SkyKey key)
+      throws InterruptedException {
     return Iterables.getOnlyElement(graph.getReverseDeps(ImmutableList.of(key)).values());
+  }
+
+  public static boolean exists(SkyKey key, WalkableGraph graph) throws InterruptedException {
+    return graph.getValue(key) != null || graph.getException(key) != null || graph.isCycle(key);
   }
 }

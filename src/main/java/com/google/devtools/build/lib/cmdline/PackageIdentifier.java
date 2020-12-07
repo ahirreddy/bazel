@@ -15,265 +15,85 @@
 package com.google.devtools.build.lib.cmdline;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ComparisonChain;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Interner;
-import com.google.common.collect.Interners;
-import com.google.devtools.build.lib.util.Pair;
-import com.google.devtools.build.lib.util.StringCanonicalizer;
-import com.google.devtools.build.lib.util.StringUtilities;
-import com.google.devtools.build.lib.vfs.Canonicalizer;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.io.ObjectStreamException;
 import java.io.Serializable;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
-import java.util.regex.Pattern;
-
 import javax.annotation.concurrent.Immutable;
 
 /**
  * Uniquely identifies a package, given a repository name and a package's path fragment.
  *
- * <p>The repository the build is happening in is the <i>default workspace</i>, and is identified
- * by the workspace name "". Other repositories can be named in the WORKSPACE file.  These
- * workspaces are prefixed by {@literal @}.</p>
+ * <p>The repository the build is happening in is the <i>default workspace</i>, and is identified by
+ * the workspace name "". Other repositories can be named in the WORKSPACE file. These workspaces
+ * are prefixed by {@literal @}.
  */
+@AutoCodec
 @Immutable
 public final class PackageIdentifier implements Comparable<PackageIdentifier>, Serializable {
-  public static final String EXTERNAL_PREFIX = "external";
-
-  private static final Interner<PackageIdentifier> INTERNER = Interners.newWeakInterner();
+  private static final Interner<PackageIdentifier> INTERNER = BlazeInterners.newWeakInterner();
 
   public static PackageIdentifier create(String repository, PathFragment pkgName)
       throws LabelSyntaxException {
     return create(RepositoryName.create(repository), pkgName);
   }
 
+  @AutoCodec.Instantiator
   public static PackageIdentifier create(RepositoryName repository, PathFragment pkgName) {
+    // Note: We rely on these being interned to fast-path Label#equals.
     return INTERNER.intern(new PackageIdentifier(repository, pkgName));
   }
 
+  public static final PackageIdentifier EMPTY_PACKAGE_ID = createInMainRepo(
+      PathFragment.EMPTY_FRAGMENT);
+
+  public static PackageIdentifier createInMainRepo(String name) {
+    return createInMainRepo(PathFragment.create(name));
+  }
+
+  public static PackageIdentifier createInMainRepo(PathFragment name) {
+    return create(RepositoryName.MAIN, name);
+  }
+
   /**
-   * A human-readable name for the repository.
+   * Tries to infer the package identifier from the given exec path. This method does not perform
+   * any I/O, but looks solely at the structure of the exec path. The resulting identifier may
+   * actually be a subdirectory of a package rather than a package, e.g.:
+   *
+   * <pre><code>
+   * + WORKSPACE
+   * + foo/BUILD
+   * + foo/bar/bar.java
+   * </code></pre>
+   *
+   * In this case, this method returns a package identifier for foo/bar, even though that is not a
+   * package. Callers need to look up the actual package if needed.
+   *
+   * @throws LabelSyntaxException if the exec path seems to be for an external repository that does
+   *     not have a valid repository name (see {@link RepositoryName#create})
    */
-  public static final class RepositoryName implements Serializable {
-    private static final Pattern VALID_REPO_NAME = Pattern.compile("@[\\w\\-.]*");
-
-    /** Helper for serializing {@link RepositoryName}. */
-    private static final class SerializationProxy implements Serializable {
-      private RepositoryName repositoryName;
-
-      private SerializationProxy(RepositoryName repositoryName) {
-        this.repositoryName = repositoryName;
-      }
-
-      private void writeObject(ObjectOutputStream out) throws IOException {
-        out.writeObject(repositoryName.toString());
-      }
-
-      private void readObject(ObjectInputStream in)
-          throws IOException, ClassNotFoundException {
-        try {
-          repositoryName = RepositoryName.create((String) in.readObject());
-        } catch (LabelSyntaxException e) {
-          throw new IOException("Error serializing repository name: " + e.getMessage());
-        }
-      }
-
-      @SuppressWarnings("unused")
-      private void readObjectNoData() throws ObjectStreamException {
-      }
-
-      private Object readResolve() {
-        return repositoryName;
-      }
-    }
-
-    private void readObject(@SuppressWarnings("unused") ObjectInputStream in) throws IOException {
-      throw new IOException("Serialization is allowed only by proxy");
-    }
-
-    private Object writeReplace() {
-      return new SerializationProxy(this);
-    }
-
-    private static final LoadingCache<String, RepositoryName> repositoryNameCache =
-        CacheBuilder.newBuilder()
-          .weakValues()
-          .build(
-              new CacheLoader<String, RepositoryName> () {
-                @Override
-                public RepositoryName load(String name) throws LabelSyntaxException {
-                  String errorMessage = validate(name);
-                  if (errorMessage != null) {
-                    errorMessage = "invalid repository name '"
-                        + StringUtilities.sanitizeControlChars(name) + "': " + errorMessage;
-                    throw new LabelSyntaxException(errorMessage);
-                  }
-                  return new RepositoryName(StringCanonicalizer.intern(name));
-                }
-              });
-
-    /**
-     * Makes sure that name is a valid repository name and creates a new RepositoryName using it.
-     *
-     * @throws LabelSyntaxException if the name is invalid
-     */
-    public static RepositoryName create(String name) throws LabelSyntaxException {
-      try {
-        return repositoryNameCache.get(name);
-      } catch (ExecutionException e) {
-        Throwables.propagateIfInstanceOf(e.getCause(), LabelSyntaxException.class);
-        throw new IllegalStateException("Failed to create RepositoryName from " + name, e);
-      }
-    }
-
-    /**
-     * Extracts the repository name from a PathFragment that was created with
-     * {@code PackageIdentifier.getPathFragment}.
-     *
-     * @return a {@code Pair} of the extracted repository name and the path fragment with stripped
-     * of "external/"-prefix and repository name, or null if none was found or the repository name
-     * was invalid.
-     */
-    public static Pair<RepositoryName, PathFragment> fromPathFragment(PathFragment path) {
-      if (path.segmentCount() < 2 || !path.getSegment(0).equals(EXTERNAL_PREFIX)) {
-        return null;
-      }
-      try {
-        RepositoryName repoName = RepositoryName.create("@" + path.getSegment(1));
-        PathFragment subPath = path.subFragment(2, path.segmentCount());
-        return Pair.of(repoName, subPath);
-      } catch (LabelSyntaxException e) {
-        return null;
-      }
-    }
-
-    private final String name;
-
-    private RepositoryName(String name) {
-      this.name = name;
-    }
-
-    /**
-     * Performs validity checking.  Returns null on success, an error message otherwise.
-     */
-    private static String validate(String name) {
-      if (name.isEmpty()) {
-        return null;
-      }
-
-      // Some special cases for more user-friendly error messages.
-      if (!name.startsWith("@")) {
-        return "workspace names must start with '@'";
-      }
-      if (name.equals("@.")) {
-        return "workspace names are not allowed to be '@.'";
-      }
-      if (name.equals("@..")) {
-        return "workspace names are not allowed to be '@..'";
-      }
-
-      if (!VALID_REPO_NAME.matcher(name).matches()) {
-        return "workspace names may contain only A-Z, a-z, 0-9, '-', '_' and '.'";
-      }
-
-      return null;
-    }
-
-    /**
-     * Returns the repository name without the leading "{@literal @}".  For the default repository,
-     * returns "".
-     */
-    public String strippedName() {
-      if (name.isEmpty()) {
-        return name;
-      }
-      return name.substring(1);
-    }
-
-    /**
-     * Returns if this is the default repository, that is, {@link #name} is "".
-     */
-    public boolean isDefault() {
-      return name.isEmpty();
-    }
-
-    /**
-     * Returns the repository name, with leading "{@literal @}" (or "" for the default repository).
-     */
-    // TODO(bazel-team): Use this over toString()- easier to track its usage.
-    public String getName() {
-      return name;
-    }
-
-    /**
-     * Returns the path at which this repository is mapped within the exec root.
-     */
-    public PathFragment getPathFragment() {
-      return isDefault()
-          ? PathFragment.EMPTY_FRAGMENT
-          : new PathFragment(EXTERNAL_PREFIX).getRelative(strippedName());
-    }
-
-    /**
-     * Returns the repository name, with leading "{@literal @}" (or "" for the default repository).
-     */
-    @Override
-    public String toString() {
-      return name;
-    }
-
-    @Override
-    public boolean equals(Object object) {
-      if (this == object) {
-        return true;
-      }
-      if (!(object instanceof RepositoryName)) {
-        return false;
-      }
-      return name.equals(((RepositoryName) object).name);
-    }
-
-    @Override
-    public int hashCode() {
-      return name.hashCode();
-    }
-  }
-
-  public static final String DEFAULT_REPOSITORY = "";
-  public static final RepositoryName DEFAULT_REPOSITORY_NAME;
-  public static final RepositoryName MAIN_REPOSITORY_NAME;
-
-  static {
-    try {
-      DEFAULT_REPOSITORY_NAME = RepositoryName.create(DEFAULT_REPOSITORY);
-      MAIN_REPOSITORY_NAME = RepositoryName.create("@");
-    } catch (LabelSyntaxException e) {
-      throw new IllegalStateException(e);
-    }
-  }
-
-  // Temporary factory for identifiers without explicit repositories.
-  // TODO(bazel-team): remove all usages of this.
-  public static PackageIdentifier createInDefaultRepo(String name) {
-    return createInDefaultRepo(new PathFragment(name));
-  }
-
-  public static PackageIdentifier createInDefaultRepo(PathFragment name) {
-    try {
-      return create(DEFAULT_REPOSITORY, name);
-    } catch (LabelSyntaxException e) {
-      throw new IllegalArgumentException("could not create package identifier for " + name
-          + ": " + e.getMessage());
+  public static PackageIdentifier discoverFromExecPath(
+      PathFragment execPath, boolean forFiles, boolean siblingRepositoryLayout) {
+    Preconditions.checkArgument(!execPath.isAbsolute(), execPath);
+    PathFragment tofind = forFiles
+        ? Preconditions.checkNotNull(
+            execPath.getParentDirectory(), "Must pass in files, not root directory")
+        : execPath;
+    PathFragment prefix =
+        siblingRepositoryLayout
+            ? LabelConstants.EXPERIMENTAL_EXTERNAL_PATH_PREFIX
+            : LabelConstants.EXTERNAL_PATH_PREFIX;
+    if (tofind.startsWith(prefix)) {
+      // Using the path prefix can be either "external" or "..", depending on whether the sibling
+      // repository layout is used.
+      RepositoryName repository = RepositoryName.createFromValidStrippedName(tofind.getSegment(1));
+      return PackageIdentifier.create(repository, tofind.subFragment(2));
+    } else {
+      return PackageIdentifier.createInMainRepo(tofind);
     }
   }
 
@@ -283,30 +103,42 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
    */
   private final RepositoryName repository;
 
-  /** The name of the package. Canonical (i.e. x.equals(y) <=> x==y). */
+  /** The name of the package. */
   private final PathFragment pkgName;
 
+  /**
+   * Precomputed hash code. Hash/equality is based on repository and pkgName. Note that due to
+   * interning, x.equals(y) <=> x==y.
+   **/
+  private final int hashCode;
+
   private PackageIdentifier(RepositoryName repository, PathFragment pkgName) {
-    Preconditions.checkNotNull(repository);
-    Preconditions.checkNotNull(pkgName);
-    this.repository = repository;
-    this.pkgName = Canonicalizer.fragments().intern(pkgName.normalize());
+    this.repository = Preconditions.checkNotNull(repository);
+    this.pkgName = Preconditions.checkNotNull(pkgName);
+    this.hashCode = Objects.hash(repository, pkgName);
   }
 
   public static PackageIdentifier parse(String input) throws LabelSyntaxException {
-    String repo;
+    return parse(input, /* repo= */ null, /* repositoryMapping= */ null);
+  }
+
+  public static PackageIdentifier parse(
+      String input, String repo, ImmutableMap<RepositoryName, RepositoryName> repositoryMapping)
+      throws LabelSyntaxException {
     String packageName;
     int packageStartPos = input.indexOf("//");
-    if (input.startsWith("@") && packageStartPos > 0) {
+    if (repo != null) {
+      packageName = input;
+    } else if (input.startsWith("@") && packageStartPos > 0) {
       repo = input.substring(0, packageStartPos);
       packageName = input.substring(packageStartPos + 2);
     } else if (input.startsWith("@")) {
-      throw new LabelSyntaxException("invalid package name '" + input + "'");
+      throw new LabelSyntaxException("starts with a '@' but does not contain '//'");
     } else if (packageStartPos == 0) {
-      repo = PackageIdentifier.DEFAULT_REPOSITORY;
+      repo = RepositoryName.DEFAULT_REPOSITORY;
       packageName = input.substring(2);
     } else {
-      repo = PackageIdentifier.DEFAULT_REPOSITORY;
+      repo = RepositoryName.DEFAULT_REPOSITORY;
       packageName = input;
     }
 
@@ -320,7 +152,13 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
       throw new LabelSyntaxException(error);
     }
 
-    return create(repo, new PathFragment(packageName));
+    if (repositoryMapping != null) {
+      RepositoryName repositoryName = RepositoryName.create(repo);
+      repositoryName = repositoryMapping.getOrDefault(repositoryName, repositoryName);
+      return create(repositoryName, PathFragment.create(packageName));
+    } else {
+      return create(repo, PathFragment.create(packageName));
+    }
   }
 
   public RepositoryName getRepository() {
@@ -332,11 +170,31 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
   }
 
   /**
-   * Returns a relative path that should be unique across all remote and packages, based on the
-   * repository and package names.
+   * Returns a relative path to the source code for this package. Returns pkgName if this is in the
+   * main repository or external/[repository name]/[pkgName] if not.
    */
-  public PathFragment getPathFragment() {
-    return repository.getPathFragment().getRelative(pkgName);
+  public PathFragment getSourceRoot() {
+    return repository.getSourceRoot().getRelative(pkgName);
+  }
+
+  public PathFragment getExecPath(boolean siblingRepositoryLayout) {
+    return repository.getExecPath(siblingRepositoryLayout).getRelative(pkgName);
+  }
+
+  /**
+   * Returns the runfiles/execRoot path for this repository (relative to the x.runfiles/main-repo/
+   * directory).
+   */
+  public PathFragment getRunfilesPath() {
+    return repository.getRunfilesPath().getRelative(pkgName);
+  }
+
+  public PackageIdentifier makeAbsolute() {
+    if (!repository.isDefault()) {
+      return this;
+    }
+
+    return create(RepositoryName.MAIN, pkgName);
   }
 
   /**
@@ -348,7 +206,7 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
    */
   @Override
   public String toString() {
-    return (repository.isDefault() ? "" : repository + "//") + pkgName;
+    return (repository.isDefault() || repository.isMain() ? "" : repository + "//") + pkgName;
   }
 
   @Override
@@ -360,12 +218,13 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
       return false;
     }
     PackageIdentifier that = (PackageIdentifier) object;
-    return pkgName.equals(that.pkgName) && repository.equals(that.repository);
+    return this.hashCode == that.hashCode && pkgName.equals(that.pkgName)
+        && repository.equals(that.repository);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(repository, pkgName);
+    return this.hashCode;
   }
 
   @Override

@@ -14,7 +14,6 @@
 package com.google.devtools.build.lib.util;
 
 import com.google.common.base.Preconditions;
-
 import java.util.Arrays;
 
 /**
@@ -279,7 +278,7 @@ public class LongArrayList {
    * Uses a growth factor of 1.5.
    */
   private int growCapacity(int newSize) {
-    return newSize + newSize >> 1;
+    return newSize + (newSize >> 1);
   }
 }
 

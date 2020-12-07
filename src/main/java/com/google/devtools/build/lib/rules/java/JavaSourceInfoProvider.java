@@ -19,39 +19,34 @@ import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.Collection;
 import java.util.Map;
 
-/**
- * A Provider describing the java sources directly belonging to a java rule.
- */
+/** A Provider describing the java sources directly belonging to a java rule. */
 @Immutable
+@AutoCodec
 public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
   private final Collection<Artifact> sourceFiles;
   private final Collection<Artifact> sourceJars;
   private final Collection<Artifact> jarFiles;
   private final Collection<Artifact> sourceJarsForJarFiles;
   private final Map<PathFragment, Artifact> resources;
-  private final Collection<String> processorNames;
-  private final Collection<Artifact> processorPath;
 
-  private JavaSourceInfoProvider(
+  @VisibleForSerialization
+  JavaSourceInfoProvider(
       Collection<Artifact> sourceFiles,
       Collection<Artifact> sourceJars,
       Collection<Artifact> jarFiles,
       Collection<Artifact> sourceJarsForJarFiles,
-      Map<PathFragment, Artifact> resources,
-      Collection<String> processorNames,
-      Collection<Artifact> processorPath) {
+      Map<PathFragment, Artifact> resources) {
     this.sourceFiles = sourceFiles;
     this.sourceJars = sourceJars;
     this.jarFiles = jarFiles;
     this.sourceJarsForJarFiles = sourceJarsForJarFiles;
     this.resources = resources;
-    this.processorNames = processorNames;
-    this.processorPath = processorPath;
   }
 
   /** Gets the original Java source files provided as inputs to this rule. */
@@ -98,16 +93,6 @@ public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
     return resources;
   }
 
-  /** Gets the names of the annotation processors which operate on this rule's sources. */
-  public Collection<String> getProcessorNames() {
-    return processorNames;
-  }
-
-  /** Gets the classpath for the annotation processors which operate on this rule's sources. */
-  public Collection<Artifact> getProcessorPath() {
-    return processorPath;
-  }
-
   /**
    * Constructs a JavaSourceInfoProvider using the sources in the given JavaTargetAttributes.
    *
@@ -120,9 +105,30 @@ public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
         .setSourceFiles(attributes.getSourceFiles())
         .setSourceJars(attributes.getSourceJars())
         .setResources(attributes.getResources())
-        .setProcessorNames(attributes.getProcessorNames())
-        .setProcessorPath(attributes.getProcessorPath())
         .build();
+  }
+
+  public static JavaSourceInfoProvider merge(Collection<JavaSourceInfoProvider> sourceInfos) {
+    JavaSourceInfoProvider.Builder javaSourceInfo = new JavaSourceInfoProvider.Builder();
+    ImmutableList.Builder<Artifact> jarFiles = new ImmutableList.Builder<>();
+    ImmutableMap.Builder<PathFragment, Artifact> resources = new ImmutableMap.Builder<>();
+    ImmutableList.Builder<Artifact> sourceFiles = new ImmutableList.Builder<>();
+    ImmutableList.Builder<Artifact> sourceJars = new ImmutableList.Builder<>();
+    ImmutableList.Builder<Artifact> sourceJarsForJarFiles = new ImmutableList.Builder<>();
+
+    for (JavaSourceInfoProvider sourceInfo : sourceInfos) {
+      jarFiles.addAll(sourceInfo.getJarFiles());
+      resources.putAll(sourceInfo.getResources());
+      sourceFiles.addAll(sourceInfo.getSourceFiles());
+      sourceJars.addAll(sourceInfo.getSourceJars());
+      sourceJarsForJarFiles.addAll(sourceInfo.getSourceJarsForJarFiles());
+    }
+    javaSourceInfo.setJarFiles(jarFiles.build());
+    javaSourceInfo.setResources(resources.build());
+    javaSourceInfo.setSourceFiles(sourceFiles.build());
+    javaSourceInfo.setSourceJars(sourceJars.build());
+    javaSourceInfo.setSourceJarsForJarFiles(sourceJarsForJarFiles.build());
+    return javaSourceInfo.build();
   }
 
   /** Builder class for constructing JavaSourceInfoProviders. */
@@ -132,8 +138,6 @@ public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
     private Collection<Artifact> jarFiles = ImmutableList.<Artifact>of();
     private Collection<Artifact> sourceJarsForJarFiles = ImmutableList.<Artifact>of();
     private Map<PathFragment, Artifact> resources = ImmutableMap.<PathFragment, Artifact>of();
-    private Collection<String> processorNames = ImmutableList.<String>of();
-    private Collection<Artifact> processorPath = ImmutableList.<Artifact>of();
 
     /** Sets the source files included as part of the sources of this rule. */
     public Builder setSourceFiles(Collection<Artifact> sourceFiles) {
@@ -147,9 +151,7 @@ public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
       return this;
     }
 
-    /**
-     * Sets the pre-built jar files included as part of the sources of this rule.
-     */
+    /** Sets the pre-built jar files included as part of the sources of this rule. */
     public Builder setJarFiles(Collection<Artifact> jarFiles) {
       this.jarFiles = Preconditions.checkNotNull(jarFiles);
       return this;
@@ -176,28 +178,10 @@ public final class JavaSourceInfoProvider implements TransitiveInfoProvider {
       return this;
     }
 
-    /** Sets the names of the annotation processors used by this rule. */
-    public Builder setProcessorNames(Collection<String> processorNames) {
-      this.processorNames = Preconditions.checkNotNull(processorNames);
-      return this;
-    }
-
-    /** Sets the classpath used by this rule for annotation processing. */
-    public Builder setProcessorPath(Collection<Artifact> processorPath) {
-      this.processorPath = Preconditions.checkNotNull(processorPath);
-      return this;
-    }
-
     /** Constructs the JavaSourceInfoProvider from the provided Java sources. */
     public JavaSourceInfoProvider build() {
       return new JavaSourceInfoProvider(
-          sourceFiles,
-          sourceJars,
-          jarFiles,
-          sourceJarsForJarFiles,
-          resources,
-          processorNames,
-          processorPath);
+          sourceFiles, sourceJars, jarFiles, sourceJarsForJarFiles, resources);
     }
   }
 }

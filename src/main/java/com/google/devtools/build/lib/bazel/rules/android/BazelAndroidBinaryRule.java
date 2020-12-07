@@ -13,22 +13,16 @@
 // limitations under the License.
 package com.google.devtools.build.lib.bazel.rules.android;
 
-import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
-import static com.google.devtools.build.lib.packages.Attribute.attr;
-
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses;
+import com.google.devtools.build.lib.analysis.Whitelist;
+import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses.CcToolchainRequiringRule;
 import com.google.devtools.build.lib.bazel.rules.java.BazelJavaRuleClasses;
-import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
-import com.google.devtools.build.lib.rules.android.AndroidBinaryOnlyRule;
-import com.google.devtools.build.lib.rules.android.AndroidConfiguration;
+import com.google.devtools.build.lib.rules.android.AndroidFeatureFlagSetProvider;
 import com.google.devtools.build.lib.rules.android.AndroidRuleClasses;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
-import com.google.devtools.build.lib.rules.java.JavaConfiguration;
+import com.google.devtools.build.lib.rules.config.ConfigFeatureFlagTransitionFactory;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 
 /**
  * Rule class definition for {@code android_binary}.
@@ -36,18 +30,8 @@ import com.google.devtools.build.lib.rules.java.JavaConfiguration;
 public class BazelAndroidBinaryRule implements RuleDefinition {
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment environment) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
-        .requiresConfigurationFragments(
-            AndroidConfiguration.class, JavaConfiguration.class, CppConfiguration.class)
-        .add(attr("$debug_keystore", BuildType.LABEL)
-            .cfg(HOST)
-            .singleArtifact()
-            .value(environment.getLabel(
-                Constants.TOOLS_REPOSITORY + "//tools/android:debug_keystore")))
-        .add(attr(":cc_toolchain_split", BuildType.LABEL)
-            .cfg(AndroidRuleClasses.ANDROID_SPLIT_TRANSITION)
-            .value(BazelCppRuleClasses.CC_TOOLCHAIN))
         /* <!-- #BLAZE_RULE(android_binary).IMPLICIT_OUTPUTS -->
          <ul>
          <li><code><var>name</var>.apk</code>: An Android application
@@ -69,20 +53,31 @@ public class BazelAndroidBinaryRule implements RuleDefinition {
             the result of running ProGuard on the
             <code><var>name</var>_deploy.jar</code>.
             This output is only produced if
-            <a href="#android_binary.proguard_specs">proguard_specs</a> attribute is
+            <a href="${link android_binary.proguard_specs}">proguard_specs</a> attribute is
             specified.
           </li>
           <li><code><var>name</var>_proguard.map</code>: A mapping file result of
             running ProGuard on the <code><var>name</var>_deploy.jar</code>.
             This output is only produced if
-            <a href="#android_binary.proguard_specs">proguard_specs</a> attribute is
+            <a href="${link android_binary.proguard_specs}">proguard_specs</a> attribute is
             specified and
-            <a href="#android_binary.proguard_generate_mapping">proguard_generate_mapping</a>
-            is set.
+            <a href="${link android_binary.proguard_generate_mapping}">proguard_generate_mapping</a>
+            or <a href="${link android_binary.shrink_resources}">shrink_resources</a> is set.
           </li>
         </ul>
         <!-- #END_BLAZE_RULE.IMPLICIT_OUTPUTS --> */
         .setImplicitOutputsFunction(AndroidRuleClasses.ANDROID_BINARY_IMPLICIT_OUTPUTS)
+        .add(
+            Whitelist.getAttributeFromWhitelistName("export_deps")
+                .value(environment.getToolsLabel("//tools/android:export_deps_whitelist")))
+        .add(
+            Whitelist.getAttributeFromWhitelistName("allow_deps_without_srcs")
+                .value(
+                    environment.getToolsLabel(
+                        "//tools/android:allow_android_library_deps_without_srcs_whitelist")))
+        .cfg(
+            new ConfigFeatureFlagTransitionFactory(AndroidFeatureFlagSetProvider.FEATURE_FLAG_ATTR))
+        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(environment))
         .build();
   }
 
@@ -91,24 +86,20 @@ public class BazelAndroidBinaryRule implements RuleDefinition {
     return RuleDefinition.Metadata.builder()
         .name("android_binary")
         .ancestors(
-            AndroidBinaryOnlyRule.class,
+            AndroidRuleClasses.AndroidBinaryBaseRule.class,
             BazelJavaRuleClasses.JavaBaseRule.class,
-            BazelCppRuleClasses.CcLinkingRule.class)
+            CcToolchainRequiringRule.class)
         .factoryClass(BazelAndroidBinary.class)
         .build();
   }
 }
 /*<!-- #BLAZE_RULE (NAME = android_binary, TYPE = BINARY, FAMILY = Android) -->
 
-${ATTRIBUTE_SIGNATURE}
-
 <p>
   Produces Android application package files (.apk).
 </p>
 
 ${IMPLICIT_OUTPUTS}
-
-${ATTRIBUTE_DEFINITION}
 
 <h4 id="android_binary_examples">Examples</h4>
 <p>Examples of Android rules can be found in the <code>examples/android</code> directory of the

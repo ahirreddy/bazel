@@ -13,16 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
-import com.google.common.base.Function;
-import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
-import com.google.devtools.build.lib.concurrent.ExecutorParams;
 import com.google.devtools.build.skyframe.InvalidatingNodeVisitor.DeletingNodeVisitor;
 import com.google.devtools.build.skyframe.InvalidatingNodeVisitor.DirtyingNodeVisitor;
 import com.google.devtools.build.skyframe.InvalidatingNodeVisitor.InvalidationState;
-
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
-
 import javax.annotation.Nullable;
 
 /**
@@ -42,12 +36,16 @@ public final class EagerInvalidator {
    * long as the full upward transitive closure of the nodes is specified for deletion, the graph
    * remains consistent.
    */
-  public static void delete(DirtiableGraph graph, Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver, InvalidationState state,
-      boolean traverseGraph, DirtyKeyTracker dirtyKeyTracker) throws InterruptedException {
+  public static void delete(
+      InMemoryGraph graph,
+      Iterable<SkyKey> diff,
+      DirtyTrackingProgressReceiver progressReceiver,
+      InvalidationState state,
+      boolean traverseGraph)
+      throws InterruptedException {
     DeletingNodeVisitor visitor =
         createDeletingVisitorIfNeeded(
-            graph, diff, invalidationReceiver, state, traverseGraph, dirtyKeyTracker);
+            graph, diff, progressReceiver, state, traverseGraph);
     if (visitor != null) {
       visitor.run();
     }
@@ -55,39 +53,32 @@ public final class EagerInvalidator {
 
   @Nullable
   static DeletingNodeVisitor createDeletingVisitorIfNeeded(
-      DirtiableGraph graph,
+      InMemoryGraph graph,
       Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
+      DirtyTrackingProgressReceiver progressReceiver,
       InvalidationState state,
-      boolean traverseGraph,
-      DirtyKeyTracker dirtyKeyTracker) {
+      boolean traverseGraph) {
     state.update(diff);
     return state.isEmpty() ? null
-        : new DeletingNodeVisitor(graph, invalidationReceiver, state, traverseGraph,
-            dirtyKeyTracker);
+        : new DeletingNodeVisitor(graph, progressReceiver, state, traverseGraph);
   }
 
   @Nullable
   static DirtyingNodeVisitor createInvalidatingVisitorIfNeeded(
-      ThinNodeQueryableGraph graph,
+      QueryableGraph graph,
       Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
-      InvalidationState state,
-      DirtyKeyTracker dirtyKeyTracker,
-      Function<ExecutorParams, ? extends ExecutorService> executorFactory) {
+      DirtyTrackingProgressReceiver progressReceiver,
+      InvalidationState state) {
     state.update(diff);
-    return state.isEmpty() ? null
-        : new DirtyingNodeVisitor(graph, invalidationReceiver, state, dirtyKeyTracker,
-            executorFactory);
+    return state.isEmpty() ? null : new DirtyingNodeVisitor(graph, progressReceiver, state);
   }
 
   @Nullable
   private static DirtyingNodeVisitor createInvalidatingVisitorIfNeeded(
-      ThinNodeQueryableGraph graph,
+      QueryableGraph graph,
       Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
+      DirtyTrackingProgressReceiver progressReceiver,
       InvalidationState state,
-      DirtyKeyTracker dirtyKeyTracker,
       ForkJoinPool forkJoinPool,
       boolean supportInterruptions) {
     state.update(diff);
@@ -95,28 +86,20 @@ public final class EagerInvalidator {
         ? null
         : new DirtyingNodeVisitor(
             graph,
-            invalidationReceiver,
+            progressReceiver,
             state,
-            dirtyKeyTracker,
             forkJoinPool,
             supportInterruptions);
   }
-
-  /**
-   * Invalidates given values and their upward transitive closure in the graph if necessary, using
-   * an executor constructed with the provided factory.
-   */
+  /** Invalidates given values and their upward transitive closure in the graph if necessary. */
   public static void invalidate(
-      ThinNodeQueryableGraph graph,
+      QueryableGraph graph,
       Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
-      InvalidationState state,
-      DirtyKeyTracker dirtyKeyTracker,
-      Function<ExecutorParams, ? extends ExecutorService> executorFactory)
+      DirtyTrackingProgressReceiver progressReceiver,
+      InvalidationState state)
       throws InterruptedException {
     DirtyingNodeVisitor visitor =
-        createInvalidatingVisitorIfNeeded(
-            graph, diff, invalidationReceiver, state, dirtyKeyTracker, executorFactory);
+        createInvalidatingVisitorIfNeeded(graph, diff, progressReceiver, state);
     if (visitor != null) {
       visitor.run();
     }
@@ -127,40 +110,18 @@ public final class EagerInvalidator {
    * the provided {@link ForkJoinPool}.
    */
   public static void invalidate(
-      ThinNodeQueryableGraph graph,
+      QueryableGraph graph,
       Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
+      DirtyTrackingProgressReceiver progressReceiver,
       InvalidationState state,
-      DirtyKeyTracker dirtyKeyTracker,
       ForkJoinPool forkJoinPool,
       boolean supportInterruptions)
       throws InterruptedException {
     DirtyingNodeVisitor visitor =
         createInvalidatingVisitorIfNeeded(
-            graph,
-            diff,
-            invalidationReceiver,
-            state,
-            dirtyKeyTracker,
-            forkJoinPool,
-            supportInterruptions);
+            graph, diff, progressReceiver, state, forkJoinPool, supportInterruptions);
     if (visitor != null) {
       visitor.run();
     }
   }
-
-  /**
-   * Invalidates given values and their upward transitive closure in the graph.
-   */
-  public static void invalidate(
-      DirtiableGraph graph,
-      Iterable<SkyKey> diff,
-      EvaluationProgressReceiver invalidationReceiver,
-      InvalidationState state,
-      DirtyKeyTracker dirtyKeyTracker)
-      throws InterruptedException {
-    invalidate(graph, diff, invalidationReceiver, state, dirtyKeyTracker,
-        AbstractQueueVisitor.EXECUTOR_FACTORY);
-  }
-
 }

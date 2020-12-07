@@ -14,152 +14,108 @@
 
 package com.google.devtools.build.lib.skylark.util;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
 
-import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
-import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.PackageFactory.PackageContext;
-import com.google.devtools.build.lib.rules.SkylarkModules;
-import com.google.devtools.build.lib.rules.SkylarkRuleContext;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.analysis.skylark.SkylarkModules;
+import com.google.devtools.build.lib.analysis.skylark.SkylarkRuleContext;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.packages.BazelStarlarkContext;
+import com.google.devtools.build.lib.packages.SymbolGenerator;
+import com.google.devtools.build.lib.rules.platform.PlatformCommon;
+import com.google.devtools.build.lib.syntax.Module;
+import com.google.devtools.build.lib.syntax.Mutability;
+import com.google.devtools.build.lib.syntax.Starlark;
+import com.google.devtools.build.lib.syntax.StarlarkThread;
 import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
-
+import com.google.devtools.build.lib.testutil.TestConstants;
 import org.junit.Before;
 
 /**
- * A class to contain the common functionality for Skylark tests.
+ * A class to contain the common functionality for analysis-phase Starlark tests. The less stuff
+ * here, the better.
  */
-public abstract class SkylarkTestCase extends BuildViewTestCaseForJunit4 {
+public abstract class SkylarkTestCase extends BuildViewTestCase {
 
-  // We don't have multiple inheritance, so we fake it.
   protected EvaluationTestCase ev;
 
+  // Subclasses must call this method after change SkylarkSemantics (among other things).
   @Before
-  public final void setUpEvaluator() throws Exception {
+  public final void reset() throws Exception {
     ev = createEvaluationTestCase();
+  }
+
+  private EvaluationTestCase createEvaluationTestCase() throws Exception {
+    // Set up globals.
+    ImmutableMap.Builder<String, Object> env = ImmutableMap.builder();
+    SkylarkModules.addSkylarkGlobalsToBuilder(env);
+    Starlark.addModule(env, new PlatformCommon());
+    Module globals = Module.createForBuiltins(env.build());
+
+    EvaluationTestCase ev =
+        new EvaluationTestCase() {
+          @Override
+          public StarlarkThread newStarlarkThread() {
+            Mutability mu = Mutability.create("test");
+            StarlarkThread thread =
+                StarlarkThread.builder(mu)
+                    .setSemantics(getStarlarkSemantics())
+                    .setGlobals(
+                        globals.withLabel(
+                            Label.parseAbsoluteUnchecked("//test:label", /*defaultToMain=*/ false)))
+                    .build();
+            thread.setPrintHandler(Event.makeDebugPrintHandler(getEventHandler()));
+
+            // This StarlarkThread has no PackageContext, so attempts to create a rule will fail.
+            // Rule creation is tested by SkylarkIntegrationTest.
+
+            new BazelStarlarkContext(
+                    BazelStarlarkContext.Phase.LOADING,
+                    TestConstants.TOOLS_REPOSITORY,
+                    /*fragmentNameToClass=*/ null,
+                    /*repoMapping=*/ ImmutableMap.of(),
+                    new SymbolGenerator<>(new Object()),
+                    /*analysisRuleLabel=*/ null,
+                    /*transitiveDigest=*/ new byte[] {}) // dummy value for tests
+                .storeInThread(thread);
+
+            return thread;
+          }
+        };
     ev.initialize();
+    return ev;
   }
 
-  protected EvaluationTestCase createEvaluationTestCase() {
-    return new EvaluationTestCase() {
-      @Override
-      public Environment newEnvironment() throws Exception {
-        return Environment.builder(mutability)
-            .setSkylark()
-            .setEventHandler(getEventHandler())
-            .setGlobals(SkylarkModules.GLOBALS)
-            .setLoadingPhase()
-            .build()
-            .setupDynamic(
-                PackageFactory.PKG_CONTEXT,
-                // This dummy pkgContext works because no Skylark unit test attempts to actually
-                // create rules. Creating actual rules is tested in SkylarkIntegrationTest.
-                new PackageContext(null, null, getEventHandler()));
-      }
-    };
-  }
-
-  protected Object eval(String... input) throws Exception {
+  protected final Object eval(String... input) throws Exception {
     return ev.eval(input);
   }
 
-  protected void update(String name, Object value) throws Exception {
+  protected final void exec(String... lines) throws Exception {
+    ev.exec(lines);
+  }
+
+  protected final void update(String name, Object value) throws Exception {
     ev.update(name, value);
   }
 
-  protected Object lookup(String name) throws Exception {
+  protected final Object lookup(String name) throws Exception {
     return ev.lookup(name);
   }
 
-  protected void checkEvalError(String msg, String... input) throws Exception {
-    ev.checkEvalError(msg, input);
-  }
-
-  protected void checkEvalErrorContains(String msg, String... input) throws Exception {
+  protected final void checkEvalErrorContains(String msg, String... input) throws Exception {
     ev.checkEvalErrorContains(msg, input);
   }
 
-  protected SkylarkRuleContext dummyRuleContext() throws Exception {
-    return createRuleContext("//foo:foo");
+  protected final SkylarkRuleContext createRuleContext(String label) throws Exception {
+    return new SkylarkRuleContext(
+        getRuleContextForStarlark(getConfiguredTarget(label)), null, getStarlarkSemantics());
   }
 
-  protected SkylarkRuleContext createRuleContext(String label) throws Exception {
-    return new SkylarkRuleContext(getRuleContextForSkylark(getConfiguredTarget(label)));
+  // Disable BuildViewTestCase's overload to avoid unintended calls.
+  @Override
+  protected final Event checkError(String x, String y) throws Exception {
+    throw new IllegalStateException("wrong method");
   }
 
-  protected Object evalRuleContextCode(String... lines) throws Exception {
-    return evalRuleContextCode(dummyRuleContext(), lines);
-  }
-
-  /**
-   * RuleContext can't be null, SkylarkBuiltInFunctions checks it.
-   * However not all built in functions use it, if usesRuleContext == false
-   * the wrapping function won't need a ruleContext parameter.
-   */
-  protected Object evalRuleContextCode(SkylarkRuleContext ruleContext, String... code)
-      throws Exception {
-    setUpEvaluator();
-    if (ruleContext != null) {
-      update("ruleContext", ruleContext);
-    }
-    return eval(code);
-  }
-
-  protected void assertArtifactFilenames(Iterable<Artifact> artifacts, String... expected) {
-    ImmutableList.Builder<String> artifactFilenames = ImmutableList.builder();
-    for (Artifact artifact : artifacts) {
-      artifactFilenames.add(artifact.getFilename());
-    }
-    assertThat(artifactFilenames.build()).containsAllIn(Lists.newArrayList(expected));
-  }
-
-  protected Object evalRuleClassCode(String... lines) throws Exception {
-    setUpEvaluator();
-    return eval("def impl(ctx): return None\n" + Joiner.on("\n").join(lines));
-  }
-
-  protected void checkError(SkylarkRuleContext ruleContext, String errorMsg, String... lines)
-      throws Exception {
-    try {
-      evalRuleContextCode(ruleContext, lines);
-      fail();
-    } catch (EvalException e) {
-      assertThat(e).hasMessage(errorMsg);
-    }
-  }
-
-  protected void checkErrorStartsWith(
-      SkylarkRuleContext ruleContext, String errorMsg, String... lines) throws Exception {
-    try {
-      evalRuleContextCode(ruleContext, lines);
-      fail();
-    } catch (EvalException e) {
-      assertThat(e.getMessage()).startsWith(errorMsg);
-    }
-  }
-
-  protected void checkErrorContains(String errorMsg, String... lines) throws Exception {
-    try {
-      eval(lines);
-      fail("checkErrorContains(String, String...): There was no error");
-    } catch (EvalException e) {
-      assertThat(e.getMessage()).contains(errorMsg);
-    }
-  }
-
-  protected void checkErrorContains(
-      SkylarkRuleContext ruleContext, String errorMsg, String... lines) throws Exception {
-    try {
-      evalRuleContextCode(ruleContext, lines);
-      fail("checkErrorContains(SkylarkRuleContext, String, String...): There was no error");
-    } catch (EvalException e) {
-      assertThat(e.getMessage()).contains(errorMsg);
-    }
-  }
 }

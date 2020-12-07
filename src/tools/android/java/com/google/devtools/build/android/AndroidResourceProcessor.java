@@ -13,279 +13,529 @@
 // limitations under the License.
 package com.google.devtools.build.android;
 
-import com.google.common.base.Throwables;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-
+import android.databinding.AndroidDataBinding;
+import android.databinding.cli.ProcessXmlOptions;
+import com.android.annotations.NonNull;
 import com.android.annotations.Nullable;
-import com.android.builder.core.AndroidBuilder;
 import com.android.builder.core.VariantConfiguration;
-import com.android.builder.dependency.ManifestDependency;
+import com.android.builder.core.VariantType;
 import com.android.builder.dependency.SymbolFileProvider;
 import com.android.builder.model.AaptOptions;
+import com.android.ide.common.internal.CommandLineRunner;
+import com.android.ide.common.internal.ExecutorSingleton;
 import com.android.ide.common.internal.LoggedErrorException;
-import com.android.ide.common.internal.PngCruncher;
-import com.android.ide.common.res2.AssetMerger;
-import com.android.ide.common.res2.AssetSet;
-import com.android.ide.common.res2.MergedAssetWriter;
-import com.android.ide.common.res2.MergedResourceWriter;
-import com.android.ide.common.res2.MergingException;
-import com.android.ide.common.res2.ResourceMerger;
-import com.android.ide.common.res2.ResourceSet;
-import com.android.manifmerger.ManifestMerger2;
+import com.android.repository.Revision;
+import com.android.utils.ILogger;
 import com.android.utils.StdLogger;
-
-import java.io.File;
+import com.google.common.base.Joiner;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Multimap;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.devtools.build.android.Converters.ExistingPathConverter;
+import com.google.devtools.build.android.Converters.RevisionConverter;
+import com.google.devtools.build.android.junctions.JunctionCreator;
+import com.google.devtools.build.android.junctions.NoopJunctionCreator;
+import com.google.devtools.build.android.junctions.WindowsJunctionCreator;
+import com.google.devtools.build.android.resources.ResourceSymbols;
+import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
+import com.google.devtools.common.options.Option;
+import com.google.devtools.common.options.OptionDocumentationCategory;
+import com.google.devtools.common.options.OptionEffectTag;
+import com.google.devtools.common.options.OptionsBase;
+import com.google.devtools.common.options.TriState;
+import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.FileVisitResult;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.zip.CRC32;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 
-/**
- * Provides a wrapper around the AOSP build tools for resource processing.
- */
+/** Provides a wrapper around the AOSP build tools for resource processing. */
 public class AndroidResourceProcessor {
+  static final Logger logger = Logger.getLogger(AndroidResourceProcessor.class.getName());
+
+  /** Options class containing flags for Aapt setup. */
+  public static final class AaptConfigOptions extends OptionsBase {
+    @Option(
+      name = "buildToolsVersion",
+      defaultValue = "null",
+      converter = RevisionConverter.class,
+      category = "config",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Version of the build tools (e.g. aapt) being used, e.g. 23.0.2"
+    )
+    public Revision buildToolsVersion;
+
+    @Option(
+      name = "aapt",
+      defaultValue = "null",
+      converter = ExistingPathConverter.class,
+      category = "tool",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Aapt tool location for resource packaging."
+    )
+    public Path aapt;
+
+    @Option(
+      name = "androidJar",
+      defaultValue = "null",
+      converter = ExistingPathConverter.class,
+      category = "tool",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Path to the android jar for resource packaging and building apks."
+    )
+    public Path androidJar;
+
+    @Option(
+      name = "useAaptCruncher",
+      defaultValue = "auto",
+      category = "config",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Use the legacy aapt cruncher, defaults to true for non-LIBRARY packageTypes. "
+              + " LIBRARY packages do not benefit from the additional processing as the resources"
+              + " will need to be reprocessed during the generation of the final apk. See"
+              + " https://code.google.com/p/android/issues/detail?id=67525 for a discussion of the"
+              + " different png crunching methods."
+    )
+    public TriState useAaptCruncher;
+
+    @Option(
+      name = "uncompressedExtensions",
+      defaultValue = "",
+      converter = CommaSeparatedOptionListConverter.class,
+      category = "config",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "A list of file extensions not to compress."
+    )
+    public List<String> uncompressedExtensions;
+
+    @Option(
+      name = "debug",
+      defaultValue = "false",
+      category = "config",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Indicates if it is a debug build."
+    )
+    public boolean debug;
+
+    @Option(
+      name = "resourceConfigs",
+      defaultValue = "",
+      converter = CommaSeparatedOptionListConverter.class,
+      category = "config",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "A list of resource config filters to pass to aapt."
+    )
+    public List<String> resourceConfigs;
+  }
+
+  /** {@link AaptOptions} backed by an {@link AaptConfigOptions}. */
+  public static final class FlagAaptOptions implements AaptOptions {
+    private final AaptConfigOptions options;
+
+    public FlagAaptOptions(AaptConfigOptions options) {
+      this.options = options;
+    }
+
+    @Override
+    public Collection<String> getNoCompress() {
+      if (!options.uncompressedExtensions.isEmpty()) {
+        return options.uncompressedExtensions;
+      }
+      return ImmutableList.of();
+    }
+
+    @Override
+    public String getIgnoreAssets() {
+      return null;
+    }
+
+    @Override
+    public boolean getFailOnMissingConfigEntry() {
+      return false;
+    }
+
+    @Override
+    public List<String> getAdditionalParameters() {
+      return ImmutableList.of();
+    }
+  }
+
   private final StdLogger stdLogger;
 
   public AndroidResourceProcessor(StdLogger stdLogger) {
     this.stdLogger = stdLogger;
   }
 
-  /**
-   * Copies the R.txt to the expected place.
-   */
-  public void copyRToOutput(Path generatedSourceRoot, Path rOutput) {
-    try {
-      Files.createDirectories(rOutput.getParent());
-      final Path source = generatedSourceRoot.resolve("R.txt");
-      if (Files.exists(source)) {
-        Files.copy(source, rOutput);
-      } else {
-        // The R.txt wasn't generated, create one for future inheritance, as Bazel always requires
-        // outputs. This state occurs when there are no resource directories.
-        Files.createFile(rOutput);
-      }
-    } catch (IOException e) {
-      Throwables.propagate(e);
-    }
-  }
-
-  /**
-   * Creates a zip archive from all found R.java files.
-   */
-  public void createSrcJar(Path generatedSourcesRoot, Path srcJar) {
-    try {
-      Files.createDirectories(srcJar.getParent());
-      try (final ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(srcJar))) {
-        Files.walkFileTree(generatedSourcesRoot,
-            new SymbolFileSrcJarBuildingVisitor(zip, generatedSourcesRoot));
-      }
-    } catch (IOException e) {
-      Throwables.propagate(e);
-    }
-  }
-
+  // TODO(bazel-team): Clean up this method call -- 13 params is too many.
   /**
    * Processes resources for generated sources, configs and packaging resources.
+   *
+   * <p>Returns a post-processed MergedAndroidData. Notably, the resources will be stripped of any
+   * databinding expressions.
    */
-  public void processResources(
-      AndroidBuilder builder,
-      VariantConfiguration.Type variantType,
+  public MergedAndroidData processResources(
+      Path tempRoot,
+      Path aapt,
+      Path androidJar,
+      @Nullable Revision buildToolsVersion,
+      VariantType variantType,
       boolean debug,
       String customPackageForR,
       AaptOptions aaptOptions,
       Collection<String> resourceConfigs,
-      String applicationId,
-      int versionCode,
-      String versionName,
       MergedAndroidData primaryData,
       List<DependencyAndroidData> dependencyData,
-      Path workingDirectory,
       @Nullable Path sourceOut,
       @Nullable Path packageOut,
-      @Nullable Path proguardOut) throws IOException, InterruptedException, LoggedErrorException {
-    ImmutableList.Builder<SymbolFileProvider> libraries = ImmutableList.builder();
-    for (DependencyAndroidData dataDep : dependencyData) {
-      libraries.add(dataDep.asSymbolFileProvider());
+      @Nullable Path proguardOut,
+      @Nullable Path mainDexProguardOut,
+      @Nullable Path publicResourcesOut,
+      @Nullable Path dataBindingInfoOut)
+      throws IOException, InterruptedException, LoggedErrorException {
+    Path androidManifest = primaryData.getManifest();
+    final Path resourceDir =
+        processDataBindings(
+            primaryData.getResourceDir().resolveSibling("res_no_binding"),
+            primaryData.getResourceDir(),
+            dataBindingInfoOut,
+            customPackageForR,
+            /* shouldZipDataBindingInfo= */ true);
+
+    final Path assetsDir = primaryData.getAssetDir();
+    if (publicResourcesOut != null) {
+      prepareOutputPath(publicResourcesOut.getParent());
     }
-
-    File androidManifest = processManifest(
-        applicationId,
-        versionCode,
-        versionName,
-        primaryData,
-        workingDirectory,
-        builder);
-
-    builder.processResources(
-        androidManifest,
-        primaryData.getResourceDirFile(),
-        primaryData.getAssetDirFile(),
-        libraries.build(),
-        customPackageForR,
-        prepareOutputPath(sourceOut),
-        prepareOutputPath(sourceOut),
-        packageOut != null ? packageOut.toString() : null,
-        proguardOut != null ? proguardOut.toString() : null,
+    runAapt(
+        tempRoot,
+        aapt,
+        androidJar,
+        buildToolsVersion,
         variantType,
         debug,
+        customPackageForR,
         aaptOptions,
         resourceConfigs,
-        true // boolean enforceUniquePackageName
-        );
+        androidManifest,
+        resourceDir,
+        assetsDir,
+        sourceOut,
+        packageOut,
+        proguardOut,
+        mainDexProguardOut,
+        publicResourcesOut);
+    // The R needs to be created for each library in the dependencies,
+    // but only if the current project is not a library.
+    if (sourceOut != null && variantType != VariantType.LIBRARY) {
+      writeDependencyPackageRJavaFiles(
+          dependencyData, customPackageForR, androidManifest, sourceOut);
+    }
+    return new MergedAndroidData(resourceDir, assetsDir, androidManifest);
   }
 
-  private File processManifest(
-      String applicationId,
-      int versionCode,
-      String versionName,
-      MergedAndroidData primaryData,
-      Path workingDirectory,
-      AndroidBuilder builder) throws IOException {
-    if (versionCode != -1 || versionName != null || applicationId != null) {
-      Path androidManifest =
-          Files.createDirectories(workingDirectory).resolve("AndroidManifest.xml");
-      // stamp version and applicationId (if provided) into the manifest
-      builder.mergeManifests(
-          primaryData.getManifestFile(), // mainManifest,
-          ImmutableList.<File>of(),
-          ImmutableList.<ManifestDependency>of(),
-          applicationId,
-          versionCode,
-          versionName,
-          null, // String minSdkVersion
-          null, // String targetSdkVersion
-          null, // int maxSdkVersion
-          androidManifest.toString(),
-          ManifestMerger2.MergeType.APPLICATION,
-          ImmutableMap.<String, String>of());
-      return androidManifest.toFile();
+  public void runAapt(
+      Path tempRoot,
+      Path aapt,
+      Path androidJar,
+      @Nullable Revision buildToolsVersion,
+      VariantType variantType,
+      boolean debug,
+      String customPackageForR,
+      AaptOptions aaptOptions,
+      Collection<String> resourceConfigs,
+      Path androidManifest,
+      Path resourceDir,
+      Path assetsDir,
+      Path sourceOut,
+      @Nullable Path packageOut,
+      @Nullable Path proguardOut,
+      @Nullable Path mainDexProguardOut,
+      @Nullable Path publicResourcesOut)
+      throws InterruptedException, LoggedErrorException, IOException {
+    try (JunctionCreator junctions =
+        System.getProperty("os.name").toLowerCase().startsWith("windows")
+            ? new WindowsJunctionCreator(Files.createDirectories(tempRoot.resolve("juncts")))
+            : new NoopJunctionCreator()) {
+      sourceOut = junctions.create(sourceOut);
+      AaptCommandBuilder commandBuilder =
+          new AaptCommandBuilder(junctions.create(aapt))
+              .forBuildToolsVersion(buildToolsVersion)
+              .forVariantType(variantType)
+              // first argument is the command to be executed, "package"
+              .add("package")
+              // If the logger is verbose, set aapt to be verbose
+              .when(stdLogger.getLevel() == StdLogger.Level.VERBOSE)
+              .thenAdd("-v")
+              // Overwrite existing files, if they exist.
+              .add("-f")
+              // Resources are precrunched in the merge process.
+              .add("--no-crunch")
+              // Do not automatically generate versioned copies of vector XML resources.
+              .whenVersionIsAtLeast(new Revision(23))
+              .thenAdd("--no-version-vectors")
+              // Add the android.jar as a base input.
+              .add("-I", junctions.create(androidJar))
+              // Add the manifest for validation.
+              .add("-M", junctions.create(androidManifest.toAbsolutePath()))
+              // Maybe add the resources if they exist
+              .when(Files.isDirectory(resourceDir))
+              .thenAdd("-S", junctions.create(resourceDir))
+              // Maybe add the assets if they exist
+              .when(Files.isDirectory(assetsDir))
+              .thenAdd("-A", junctions.create(assetsDir))
+              // Outputs
+              .when(sourceOut != null)
+              .thenAdd("-m")
+              .add("-J", prepareOutputPath(sourceOut))
+              .add("--output-text-symbols", prepareOutputPath(sourceOut))
+              .add("-F", junctions.create(packageOut))
+              .add("-G", junctions.create(proguardOut))
+              .whenVersionIsAtLeast(new Revision(24))
+              .thenAdd("-D", junctions.create(mainDexProguardOut))
+              .add("-P", junctions.create(publicResourcesOut))
+              .when(debug)
+              .thenAdd("--debug-mode")
+              .add("--custom-package", customPackageForR)
+              // If it is a library, do not generate final java ids.
+              .whenVariantIs(VariantType.LIBRARY)
+              .thenAdd("--non-constant-id")
+              .add("--ignore-assets", aaptOptions.getIgnoreAssets())
+              .when(aaptOptions.getFailOnMissingConfigEntry())
+              .thenAdd("--error-on-missing-config-entry")
+              // Never compress apks.
+              .add("-0", "apk")
+              // Add custom no-compress extensions.
+              .addRepeated("-0", aaptOptions.getNoCompress())
+              // Filter by resource configuration type.
+              .add("-c", Joiner.on(',').join(resourceConfigs));
+      for (String additional : aaptOptions.getAdditionalParameters()) {
+        commandBuilder.add(additional);
+      }
+      try {
+        new CommandLineRunner(stdLogger).runCmdLine(commandBuilder.build(), null);
+      } catch (LoggedErrorException e) {
+        // Add context and throw the error to resume processing.
+        throw new LoggedErrorException(
+            e.getCmdLineError(), getOutputWithSourceContext(aapt, e.getOutput()), e.getCmdLine());
+      }
     }
-    return primaryData.getManifestFile();
+  }
+
+  /** Adds 10 lines of source to each syntax error. Very useful for debugging. */
+  private List<String> getOutputWithSourceContext(Path aapt, List<String> lines)
+      throws IOException {
+    List<String> outputWithSourceContext = new ArrayList<>();
+    for (String line : lines) {
+      if (line.contains("Duplicate file") || line.contains("Original")) {
+        String[] parts = line.split(":");
+        String fileName = parts[0].trim();
+        outputWithSourceContext.add("\n" + fileName + ":\n\t");
+        outputWithSourceContext.add(
+            Joiner.on("\n\t")
+                .join(
+                    Files.readAllLines(
+                        aapt.getFileSystem().getPath(fileName), StandardCharsets.UTF_8)));
+      } else if (line.contains("error")) {
+        String[] parts = line.split(":");
+        String fileName = parts[0].trim();
+        try {
+          int lineNumber = Integer.valueOf(parts[1].trim());
+          StringBuilder expandedError =
+              new StringBuilder("\nError at " + lineNumber + " : " + line);
+          List<String> errorSource =
+              Files.readAllLines(aapt.getFileSystem().getPath(fileName), StandardCharsets.UTF_8);
+          for (int i = Math.max(lineNumber - 5, 0);
+              i < Math.min(lineNumber + 5, errorSource.size());
+              i++) {
+            expandedError.append("\n").append(i).append("\t:  ").append(errorSource.get(i));
+          }
+          outputWithSourceContext.add(expandedError.toString());
+        } catch (IOException | NumberFormatException formatError) {
+          outputWithSourceContext.add("error parsing line" + line);
+          stdLogger.error(formatError, "error during reading source %s", fileName);
+        }
+      } else {
+        outputWithSourceContext.add(line);
+      }
+    }
+    return outputWithSourceContext;
   }
 
   /**
-   * Merges all secondary resources with the primary resources.
+   * If resources exist and a data binding layout info file is requested: processes data binding
+   * declarations over those resources, populates the output file, and creates a new resources
+   * directory with data binding expressions stripped out (so aapt, which doesn't understand data
+   * binding, can properly read them).
+   *
+   * <p>Returns the resources directory that aapt should read.
    */
-  public MergedAndroidData mergeData(
-      final UnvalidatedAndroidData primary,
-      final List<DependencyAndroidData> secondary,
-      final Path resourcesOut,
-      final Path assetsOut,
-      final ImmutableList<DirectoryModifier> modifiers,
-      @Nullable final PngCruncher cruncher,
-      final boolean strict) throws MergingException {
+  static Path processDataBindings(
+      Path processedResourceOutputDirectory,
+      Path inputResourcesDir,
+      Path dataBindingInfoOut,
+      String packagePath,
+      boolean shouldZipDataBindingInfo)
+      throws IOException {
 
-    List<ResourceSet> resourceSets = new ArrayList<>();
-    List<AssetSet> assetSets = new ArrayList<>();
-
-    if (strict) {
-      androidDataToStrictMergeSet(primary, secondary, modifiers, resourceSets, assetSets);
-    } else {
-      androidDataToRelaxedMergeSet(primary, secondary, modifiers, resourceSets, assetSets);
-    }
-    ResourceMerger merger = new ResourceMerger();
-    for (ResourceSet set : resourceSets) {
-      set.loadFromFiles(stdLogger);
-      merger.addDataSet(set);
+    if (dataBindingInfoOut == null) {
+      return inputResourcesDir;
+    } else if (!Files.isDirectory(inputResourcesDir)) {
+      // No resources: no data binding needed. Create a dummy file to satisfy declared outputs.
+      Files.createFile(dataBindingInfoOut);
+      return inputResourcesDir;
     }
 
-    AssetMerger assetMerger = new AssetMerger();
-    for (AssetSet set : assetSets) {
-      set.loadFromFiles(stdLogger);
-      assetMerger.addDataSet(set);
+    // Strip the file name (the data binding library automatically adds it back in).
+    // ** The data binding library assumes this file is called "layout-info.zip". **
+    if (shouldZipDataBindingInfo) {
+      dataBindingInfoOut = dataBindingInfoOut.getParent();
+      if (Files.notExists(dataBindingInfoOut)) {
+        Files.createDirectory(dataBindingInfoOut);
+      }
     }
 
-    MergedResourceWriter resourceWriter = new MergedResourceWriter(resourcesOut.toFile(), cruncher);
-    MergedAssetWriter assetWriter = new MergedAssetWriter(assetsOut.toFile());
+    // Create a directory for the resources, namespaced with the old resource path
+    Path processedResourceDir =
+        Files.createDirectories(
+            processedResourceOutputDirectory.resolve(
+                inputResourcesDir.isAbsolute()
+                    ? inputResourcesDir.getRoot().relativize(inputResourcesDir)
+                    : inputResourcesDir));
 
-    merger.mergeData(resourceWriter, false);
-    assetMerger.mergeData(assetWriter, false);
+    ProcessXmlOptions options = new ProcessXmlOptions();
+    options.setAppId(packagePath);
+    options.setResInput(inputResourcesDir.toFile());
+    options.setResOutput(processedResourceDir.toFile());
+    options.setLayoutInfoOutput(dataBindingInfoOut.toFile());
+    // Whether or not to aggregate data-bound .xml files into a single .zip.
+    options.setZipLayoutInfo(shouldZipDataBindingInfo);
 
-    return new MergedAndroidData(resourcesOut, assetsOut, primary.getManifest());
+    try {
+      AndroidDataBinding.doRun(options);
+    } catch (Throwable t) {
+      throw new RuntimeException(t);
+    }
+    return processedResourceDir;
   }
 
-  private void androidDataToRelaxedMergeSet(UnvalidatedAndroidData primary,
-      List<DependencyAndroidData> secondary, ImmutableList<DirectoryModifier> modifiers,
-      List<ResourceSet> resourceSets, List<AssetSet> assetSets) {
-
-    for (DependencyAndroidData dependency : secondary) {
-      DependencyAndroidData modifiedDependency = dependency.modify(modifiers);
-      modifiedDependency.addAsResourceSets(resourceSets);
-      modifiedDependency.addAsAssetSets(assetSets);
+  public ResourceSymbols loadResourceSymbolTable(
+      Iterable<? extends SymbolFileProvider> libraries,
+      String appPackageName,
+      Path primaryRTxt,
+      Multimap<String, ResourceSymbols> libMap)
+      throws IOException {
+    // The reported availableProcessors may be higher than the actual resources
+    // (on a shared system). On the other hand, a lot of the work is I/O, so it's not completely
+    // CPU bound. As a compromise, divide by 2 the reported availableProcessors.
+    int numThreads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+    ListeningExecutorService executorService =
+        MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(numThreads));
+    try (Closeable closeable = ExecutorServiceCloser.createWith(executorService)) {
+      for (Map.Entry<String, ListenableFuture<ResourceSymbols>> entry :
+          ResourceSymbols.loadFrom(libraries, executorService, appPackageName).entries()) {
+        libMap.put(entry.getKey(), entry.getValue().get());
+      }
+      if (primaryRTxt != null && Files.exists(primaryRTxt)) {
+        return ResourceSymbols.load(primaryRTxt, executorService).get();
+      }
+      return ResourceSymbols.merge(libMap.values());
+    } catch (InterruptedException | ExecutionException e) {
+      throw new IOException("Failed to load SymbolFile: ", e);
     }
-    UnvalidatedAndroidData modifiedPrimary = primary.modify(modifiers);
-    modifiedPrimary.addAsResourceSets(resourceSets);
-    modifiedPrimary.addAsAssetSets(assetSets);
-
   }
 
-  private void androidDataToStrictMergeSet(UnvalidatedAndroidData primary,
-      List<DependencyAndroidData> secondary, ImmutableList<DirectoryModifier> modifiers,
-      List<ResourceSet> resourceSets, List<AssetSet> assetSets) {
-    UnvalidatedAndroidData modifiedPrimary = primary.modify(modifiers);
-    ResourceSet mainResources = modifiedPrimary.addToResourceSet(new ResourceSet("main"));
-    AssetSet mainAssets = modifiedPrimary.addToAssets(new AssetSet("main"));
-    ResourceSet dependentResources = new ResourceSet("deps");
-    AssetSet dependentAssets = new AssetSet("deps");
-    for (DependencyAndroidData dependency : secondary) {
-      DependencyAndroidData modifiedDependency = dependency.modify(modifiers);
-      modifiedDependency.addToResourceSet(dependentResources);
-      modifiedDependency.addToAssets(dependentAssets);
+  void writeDependencyPackageRJavaFiles(
+      List<DependencyAndroidData> dependencyData,
+      String customPackageForR,
+      Path androidManifest,
+      Path sourceOut)
+      throws IOException {
+    List<SymbolFileProvider> libraries = new ArrayList<>();
+    for (DependencyAndroidData dataDep : dependencyData) {
+      SymbolFileProvider library = dataDep.asSymbolFileProvider();
+      libraries.add(library);
     }
-    resourceSets.add(dependentResources);
-    resourceSets.add(mainResources);
-    assetSets.add(dependentAssets);
-    assetSets.add(mainAssets);
+    String appPackageName = customPackageForR;
+    if (appPackageName == null) {
+      appPackageName = VariantConfiguration.getManifestPackage(androidManifest.toFile());
+    }
+    Multimap<String, ResourceSymbols> libSymbolMap = ArrayListMultimap.create();
+    Path primaryRTxt = sourceOut != null ? sourceOut.resolve("R.txt") : null;
+    if (primaryRTxt != null && !libraries.isEmpty()) {
+      ResourceSymbols fullSymbolValues =
+          loadResourceSymbolTable(libraries, appPackageName, primaryRTxt, libSymbolMap);
+      // Loop on all the package name, merge all the symbols to write, and write.
+      for (String packageName : libSymbolMap.keySet()) {
+        Collection<ResourceSymbols> symbols = libSymbolMap.get(packageName);
+        fullSymbolValues.writeSourcesTo(sourceOut, packageName, symbols, /* finalFields= */ true);
+      }
+    }
   }
 
-  private String prepareOutputPath(@Nullable Path out) throws IOException {
-    if (out == null) {
-      return null;
-    }
-    return Files.createDirectories(out).toString();
-  }
+  /** A logger that will print messages to a target OutputStream. */
+  static final class PrintStreamLogger implements ILogger {
+    private final PrintStream out;
 
-  /**
-   * A FileVisitor that will add all R.java files to be stored in a zip archive.
-   */
-  private final class SymbolFileSrcJarBuildingVisitor extends SimpleFileVisitor<Path> {
-
-    // The earliest date representable in a zip file, 1-1-1980.
-    private static final long ZIP_EPOCH = 315561600000L;
-    private final ZipOutputStream zip;
-    private final Path root;
-
-    private SymbolFileSrcJarBuildingVisitor(ZipOutputStream zip, Path root) {
-      this.zip = zip;
-      this.root = root;
+    public PrintStreamLogger(PrintStream stream) {
+      this.out = stream;
     }
 
     @Override
-    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-      if (file.getFileName().endsWith("R.java")) {
-        byte[] content = Files.readAllBytes(file);
-        ZipEntry entry = new ZipEntry(root.relativize(file).toString());
-
-        entry.setMethod(ZipEntry.STORED);
-        entry.setTime(ZIP_EPOCH);
-        entry.setSize(content.length);
-        CRC32 crc32 = new CRC32();
-        crc32.update(content);
-        entry.setCrc(crc32.getValue());
-        zip.putNextEntry(entry);
-        zip.write(content);
-        zip.closeEntry();
+    public void error(@Nullable Throwable t, @Nullable String msgFormat, Object... args) {
+      if (msgFormat != null) {
+        out.println(String.format("Error: " + msgFormat, args));
       }
-      return FileVisitResult.CONTINUE;
+      if (t != null) {
+        out.printf("Error: %s%n", t.getMessage());
+      }
     }
+
+    @Override
+    public void warning(@NonNull String msgFormat, Object... args) {
+      out.println(String.format("Warning: " + msgFormat, args));
+    }
+
+    @Override
+    public void info(@NonNull String msgFormat, Object... args) {
+      out.println(String.format("Info: " + msgFormat, args));
+    }
+
+    @Override
+    public void verbose(@NonNull String msgFormat, Object... args) {
+      out.println(String.format(msgFormat, args));
+    }
+  }
+
+  /** Shutdown AOSP utilized thread-pool. */
+  public void shutdown() {
+    FullyQualifiedName.logCacheUsage(logger);
+    // AOSP code never shuts down its singleton executor and leaves the process hanging.
+    ExecutorSingleton.getExecutor().shutdownNow();
+  }
+
+  @Nullable
+  private Path prepareOutputPath(@Nullable Path out) throws IOException {
+    if (out == null) {
+      return null;
+    }
+    return Files.createDirectories(out);
   }
 }

@@ -17,11 +17,10 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.hash.HashCode;
-import com.google.devtools.build.lib.actions.BaseSpawn;
+import com.google.devtools.build.lib.actions.Spawns;
 import com.google.devtools.build.lib.vfs.Path;
-
-import java.util.List;
-import java.util.Map;
+import com.google.devtools.build.lib.vfs.PathFragment;
+import java.util.SortedMap;
 
 /**
  * Data container that uniquely identifies a kind of worker process and is used as the key for the
@@ -30,46 +29,94 @@ import java.util.Map;
 final class WorkerKey {
   private final ImmutableList<String> args;
   private final ImmutableMap<String, String> env;
-  private final Path workDir;
+  private final Path execRoot;
   private final String mnemonic;
 
   /**
-   * This is used during validation whether a worker is still usable. It is not used to uniquely
-   * identify a kind of worker, thus it is not to be used by the .equals() / .hashCode() methods.
+   * These are used during validation whether a worker is still usable. They are not used to
+   * uniquely identify a kind of worker, thus it is not to be used by the .equals() / .hashCode()
+   * methods.
    */
-  private final HashCode workerFilesHash;
+  private final HashCode workerFilesCombinedHash;
+  private final SortedMap<PathFragment, HashCode> workerFilesWithHashes;
+  private final boolean mustBeSandboxed;
+  /** A WorkerProxy will be instantiated if true, instantiate a regular Worker if false. */
+  private final boolean proxied;
 
   WorkerKey(
-      List<String> args,
-      Map<String, String> env,
-      Path workDir,
+      ImmutableList<String> args,
+      ImmutableMap<String, String> env,
+      Path execRoot,
       String mnemonic,
-      HashCode workerFilesHash) {
-    this.args = ImmutableList.copyOf(Preconditions.checkNotNull(args));
-    this.env = ImmutableMap.copyOf(Preconditions.checkNotNull(env));
-    this.workDir = Preconditions.checkNotNull(workDir);
+      HashCode workerFilesCombinedHash,
+      SortedMap<PathFragment, HashCode> workerFilesWithHashes,
+      boolean mustBeSandboxed,
+      boolean proxied) {
+    /** Build options. */
+    this.args = Preconditions.checkNotNull(args);
+    /** Environment variables. */
+    this.env = Preconditions.checkNotNull(env);
+    /** Execution root of Bazel process. */
+    this.execRoot = Preconditions.checkNotNull(execRoot);
+    /** Mnemonic of the worker. */
     this.mnemonic = Preconditions.checkNotNull(mnemonic);
-    this.workerFilesHash = Preconditions.checkNotNull(workerFilesHash);
+    /** One combined hash code for all files. */
+    this.workerFilesCombinedHash = Preconditions.checkNotNull(workerFilesCombinedHash);
+    /** Worker files with the corresponding hash code. */
+    this.workerFilesWithHashes = Preconditions.checkNotNull(workerFilesWithHashes);
+    /** Set it to true if this job should be run in sandbox. */
+    this.mustBeSandboxed = mustBeSandboxed;
+    /** Set it to true if this job should be run with WorkerProxy. */
+    this.proxied = proxied;
   }
 
+  /** Getter function for variable args. */
   public ImmutableList<String> getArgs() {
     return args;
   }
 
+  /** Getter function for variable env. */
   public ImmutableMap<String, String> getEnv() {
     return env;
   }
 
-  public Path getWorkDir() {
-    return workDir;
+  /** Getter function for variable execRoot. */
+  public Path getExecRoot() {
+    return execRoot;
   }
 
+  /** Getter function for variable mnemonic. */
   public String getMnemonic() {
     return mnemonic;
   }
 
-  public HashCode getWorkerFilesHash() {
-    return workerFilesHash;
+  /** Getter function for variable workerFilesCombinedHash. */
+  public HashCode getWorkerFilesCombinedHash() {
+    return workerFilesCombinedHash;
+  }
+
+  /** Getter function for variable workerFilesWithHashes. */
+  public SortedMap<PathFragment, HashCode> getWorkerFilesWithHashes() {
+    return workerFilesWithHashes;
+  }
+
+  /** Getter function for variable mustBeSandboxed. */
+  public boolean mustBeSandboxed() {
+    return mustBeSandboxed;
+  }
+
+  /** Getter function for variable proxied. */
+  public boolean getProxied() {
+    return proxied;
+  }
+
+  /** Returns a user-friendly name for this worker type. */
+  public static String makeWorkerTypeName(boolean proxied) {
+    if (proxied) {
+      return "multiplex-worker";
+    } else {
+      return "worker";
+    }
   }
 
   @Override
@@ -89,7 +136,7 @@ final class WorkerKey {
     if (!env.equals(workerKey.env)) {
       return false;
     }
-    if (!workDir.equals(workerKey.workDir)) {
+    if (!execRoot.equals(workerKey.execRoot)) {
       return false;
     }
     return mnemonic.equals(workerKey.mnemonic);
@@ -100,13 +147,13 @@ final class WorkerKey {
   public int hashCode() {
     int result = args.hashCode();
     result = 31 * result + env.hashCode();
-    result = 31 * result + workDir.hashCode();
+    result = 31 * result + execRoot.hashCode();
     result = 31 * result + mnemonic.hashCode();
     return result;
   }
 
   @Override
   public String toString() {
-    return BaseSpawn.asShellCommand(args, workDir, env);
+    return Spawns.asShellCommand(args, execRoot, env, /* prettyPrintArgs= */ false);
   }
 }

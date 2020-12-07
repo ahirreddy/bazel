@@ -15,23 +15,20 @@ package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
-import static org.junit.Assert.assertEquals;
 
 import com.google.devtools.build.lib.skyframe.ActionExecutionInactivityWatchdog.InactivityMonitor;
 import com.google.devtools.build.lib.skyframe.ActionExecutionInactivityWatchdog.InactivityReporter;
-
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.ArrayList;
-import java.util.List;
 
 /** Tests for ActionExecutionInactivityWatchdog. */
 @RunWith(JUnit4.class)
 public class ActionExecutionInactivityWatchdogTest {
 
-  private void assertInactivityWatchdogReports(final boolean shouldReport) throws Exception {
+  private static void assertInactivityWatchdogReports(final boolean shouldReport) throws Exception {
     // The monitor implementation below is a state machine. This variable indicates which state
     // it is in.
     final int[] monitorState = new int[] {0};
@@ -52,7 +49,7 @@ public class ActionExecutionInactivityWatchdogTest {
     InactivityMonitor monitor =
         new InactivityMonitor() {
           @Override
-          public int waitForNextCompletion(int timeoutMilliseconds) throws InterruptedException {
+          public int waitForNextCompletion(int timeoutSeconds) throws InterruptedException {
             // Simulate the following sequence of events (see actionCompletions):
             // 1. return in 5s (within timeout), 1 action completed; caller will sleep
             // 2. return in 10s (after timeout), 0 action completed; caller will wait
@@ -144,7 +141,7 @@ public class ActionExecutionInactivityWatchdogTest {
       watchdog.stop();
     }
 
-    assertEquals(shouldReport, didReportInactivity[0]);
+    assertThat(didReportInactivity[0]).isEqualTo(shouldReport);
     assertThat(sleepsAndWaits)
         .containsExactly(
             "wait:5",

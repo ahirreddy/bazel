@@ -13,112 +13,84 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
+import static com.google.devtools.build.lib.rules.android.AndroidStarlarkData.fromNoneable;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.Root;
-import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.devtools.build.lib.packages.BuiltinProvider;
+import com.google.devtools.build.lib.packages.NativeInfo;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.OutputJar;
+import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidIdeInfoProviderApi;
+import com.google.devtools.build.lib.syntax.Dict;
+import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.syntax.Sequence;
 import java.util.Collection;
 import java.util.LinkedHashSet;
-import java.util.Objects;
+import java.util.Map;
 import java.util.Set;
-
 import javax.annotation.Nullable;
 
-/**
- * An Android target provider to provide Android-specific info to IDEs.
- */
+/** An Android target provider to provide Android-specific info to IDEs. */
 @Immutable
-public final class AndroidIdeInfoProvider implements TransitiveInfoProvider {
-  /** Represents a directory that contains sources, generated or otherwise, for an IDE.*/
-  @Immutable
-  public static class SourceDirectory {
-    final PathFragment relativePath;
-    final PathFragment rootPath;
-    final boolean isSource;
+public final class AndroidIdeInfoProvider extends NativeInfo
+    implements AndroidIdeInfoProviderApi<Artifact, OutputJar> {
 
-    public SourceDirectory(PathFragment rootPath, PathFragment relativePath, boolean isSource) {
-      this.rootPath = rootPath;
-      this.relativePath = relativePath;
-      this.isSource = isSource;
-    }
+  public static final Provider PROVIDER = new Provider();
 
-   /**
-    * The root relative path, {@link Artifact#getRootRelativePath()}.
-    */
-    public PathFragment getRelativePath() {
-      return relativePath;
-    }
-
-    /**
-     * The absolute path of the root that contains this directory, {@link Root#getPath()}.
-     */
-    public PathFragment getRootPath() {
-      return rootPath;
-    }
-
-    /** Indicates if the directory is in the gen files tree. */
-    public boolean isSource() {
-      return isSource;
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(relativePath, rootPath, isSource);
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (other instanceof SourceDirectory) {
-        SourceDirectory otherDir = (SourceDirectory) other;
-        return Objects.equals(rootPath, otherDir.rootPath)
-            && Objects.equals(relativePath, otherDir.relativePath)
-            && Objects.equals(isSource, otherDir.isSource);
-      }
-      return false;
-    }
-
-    @Override
-    public String toString() {
-      return "SourceDirectory [relativePath=" + relativePath + ", rootPath=" + rootPath
-          + ", isSource=" + isSource + "]";
-    }
-  }
-
-  /**
-   * Builder for {@link AndroidIdeInfoProvider}
-   */
+  /** Builder for {@link AndroidIdeInfoProvider} */
   public static class Builder {
     private Artifact manifest = null;
     private Artifact generatedManifest = null;
     private Artifact apk = null;
+    private Artifact resourceApk = null;
     private Artifact idlClassJar = null;
     private Artifact idlSourceJar = null;
-    private final Set<SourceDirectory> resourceDirs = new LinkedHashSet<>();
-    private final Set<SourceDirectory> assetDirs = new LinkedHashSet<>();
-    private final Set<SourceDirectory> idlDirs = new LinkedHashSet<>();
+    private OutputJar resourceJar = null;
+    private String javaPackage = null;
+    private String idlImportRoot = null;
     private final Set<Artifact> idlSrcs = new LinkedHashSet<>();
     private final Set<Artifact> idlGeneratedJavaFiles = new LinkedHashSet<>();
     private final Set<Artifact> apksUnderTest = new LinkedHashSet<>();
+    private boolean definesAndroidResources;
+    private Artifact aar = null;
+    private Map<String, NestedSet<Artifact>> nativeLibs = null;
 
     public AndroidIdeInfoProvider build() {
       return new AndroidIdeInfoProvider(
+          javaPackage,
+          idlImportRoot,
           manifest,
           generatedManifest,
           apk,
           idlClassJar,
           idlSourceJar,
-          ImmutableList.copyOf(assetDirs),
-          ImmutableList.copyOf(resourceDirs),
-          ImmutableList.copyOf(idlDirs),
+          resourceJar,
+          definesAndroidResources,
+          aar,
           ImmutableList.copyOf(idlSrcs),
           ImmutableList.copyOf(idlGeneratedJavaFiles),
-          ImmutableList.copyOf(apksUnderTest));
+          ImmutableList.copyOf(apksUnderTest),
+          nativeLibs != null
+              ? ImmutableMap.copyOf(nativeLibs)
+              : ImmutableMap.<String, NestedSet<Artifact>>of(),
+          resourceApk);
+    }
+
+    public Builder setJavaPackage(String javaPackage) {
+      this.javaPackage = javaPackage;
+      return this;
+    }
+
+    public Builder setDefinesAndroidResources(boolean definesAndroidResources) {
+      this.definesAndroidResources = definesAndroidResources;
+      return this;
     }
 
     public Builder setApk(Artifact apk) {
@@ -151,82 +123,40 @@ public final class AndroidIdeInfoProvider implements TransitiveInfoProvider {
       return this;
     }
 
-    /**
-     * Add "idl_srcs" contents.
-     */
+    public Builder setResourceJar(OutputJar resourceJar) {
+      this.resourceJar = resourceJar;
+      return this;
+    }
+
+    public Builder setResourceApk(Artifact resourceApk) {
+      this.resourceApk = resourceApk;
+      return this;
+    }
+
+    public Builder setAar(Artifact aar) {
+      this.aar = aar;
+      return this;
+    }
+
+    public Builder setNativeLibs(Map<String, NestedSet<Artifact>> nativeLibs) {
+      this.nativeLibs = nativeLibs;
+      return this;
+    }
+
+    public Builder addIdlImportRoot(String idlImportRoot) {
+      this.idlImportRoot = idlImportRoot;
+      return this;
+    }
+
+    /** Add "idl_srcs" contents. */
     public Builder addIdlSrcs(Collection<Artifact> idlSrcs) {
       this.idlSrcs.addAll(idlSrcs);
-      addIdlDirs(idlSrcs);
       return this;
     }
 
-    /**
-     * Add the java files generated from "idl_srcs".
-     */
+    /** Add the java files generated from "idl_srcs". */
     public Builder addIdlGeneratedJavaFiles(Collection<Artifact> idlGeneratedJavaFiles) {
       this.idlGeneratedJavaFiles.addAll(idlGeneratedJavaFiles);
-      return this;
-    }
-
-    /**
-     * Add "idl_parcelables" contents.
-     */
-    public Builder addIdlParcelables(Collection<Artifact> idlParcelables) {
-      addIdlDirs(idlParcelables);
-      return this;
-    }
-
-    private void addIdlDirs(Collection<Artifact> idlArtifacts) {
-      for (Artifact idl : idlArtifacts) {
-        this.idlDirs.add(
-            new SourceDirectory(
-                idl.getRoot().getPath().asFragment(),
-                idl.getRootRelativePath().getParentDirectory(),
-                idl.isSourceArtifact()));
-      }
-    }
-
-    public Builder addAllResources(Collection<SourceDirectory> resources) {
-      resourceDirs.addAll(resources);
-      return this;
-    }
-
-    public Builder addAllAssets(Collection<SourceDirectory> assets) {
-      assetDirs.addAll(assets);
-      return this;
-    }
-
-    public Builder addResourceSource(Artifact resource) {
-      resourceDirs.add(
-          new SourceDirectory(
-              resource.getRoot().getPath().asFragment(),
-              trimTo(
-                  resource.getRootRelativePath(),
-                  LocalResourceContainer.Builder.findResourceDir(resource)),
-              resource.isSourceArtifact()));
-      return this;
-    }
-
-    public Builder addResourceSources(Collection<Artifact> resources) {
-      for (Artifact resource : resources) {
-        addResourceSource(resource);
-      }
-      return this;
-    }
-
-    public Builder addAssetSources(Collection<Artifact> assets, PathFragment assetDir) {
-      for (Artifact asset : assets) {
-        addAssetSource(asset, assetDir);
-      }
-      return this;
-    }
-
-    public Builder addAssetSource(Artifact asset, PathFragment assetDir) {
-      assetDirs.add(
-          new SourceDirectory(
-              asset.getRoot().getPath().asFragment(),
-              trimTo(asset.getRootRelativePath(), assetDir),
-              asset.isSourceArtifact()));
       return this;
     }
 
@@ -234,155 +164,200 @@ public final class AndroidIdeInfoProvider implements TransitiveInfoProvider {
       Iterables.addAll(apksUnderTest, apks);
       return this;
     }
-
-    /**
-     * Finds the rightmost occurrence of the needle and returns subfragment of the haystack from
-     * left to the end of the occurrence inclusive of the needle.
-     *
-     * <pre>
-     * `Example:
-     *   Given the haystack:
-     *     res/research/handwriting/res/values/strings.xml
-     *   And the needle:
-     *     res
-     *   Returns:
-     *     res/research/handwriting/res
-     * </pre>
-     */
-    private static PathFragment trimTo(PathFragment haystack, PathFragment needle) {
-      if (needle.equals(PathFragment.EMPTY_FRAGMENT)) {
-        return haystack;
-      }
-      // Compute the overlap offset for duplicated parts of the needle.
-      int[] overlap = new int[needle.segmentCount() + 1];
-      // Start overlap at -1, as it will cancel out the increment in the search.
-      // See http://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm for the
-      // details.
-      overlap[0] = -1;
-      for (int i = 0, j = -1; i < needle.segmentCount(); j++, i++, overlap[i] = j) {
-        while (j >= 0 && !needle.getSegment(i).equals(needle.getSegment(j))) {
-          // Walk the overlap until the bound is found.
-          j = overlap[j];
-        }
-      }
-      // TODO(corysmith): reverse the search algorithm.
-      // Keep the index of the found so that the rightmost index is taken.
-      int found = -1;
-      for (int i = 0, j = 0; i < haystack.segmentCount(); i++) {
-
-        while (j >= 0 && !haystack.getSegment(i).equals(needle.getSegment(j))) {
-          // Not matching, walk the needle index to attempt another match.
-          j = overlap[j];
-        }
-        j++;
-        // Needle index is exhausted, so the needle must match.
-        if (j == needle.segmentCount()) {
-          // Record the found index + 1 to be inclusive of the end index.
-          found = i + 1;
-          // Subtract one from the needle index to restart the search process
-          j = j - 1;
-        }
-      }
-      if (found != -1) {
-        // Return the subsection of the haystack.
-        return haystack.subFragment(0, found);
-      }
-      throw new IllegalArgumentException(String.format("%s was not found in %s", needle, haystack));
-    }
   }
 
-  private final Artifact manifest;
-  private final Artifact generatedManifest;
-  private final Artifact signedApk;
+  @Nullable private final String javaPackage;
+  @Nullable private final String idlImportRoot;
+  @Nullable private final Artifact manifest;
+  @Nullable private final Artifact generatedManifest;
+  @Nullable private final Artifact signedApk;
   @Nullable private final Artifact idlClassJar;
   @Nullable private final Artifact idlSourceJar;
-  private final ImmutableCollection<SourceDirectory> resourceDirs;
-  private final ImmutableCollection<SourceDirectory> assetDirs;
-  private final ImmutableCollection<SourceDirectory> idlImports;
+  @Nullable private final OutputJar resourceJar;
+  @Nullable private final Artifact resourceApk;
+  private final boolean definesAndroidResources;
+  @Nullable private final Artifact aar;
   private final ImmutableCollection<Artifact> idlSrcs;
   private final ImmutableCollection<Artifact> idlGeneratedJavaFiles;
   private final ImmutableCollection<Artifact> apksUnderTest;
+  private final ImmutableMap<String, NestedSet<Artifact>> nativeLibs;
 
-  AndroidIdeInfoProvider(@Nullable Artifact manifest,
+  public AndroidIdeInfoProvider(
+      @Nullable String javaPackage,
+      @Nullable String idlImportRoot,
+      @Nullable Artifact manifest,
       @Nullable Artifact generatedManifest,
       @Nullable Artifact signedApk,
       @Nullable Artifact idlClassJar,
       @Nullable Artifact idlSourceJar,
-      ImmutableCollection<SourceDirectory> assetDirs,
-      ImmutableCollection<SourceDirectory> resourceDirs,
-      ImmutableCollection<SourceDirectory> idlImports,
+      @Nullable OutputJar resourceJar,
+      boolean definesAndroidResources,
+      @Nullable Artifact aar,
       ImmutableCollection<Artifact> idlSrcs,
       ImmutableCollection<Artifact> idlGeneratedJavaFiles,
-      ImmutableCollection<Artifact> apksUnderTest) {
+      ImmutableCollection<Artifact> apksUnderTest,
+      ImmutableMap<String, NestedSet<Artifact>> nativeLibs,
+      @Nullable Artifact resourceApk) {
+    super(PROVIDER);
+    this.javaPackage = javaPackage;
+    this.idlImportRoot = idlImportRoot;
     this.manifest = manifest;
     this.generatedManifest = generatedManifest;
     this.signedApk = signedApk;
     this.idlClassJar = idlClassJar;
     this.idlSourceJar = idlSourceJar;
-    this.assetDirs = assetDirs;
-    this.resourceDirs = resourceDirs;
-    this.idlImports = idlImports;
+    this.resourceJar = resourceJar;
+    this.definesAndroidResources = definesAndroidResources;
+    this.aar = aar;
     this.idlSrcs = idlSrcs;
     this.idlGeneratedJavaFiles = idlGeneratedJavaFiles;
     this.apksUnderTest = apksUnderTest;
+    this.nativeLibs = nativeLibs;
+    this.resourceApk = resourceApk;
   }
 
-  /** Returns the direct AndroidManifest. */
+  @Override
+  @Nullable
+  public String getJavaPackage() {
+    return javaPackage;
+  }
+
+  @Override
   @Nullable
   public Artifact getManifest() {
     return manifest;
   }
 
-  /** Returns the direct generated AndroidManifest. */
+  @Override
   @Nullable
   public Artifact getGeneratedManifest() {
     return generatedManifest;
   }
 
+  @Override
+  public boolean definesAndroidResources() {
+    return this.definesAndroidResources;
+  }
 
-  /** Returns the direct debug key signed apk, if there is one. */
+  @Override
+  @Nullable
+  public String getIdlImportRoot() {
+    return idlImportRoot;
+  }
+
+  @Override
   @Nullable
   public Artifact getSignedApk() {
     return signedApk;
   }
 
+  @Override
   @Nullable
   public Artifact getIdlClassJar() {
     return idlClassJar;
   }
 
+  @Override
   @Nullable
   public Artifact getIdlSourceJar() {
     return idlSourceJar;
   }
 
-  /** A list of the direct Resource directories. */
-  public ImmutableCollection<SourceDirectory> getResourceDirs() {
-    return resourceDirs;
+  @Override
+  @Nullable
+  public OutputJar getResourceJar() {
+    return resourceJar;
   }
 
-  /** A list of the direct Asset directories. */
-  public ImmutableCollection<SourceDirectory> getAssetDirs() {
-    return assetDirs;
+  @Override
+  @Nullable
+  public Artifact getAar() {
+    return aar;
   }
 
-  /** A list of direct idl directories. */
-  public ImmutableCollection<SourceDirectory> getIdlImports() {
-    return idlImports;
+  @Override
+  @Nullable
+  public Artifact getResourceApk() {
+    return resourceApk;
   }
 
-  /** A list of sources from the "idl_srcs" attribute. */
+  @Override
   public ImmutableCollection<Artifact> getIdlSrcs() {
     return idlSrcs;
   }
 
-  /** A list of java files generated from the "idl_srcs" attribute. */
+  @Override
   public ImmutableCollection<Artifact> getIdlGeneratedJavaFiles() {
     return idlGeneratedJavaFiles;
   }
 
-  /** A list of the APKs related to the app under test, if any. */
+  @Override
   public ImmutableCollection<Artifact> getApksUnderTest() {
     return apksUnderTest;
+  }
+
+  public ImmutableMap<String, NestedSet<Artifact>> getNativeLibs() {
+    return nativeLibs;
+  }
+
+  @Override
+  public ImmutableMap<String, Depset> getNativeLibsSkylark() {
+    ImmutableMap.Builder<String, Depset> builder = ImmutableMap.builder();
+    for (Map.Entry<String, NestedSet<Artifact>> entry : getNativeLibs().entrySet()) {
+      builder.put(entry.getKey(), Depset.of(Artifact.TYPE, entry.getValue()));
+    }
+    return builder.build();
+  }
+
+  /** Provider class for {@link AndroidIdeInfoProvider} objects. */
+  public static class Provider extends BuiltinProvider<AndroidIdeInfoProvider>
+      implements AndroidIdeInfoProviderApi.Provider<Artifact, OutputJar> {
+    private Provider() {
+      super(NAME, AndroidIdeInfoProvider.class);
+    }
+
+    @Override
+    public AndroidIdeInfoProvider createInfo(
+        Object javaPackage,
+        Object manifest,
+        Object generatedManifest,
+        Object idlImportRoot,
+        Sequence<?> idlSrcs, // <Artifact>
+        Sequence<?> idlGeneratedJavaFiles, // <Artifact>
+        Object idlSourceJar,
+        Object idlClassJar,
+        boolean definesAndroidResources,
+        Object resourceJar,
+        Object resourceApk,
+        Object signedApk,
+        Object aar,
+        Sequence<?> apksUnderTest, // <Artifact>
+        Dict<?, ?> nativeLibs) // <String, Depset>
+        throws EvalException {
+      Map<String, Depset> nativeLibsMap =
+          Dict.cast(nativeLibs, String.class, Depset.class, "native_libs");
+
+      ImmutableMap.Builder<String, NestedSet<Artifact>> builder = ImmutableMap.builder();
+      for (Map.Entry<String, Depset> entry : nativeLibsMap.entrySet()) {
+        builder.put(entry.getKey(), Depset.cast(entry.getValue(), Artifact.class, "native_libs"));
+      }
+      return new AndroidIdeInfoProvider(
+          fromNoneable(javaPackage, String.class),
+          fromNoneable(idlImportRoot, String.class),
+          fromNoneable(manifest, Artifact.class),
+          fromNoneable(generatedManifest, Artifact.class),
+          fromNoneable(signedApk, Artifact.class),
+          fromNoneable(idlClassJar, Artifact.class),
+          fromNoneable(idlSourceJar, Artifact.class),
+          fromNoneable(resourceJar, OutputJar.class),
+          definesAndroidResources,
+          fromNoneable(aar, Artifact.class),
+          ImmutableList.copyOf(Sequence.cast(idlSrcs, Artifact.class, "idl_srcs")),
+          ImmutableList.copyOf(
+              Sequence.cast(idlGeneratedJavaFiles, Artifact.class, "idl_generated_java_files")),
+          ImmutableList.copyOf(Sequence.cast(apksUnderTest, Artifact.class, "apks_under_test")),
+          builder.build(),
+          fromNoneable(resourceApk, Artifact.class));
+    }
   }
 }

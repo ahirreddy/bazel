@@ -14,31 +14,30 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static com.google.devtools.build.skyframe.EvaluationResultSubjectFactory.assertThatEvaluationResult;
+import static com.google.devtools.build.skyframe.WalkableGraphUtils.exists;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.common.eventbus.EventBus;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.WalkableGraph;
-
+import java.io.IOException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.IOException;
-
 /** Tests for {@link com.google.devtools.build.lib.skyframe.PrepareDepsOfPatternsFunction}. */
 @RunWith(JUnit4.class)
-public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit4 {
+public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCase {
 
   private static SkyKey getKeyForLabel(Label label) {
     // Note that these tests used to look for TargetMarker SkyKeys before TargetMarker was
@@ -56,14 +55,13 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     ImmutableList<String> patternSequence = ImmutableList.of("//foo");
 
     // When PrepareDepsOfPatternsFunction successfully completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ true);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
-    // Then the graph contains a value for the target "//foo:foo",
-    assertValidValue(walkableGraph, getKeyForLabel(Label.create("foo", "foo")));
+    // Then the graph contains a value for the target "@//foo:foo",
+    assertValidValue(walkableGraph, getKeyForLabel(Label.create("@//foo", "foo")));
 
-    // And the graph does not contain a value for the target "//foo:foo2".
-    assertFalse(walkableGraph.exists(getKeyForLabel(Label.create("foo", "foo2"))));
+    // And the graph does not contain a value for the target "@//foo:foo2".
+    assertThat(exists(getKeyForLabel(Label.create("@//foo", "foo2")), walkableGraph)).isFalse();
   }
 
   @Test
@@ -76,28 +74,26 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     ImmutableList<String> patternSequence = ImmutableList.of("//foo");
 
     // When PrepareDepsOfPatternsFunction successfully completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ true);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
     // Then the graph contains an entry for ":foo"'s dependency, ":foo2".
-    assertValidValue(walkableGraph, getKeyForLabel(Label.create("foo", "foo2")));
+    assertValidValue(walkableGraph, getKeyForLabel(Label.create("@//foo", "foo2")));
   }
 
   @Test
   public void testFunctionExpandsTargetPatterns() throws Exception {
-    // Given a package "//foo" with independent target rules ":foo" and ":foo2",
+    // Given a package "@//foo" with independent target rules ":foo" and ":foo2",
     createFooAndFoo2(/*dependent=*/ false);
 
     // Given a target pattern sequence consisting of a pattern for "//foo:*",
     ImmutableList<String> patternSequence = ImmutableList.of("//foo:*");
 
     // When PrepareDepsOfPatternsFunction successfully completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ true);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
     // Then the graph contains an entry for ":foo" and ":foo2".
-    assertValidValue(walkableGraph, getKeyForLabel(Label.create("foo", "foo")));
-    assertValidValue(walkableGraph, getKeyForLabel(Label.create("foo", "foo2")));
+    assertValidValue(walkableGraph, getKeyForLabel(Label.create("@//foo", "foo")));
+    assertValidValue(walkableGraph, getKeyForLabel(Label.create("@//foo", "foo2")));
   }
 
   @Test
@@ -107,11 +103,10 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     ImmutableList<String> patternSequence = ImmutableList.of(nonexistentTarget);
 
     // When PrepareDepsOfPatternsFunction completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ false);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
     // Then the graph does not contain an entry for ":foo",
-    assertFalse(walkableGraph.exists(getKeyForLabel(Label.create("foo", "foo"))));
+    assertThat(exists(getKeyForLabel(Label.create("@//foo", "foo")), walkableGraph)).isFalse();
   }
 
   @Test
@@ -124,17 +119,16 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     ImmutableList<String> patternSequence = ImmutableList.of("//foo");
 
     // When PrepareDepsOfPatternsFunction completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ false);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
     // Then the graph contains an entry for ":foo",
     assertValidValue(
         walkableGraph,
-        getKeyForLabel(Label.create("foo", "foo")),
+        getKeyForLabel(Label.create("@//foo", "foo")),
         /*expectTransitiveException=*/ true);
 
     // And an entry with a NoSuchPackageException for "//bar:bar",
-    Exception e = assertException(walkableGraph, getKeyForLabel(Label.create("bar", "bar")));
+    Exception e = assertException(walkableGraph, getKeyForLabel(Label.create("@//bar", "bar")));
     assertThat(e).isInstanceOf(NoSuchPackageException.class);
   }
 
@@ -148,17 +142,16 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     ImmutableList<String> patternSequence = ImmutableList.of("//foo");
 
     // When PrepareDepsOfPatternsFunction completes evaluation,
-    WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(patternSequence, /*successExpected=*/ false);
+    WalkableGraph walkableGraph = getGraphFromPatternsEvaluation(patternSequence);
 
     // Then the graph contains an entry for ":foo" which has both a value and an exception,
     assertValidValue(
         walkableGraph,
-        getKeyForLabel(Label.create("foo", "foo")),
+        getKeyForLabel(Label.create("@//foo", "foo")),
         /*expectTransitiveException=*/ true);
 
     // And an entry with a NoSuchTargetException for "//bar:bar",
-    Exception e = assertException(walkableGraph, getKeyForLabel(Label.create("bar", "bar")));
+    Exception e = assertException(walkableGraph, getKeyForLabel(Label.create("@//bar", "bar")));
     assertThat(e).isInstanceOf(NoSuchTargetException.class);
   }
 
@@ -168,10 +161,10 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
   }
 
   /**
-   * PrepareDepsOfPatternsFunction always keeps going despite any target pattern parsing errors,
-   * in keeping with the original behavior of {@link SkyframeExecutor#prepareAndGet}, which
-   * always used {@code keepGoing=true} during target pattern parsing because it was responsible
-   * for ensuring that queries had a complete graph to work on.
+   * PrepareDepsOfPatternsFunction always keeps going despite any target pattern parsing errors, in
+   * keeping with the original behavior of {@link WalkableGraph.WalkableGraphFactory#prepareAndGet},
+   * which always used {@code keepGoing=true} during target pattern parsing because it was
+   * responsible for ensuring that queries had a complete graph to work on.
    */
   @Test
   public void testParsingProblemsNoKeepGoing() throws Exception {
@@ -189,42 +182,40 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
 
     // When PrepareDepsOfPatternsFunction runs in the selected keep-going mode,
     WalkableGraph walkableGraph =
-        getGraphFromPatternsEvaluation(
-            patternSequence, /*successExpected=*/ true, /*keepGoing=*/ keepGoing);
+        getGraphFromPatternsEvaluation(patternSequence, /*keepGoing=*/ keepGoing);
 
     // Then it skips evaluation of the malformed target pattern, but logs about it,
     assertContainsEvent("Skipping '" + bogusPattern + "': ");
 
-    // And then the graph contains a value for the legit target pattern's target "//foo:foo".
-    assertTrue(walkableGraph.exists(getKeyForLabel(Label.create("foo", "foo"))));
+    // And then the graph contains a value for the legit target pattern's target "@//foo:foo".
+    assertThat(exists(getKeyForLabel(Label.create("@//foo", "foo")), walkableGraph)).isTrue();
   }
 
   // Helpers:
 
-  private WalkableGraph getGraphFromPatternsEvaluation(
-      ImmutableList<String> patternSequence, boolean successExpected) throws InterruptedException {
-    return getGraphFromPatternsEvaluation(patternSequence, successExpected, /*keepGoing=*/ true);
+  private WalkableGraph getGraphFromPatternsEvaluation(ImmutableList<String> patternSequence)
+      throws InterruptedException {
+    return getGraphFromPatternsEvaluation(patternSequence, /*keepGoing=*/ true);
   }
 
   private WalkableGraph getGraphFromPatternsEvaluation(
-      ImmutableList<String> patternSequence, boolean successExpected, boolean keepGoing)
-      throws InterruptedException {
+      ImmutableList<String> patternSequence, boolean keepGoing) throws InterruptedException {
     SkyKey independentTarget = PrepareDepsOfPatternsValue.key(patternSequence, "");
     ImmutableList<SkyKey> singletonTargetPattern = ImmutableList.of(independentTarget);
 
     // When PrepareDepsOfPatternsFunction completes evaluation,
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(keepGoing)
+            .setNumThreads(LOADING_PHASE_THREADS)
+            .setEventHander(new Reporter(new EventBus(), eventCollector))
+            .build();
     EvaluationResult<SkyValue> evaluationResult =
-        getSkyframeExecutor()
-            .getDriverForTesting()
-            .evaluate(singletonTargetPattern, keepGoing, LOADING_PHASE_THREADS, eventCollector);
-
-    if (successExpected) {
-      // Then the evaluation completed successfully.
-      assertFalse(evaluationResult.hasError());
-    } else {
-      // Then the evaluation resulted in some errors.
-      assertTrue(evaluationResult.hasError());
-    }
+        getSkyframeExecutor().getDriver().evaluate(singletonTargetPattern, evaluationContext);
+    // Currently all callers either expect success or pass keepGoing=true, which implies success,
+    // since PrepareDepsOfPatternsFunction swallows all errors. Will need to be changed if a test
+    // that evaluates with keepGoing=false and expects errors is added.
+    assertThatEvaluationResult(evaluationResult).hasNoError();
 
     return Preconditions.checkNotNull(evaluationResult.getWalkableGraph());
   }
@@ -261,30 +252,31 @@ public class PrepareDepsOfPatternsFunctionTest extends BuildViewTestCaseForJunit
     scratch.file("bar/BUILD");
   }
 
-  private void assertValidValue(WalkableGraph graph, SkyKey key) {
+  private static void assertValidValue(WalkableGraph graph, SkyKey key)
+      throws InterruptedException {
     assertValidValue(graph, key, /*expectTransitiveException=*/ false);
   }
 
   /**
-   * A node in the walkable graph may have both a value and an exception. This happens when one
-   * of a node's transitive dependencies throws an exception, but its parent recovers from it.
+   * A node in the walkable graph may have both a value and an exception. This happens when one of a
+   * node's transitive dependencies throws an exception, but its parent recovers from it.
    */
-  private void assertValidValue(
-      WalkableGraph graph, SkyKey key, boolean expectTransitiveException) {
-    assertTrue(graph.exists(key));
-    assertNotNull(graph.getValue(key));
+  private static void assertValidValue(
+      WalkableGraph graph, SkyKey key, boolean expectTransitiveException)
+      throws InterruptedException {
+    assertThat(graph.getValue(key)).isNotNull();
     if (expectTransitiveException) {
-      assertNotNull(graph.getException(key));
+      assertThat(graph.getException(key)).isNotNull();
     } else {
-      assertNull(graph.getException(key));
+      assertThat(graph.getException(key)).isNull();
     }
   }
 
-  private Exception assertException(WalkableGraph graph, SkyKey key) {
-    assertTrue(graph.exists(key));
-    assertNull(graph.getValue(key));
+  private static Exception assertException(WalkableGraph graph, SkyKey key)
+      throws InterruptedException {
+    assertThat(graph.getValue(key)).isNull();
     Exception exception = graph.getException(key);
-    assertNotNull(exception);
+    assertThat(exception).isNotNull();
     return exception;
   }
 }

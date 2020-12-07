@@ -16,30 +16,44 @@ package com.google.devtools.build.lib.packages;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.BiMap;
+import com.google.common.collect.HashBiMap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
+import com.google.common.collect.Interner;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.CollectionUtils;
 import com.google.devtools.build.lib.collect.ImmutableSortedKeyMap;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.AttributeMap.AcceptsLabelAttribute;
+import com.google.devtools.build.lib.events.ExtendedEventHandler.Postable;
 import com.google.devtools.build.lib.packages.License.DistributionType;
-import com.google.devtools.build.lib.packages.PackageFactory.Globber;
-import com.google.devtools.build.lib.util.Pair;
-import com.google.devtools.build.lib.vfs.Canonicalizer;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
+import com.google.devtools.build.lib.skyframe.serialization.DeserializationContext;
+import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
+import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
+import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkThread;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.RootedPath;
+import com.google.devtools.starlark.spelling.SpellChecker;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -47,35 +61,30 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import javax.annotation.Nullable;
 
 /**
- * A package, which is a container of {@link Rule}s, each of
- * which contains a dictionary of named attributes.
+ * A package, which is a container of {@link Rule}s, each of which contains a dictionary of named
+ * attributes.
  *
- * <p>Package instances are intended to be immutable and for all practical
- * purposes can be treated as such. Note, however, that some member variables
- * exposed via the public interface are not strictly immutable, so until their
- * types are guaranteed immutable we're not applying the {@code @Immutable}
- * annotation here.
+ * <p>Package instances are intended to be immutable and for all practical purposes can be treated
+ * as such. Note, however, that some member variables exposed via the public interface are not
+ * strictly immutable, so until their types are guaranteed immutable we're not applying the
+ * {@code @Immutable} annotation here.
+ *
+ * <p>When changing this class, make sure to make corresponding changes to serialization!
  */
+@SuppressWarnings("JavaLangClash")
 public class Package {
-
-  public static PackageIdentifier EXTERNAL_PACKAGE_IDENTIFIER;
-
-  static {
-    try {
-      Package.EXTERNAL_PACKAGE_IDENTIFIER = PackageIdentifier.parse("//external");
-    } catch (LabelSyntaxException e) {
-      throw new IllegalStateException();
-    }
-  }
-
   /**
    * Common superclass for all name-conflict exceptions.
    */
   public static class NameConflictException extends Exception {
-    protected NameConflictException(String message) {
+    private NameConflictException(String message) {
       super(message);
     }
   }
@@ -85,20 +94,8 @@ public class Package {
    */
   private final PackageIdentifier packageIdentifier;
 
-  /**
-   * The name of the package, e.g. "foo/bar".
-   */
-  protected final String name;
-
-  /**
-   * Like name, but in the form of a PathFragment.
-   */
-  private final PathFragment nameFragment;
-
-  /**
-   * The filename of this package's BUILD file.
-   */
-  protected Path filename;
+  /** The filename of this package's BUILD file. */
+  private RootedPath filename;
 
   /**
    * The directory in which this package's BUILD file resides.  All InputFile
@@ -110,24 +107,23 @@ public class Package {
    * The name of the workspace this package is in. Used as a prefix for the runfiles directory.
    * This can be set in the WORKSPACE file. This must be a valid target name.
    */
-  protected String workspaceName;
+  private String workspaceName;
 
   /**
-   * The root of the source tree in which this package was found. It is an invariant that
-   * {@code sourceRoot.getRelative(packageId.getPathFragment()).equals(packageDirectory)}.
+   * The root of the source tree in which this package was found. It is an invariant that {@code
+   * sourceRoot.getRelative(packageId.getSourceRoot()).equals(packageDirectory)}. Returns {@link
+   * Optional#empty} if this {@link Package} is derived from a WORKSPACE file.
    */
-  private Path sourceRoot;
+  private Optional<Root> sourceRoot;
 
   /**
    * The "Make" environment of this package, containing package-local
    * definitions of "Make" variables.
    */
-  private MakeEnvironment makeEnv;
+  private ImmutableMap<String, String> makeEnv;
 
-  /**
-   * The collection of all targets defined in this package, indexed by name.
-   */
-  protected Map<String, Target> targets;
+  /** The collection of all targets defined in this package, indexed by name. */
+  private ImmutableSortedKeyMap<String, Target> targets;
 
   /**
    * Default visibility for rules that do not specify it.
@@ -150,10 +146,7 @@ public class Package {
    */
   private String defaultHdrsCheck;
 
-  /**
-   * Default copts for cc_* rules.  The rules' individual copts will append to
-   * this value.
-   */
+  /** Default copts for cc_* rules. The rules' individual copts will append to this value. */
   private ImmutableList<String> defaultCopts;
 
   /**
@@ -172,15 +165,11 @@ public class Package {
    */
   private boolean containsErrors;
 
-  /**
-   * The set of labels subincluded by this package.
-   */
-  private Set<Label> subincludes;
+  /** The list of transitive closure of the Starlark file dependencies. */
+  private ImmutableList<Label> starlarkFileDependencies;
 
-  /**
-   * The list of transitive closure of the Skylark file dependencies.
-   */
-  private ImmutableList<Label> skylarkFileDependencies;
+  /** The package's default "applicable_licenses" attribute. */
+  private Set<Label> defaultApplicableLicenses = ImmutableSet.of();
 
   /**
    * The package's default "licenses" and "distribs" attributes, as specified
@@ -191,14 +180,20 @@ public class Package {
   private License defaultLicense;
   private Set<License.DistributionType> defaultDistributionSet;
 
+  /**
+   * The map from each repository to that repository's remappings map.
+   * This is only used in the //external package, it is an empty map for all other packages.
+   * For example, an entry of {"@foo" : {"@x", "@y"}} indicates that, within repository foo,
+   * "@x" should be remapped to "@y".
+   */
+  private ImmutableMap<RepositoryName, ImmutableMap<RepositoryName, RepositoryName>>
+      externalPackageRepositoryMappings;
 
   /**
-   * The names of the package() attributes that declare default values for rule
-   * {@link RuleClass#COMPATIBLE_ENVIRONMENT_ATTR} and {@link RuleClass#RESTRICTED_ENVIRONMENT_ATTR}
-   * values when not explicitly specified.
+   * The map of repository reassignments for BUILD packages. This will be empty for packages
+   * within the main workspace.
    */
-  public static final String DEFAULT_COMPATIBLE_WITH_ATTRIBUTE = "default_compatible_with";
-  public static final String DEFAULT_RESTRICTED_TO_ATTRIBUTE = "default_restricted_to";
+  private ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
 
   private Set<Label> defaultCompatibleWith = ImmutableSet.of();
   private Set<Label> defaultRestrictedTo = ImmutableSet.of();
@@ -206,6 +201,17 @@ public class Package {
   private ImmutableSet<String> features;
 
   private ImmutableList<Event> events;
+  private ImmutableList<Postable> posts;
+
+  private ImmutableList<String> registeredExecutionPlatforms;
+  private ImmutableList<String> registeredToolchains;
+
+  private long computationSteps;
+
+  /** Returns the number of Starlark computation steps executed by this BUILD file. */
+  public long getComputationSteps() {
+    return computationSteps;
+  }
 
   /**
    * Package initialization, part 1 of 3: instantiates a new package with the
@@ -219,16 +225,59 @@ public class Package {
    * @precondition {@code name} must be a suffix of
    * {@code filename.getParentDirectory())}.
    */
-  private Package(PackageIdentifier packageId, String runfilesPrefix) {
+  protected Package(PackageIdentifier packageId, String runfilesPrefix) {
     this.packageIdentifier = packageId;
     this.workspaceName = runfilesPrefix;
-    this.nameFragment = Canonicalizer.fragments().intern(packageId.getPackageFragment());
-    this.name = nameFragment.getPathString();
   }
 
   /** Returns this packages' identifier. */
   public PackageIdentifier getPackageIdentifier() {
     return packageIdentifier;
+  }
+
+  /**
+   * Returns the repository mapping for the requested external repository.
+   *
+   * @throws UnsupportedOperationException if called from a package other than
+   *     the //external package
+   */
+  public ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping(
+      RepositoryName repository) {
+    if (!packageIdentifier.equals(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER)) {
+      throw new UnsupportedOperationException("Can only access the external package repository"
+          + "mappings from the //external package");
+    }
+
+    // We are passed a repository name as seen from the main repository, not necessarily
+    // a canonical repository name. So, we first have to find the canonical name for the
+    // repository in question before we can look up the mapping for it.
+    RepositoryName actualRepositoryName =
+        externalPackageRepositoryMappings
+            .getOrDefault(RepositoryName.MAIN, ImmutableMap.of())
+            .getOrDefault(repository, repository);
+
+    return externalPackageRepositoryMappings.getOrDefault(actualRepositoryName, ImmutableMap.of());
+  }
+
+  /** Get the repository mapping for this package. */
+  public ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping() {
+    return repositoryMapping;
+  }
+
+  /**
+   * Returns the full map of repository mappings collected so far.
+   *
+   * @throws UnsupportedOperationException if called from a package other than the //external
+   *     package
+   */
+  public ImmutableMap<RepositoryName, ImmutableMap<RepositoryName, RepositoryName>>
+      getExternalPackageRepositoryMappings() {
+    if (!packageIdentifier.equals(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER)) {
+      throw new UnsupportedOperationException(
+          "Can only access the external package repository"
+              + "mappings from the //external package");
+    }
+    return this.externalPackageRepositoryMappings;
   }
 
   /**
@@ -239,29 +288,37 @@ public class Package {
    * which accesses {@link #getDefaultHdrsCheck} from the still-under-construction
    * package.
    */
-  protected void setDefaultHdrsCheck(String defaultHdrsCheck) {
+  private void setDefaultHdrsCheck(String defaultHdrsCheck) {
     this.defaultHdrsCheck = defaultHdrsCheck;
   }
 
   /**
    * Set the default 'testonly' value for this package.
    */
-  protected void setDefaultTestOnly(boolean testOnly) {
+  private void setDefaultTestOnly(boolean testOnly) {
     defaultTestOnly = testOnly;
   }
 
   /**
    * Set the default 'deprecation' value for this package.
    */
-  protected void setDefaultDeprecation(String deprecation) {
+  private void setDefaultDeprecation(String deprecation) {
     defaultDeprecation = deprecation;
+  }
+
+  /**
+   * Sets the default 'applicable_licenses" value for this package attribute when not explicitly
+   * specified by the rule.
+   */
+  private void setDefaultApplicableLicenses(Set<Label> licenses) {
+    defaultApplicableLicenses = licenses;
   }
 
   /**
    * Sets the default value to use for a rule's {@link RuleClass#COMPATIBLE_ENVIRONMENT_ATTR}
    * attribute when not explicitly specified by the rule.
    */
-  protected void setDefaultCompatibleWith(Set<Label> environments) {
+  private void setDefaultCompatibleWith(Set<Label> environments) {
     defaultCompatibleWith = environments;
   }
 
@@ -269,16 +326,37 @@ public class Package {
    * Sets the default value to use for a rule's {@link RuleClass#RESTRICTED_ENVIRONMENT_ATTR}
    * attribute when not explicitly specified by the rule.
    */
-  protected void setDefaultRestrictedTo(Set<Label> environments) {
+  private void setDefaultRestrictedTo(Set<Label> environments) {
     defaultRestrictedTo = environments;
   }
 
-  private static Path getSourceRoot(Path buildFile, PathFragment packageFragment) {
-    Path current = buildFile.getParentDirectory();
+  /**
+   * Returns the source root (a directory) beneath which this package's BUILD file was found, or
+   * {@link Optional#empty} if this package was derived from a workspace file.
+   *
+   * <p>Assumes invariant: If non-empty, {@code
+   * getSourceRoot().get().getRelative(packageId.getSourceRoot()).equals(getPackageDirectory())}
+   */
+  public Optional<Root> getSourceRoot() {
+    return sourceRoot;
+  }
+
+  private static Root getSourceRoot(RootedPath buildFileRootedPath, PathFragment packageFragment) {
+    PathFragment packageDirectory = buildFileRootedPath.getRootRelativePath().getParentDirectory();
+    if (packageFragment.equals(packageDirectory)) {
+      // Fast path: BUILD file path and package name are the same, don't create an extra root.
+      return buildFileRootedPath.getRoot();
+    }
+    PathFragment current = buildFileRootedPath.asPath().asFragment().getParentDirectory();
     for (int i = 0, len = packageFragment.segmentCount(); i < len && current != null; i++) {
       current = current.getParentDirectory();
     }
-    return current;
+    if (current == null || current.isEmpty()) {
+      // This is never really expected to work. The check below in #finishInit should fail.
+      return buildFileRootedPath.getRoot();
+    }
+    // Note that current is an absolute path.
+    return Root.fromPath(buildFileRootedPath.getRoot().getRelative(current));
   }
 
   /**
@@ -288,7 +366,7 @@ public class Package {
    * <p>Only after this method is called can this package be considered "complete"
    * and be shared publicly.
    */
-  protected void finishInit(Builder builder) {
+  private void finishInit(Builder builder) {
     // If any error occurred during evaluation of this package, consider all
     // rules in the package to be "in error" also (even if they were evaluated
     // prior to the error).  This behaviour is arguably stricter than need be,
@@ -300,17 +378,34 @@ public class Package {
       }
     }
     this.filename = builder.getFilename();
-    this.packageDirectory = filename.getParentDirectory();
+    this.packageDirectory = filename.asPath().getParentDirectory();
+    String baseName = filename.getRootRelativePath().getBaseName();
 
-    this.sourceRoot = getSourceRoot(filename, packageIdentifier.getPathFragment());
-    if ((sourceRoot == null
-        || !sourceRoot.getRelative(packageIdentifier.getPathFragment()).equals(packageDirectory))
-        && !filename.getBaseName().equals("WORKSPACE")) {
-      throw new IllegalArgumentException(
-          "Invalid BUILD file name for package '" + packageIdentifier + "': " + filename);
+    if (isWorkspaceFile(baseName)) {
+      Preconditions.checkState(
+          packageIdentifier.equals(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER));
+      this.sourceRoot = Optional.empty();
+    } else {
+      Root sourceRoot = getSourceRoot(filename, packageIdentifier.getSourceRoot());
+      if (sourceRoot.asPath() == null
+          || !sourceRoot.getRelative(packageIdentifier.getSourceRoot()).equals(packageDirectory)) {
+        throw new IllegalArgumentException(
+            "Invalid BUILD file name for package '"
+                + packageIdentifier
+                + "': "
+                + filename
+                + " (in source "
+                + sourceRoot
+                + " with packageDirectory "
+                + packageDirectory
+                + " and package identifier source root "
+                + packageIdentifier.getSourceRoot()
+                + ")");
+      }
+      this.sourceRoot = Optional.of(sourceRoot);
     }
 
-    this.makeEnv = builder.makeEnv.build();
+    this.makeEnv = ImmutableMap.copyOf(builder.makeEnv);
     this.targets = ImmutableSortedKeyMap.copyOf(builder.targets);
     this.defaultVisibility = builder.defaultVisibility;
     this.defaultVisibilitySet = builder.defaultVisibilitySet;
@@ -321,44 +416,46 @@ public class Package {
     }
     this.buildFile = builder.buildFile;
     this.containsErrors = builder.containsErrors;
-    this.subincludes = builder.subincludes.keySet();
-    this.skylarkFileDependencies = builder.skylarkFileDependencies;
+    this.starlarkFileDependencies = builder.starlarkFileDependencies;
     this.defaultLicense = builder.defaultLicense;
     this.defaultDistributionSet = builder.defaultDistributionSet;
     this.features = ImmutableSortedSet.copyOf(builder.features);
     this.events = ImmutableList.copyOf(builder.events);
+    this.posts = ImmutableList.copyOf(builder.posts);
+    this.registeredExecutionPlatforms = ImmutableList.copyOf(builder.registeredExecutionPlatforms);
+    this.registeredToolchains = ImmutableList.copyOf(builder.registeredToolchains);
+    this.repositoryMapping = Preconditions.checkNotNull(builder.repositoryMapping);
+    ImmutableMap.Builder<RepositoryName, ImmutableMap<RepositoryName, RepositoryName>>
+        repositoryMappingsBuilder = ImmutableMap.builder();
+    if (!builder.externalPackageRepositoryMappings.isEmpty() && !builder.isWorkspace()) {
+      // 'repo_mapping' should only be used in the //external package, i.e. should only appear
+      // in WORKSPACE files. Currently, if someone tries to use 'repo_mapping' in a BUILD rule, they
+      // will get a "no such attribute" error. This check is to protect against a 'repo_mapping'
+      // attribute being added to a rule in the future.
+      throw new IllegalArgumentException(
+          "'repo_mapping' may only be used in the //external package");
+    }
+    builder.externalPackageRepositoryMappings.forEach((k, v) ->
+        repositoryMappingsBuilder.put(k, ImmutableMap.copyOf(v)));
+    this.externalPackageRepositoryMappings = repositoryMappingsBuilder.build();
+  }
+
+  private static boolean isWorkspaceFile(String baseFileName) {
+    return baseFileName.equals(LabelConstants.WORKSPACE_DOT_BAZEL_FILE_NAME.getPathString())
+        || baseFileName.equals(LabelConstants.WORKSPACE_FILE_NAME.getPathString());
+  }
+
+  /** Returns the list of transitive closure of the Starlark file dependencies of this package. */
+  public ImmutableList<Label> getStarlarkFileDependencies() {
+    return starlarkFileDependencies;
   }
 
   /**
-   * Returns the list of subincluded labels on which the validity of this package depends.
+   * Returns the filename of the BUILD file which defines this package. The parent directory of the
+   * BUILD file is the package directory.
    */
-  public Set<Label> getSubincludeLabels() {
-    return subincludes;
-  }
-
-  /**
-   * Returns the list of transitive closure of the Skylark file dependencies of this package.
-   */
-  public ImmutableList<Label> getSkylarkFileDependencies() {
-    return skylarkFileDependencies;
-  }
-
-  /**
-   * Returns the filename of the BUILD file which defines this package. The
-   * parent directory of the BUILD file is the package directory.
-   */
-  public Path getFilename() {
+  public RootedPath getFilename() {
     return filename;
-  }
-
-  /**
-   * Returns the source root (a directory) beneath which this package's BUILD file was found.
-   *
-   * <p> Assumes invariant:
-   * {@code getSourceRoot().getRelative(packageId.getPathFragment()).equals(getPackageDirectory())}
-   */
-  public Path getSourceRoot() {
-    return sourceRoot;
   }
 
   /**
@@ -373,41 +470,21 @@ public class Package {
    * may not be unique!
    */
   public String getName() {
-    return name;
+    return packageIdentifier.getPackageFragment().getPathString();
   }
 
   /**
    * Like {@link #getName}, but has type {@code PathFragment}.
    */
   public PathFragment getNameFragment() {
-    return nameFragment;
-  }
-
-  /**
-   * Returns the "Make" value from the package's make environment whose name
-   * is "varname", or null iff the variable is not defined in the environment.
-   */
-  public String lookupMakeVariable(String varname, String platform) {
-    return makeEnv.lookup(varname, platform);
-  }
-
-  /**
-   * Returns the make environment. This should only ever be used for serialization -- how the
-   * make variables are implemented is an implementation detail.
-   */
-  MakeEnvironment getMakeEnvironment() {
-    return makeEnv;
+    return packageIdentifier.getPackageFragment();
   }
 
   /**
    * Returns all make variables for a given platform.
    */
-  public Map<String, String> getAllMakeVariables(String platform) {
-    ImmutableMap.Builder<String, String> map = ImmutableMap.builder();
-    for (String var : makeEnv.getBindings().keySet()) {
-      map.put(var, makeEnv.lookup(var, platform));
-    }
-    return map.build();
+  public ImmutableMap<String, String> getMakeEnvironment() {
+    return makeEnv;
   }
 
   /**
@@ -439,27 +516,26 @@ public class Package {
     return containsErrors;
   }
 
+  public List<Postable> getPosts() {
+    return posts;
+  }
+
   public List<Event> getEvents() {
     return events;
   }
 
-  /**
-   * Returns an (immutable, unordered) view of all the targets belonging to this package.
-   */
-  public Collection<Target> getTargets() {
-    return getTargets(targets);
+  /** Returns an (immutable, ordered) view of all the targets belonging to this package. */
+  public ImmutableSortedKeyMap<String, Target> getTargets() {
+    return targets;
+  }
+
+  /** Common getTargets implementation, accessible by {@link Package.Builder}. */
+  private static Set<Target> getTargets(BiMap<String, Target> targetMap) {
+    return targetMap.values();
   }
 
   /**
-   * Common getTargets implementation, accessible by both {@link Package} and
-   * {@link Package.Builder}.
-   */
-  private static Collection<Target> getTargets(Map<String, Target> targetMap) {
-    return Collections.unmodifiableCollection(targetMap.values());
-  }
-
-  /**
-   * Returns a (read-only, unordered) iterator of all the targets belonging
+   * Returns a (read-only, ordered) iterable of all the targets belonging
    * to this package which are instances of the specified class.
    */
   public <T extends Target> Iterable<T> getTargets(Class<T> targetClass) {
@@ -480,18 +556,14 @@ public class Package {
    * for walking through the dependency graph of a target.
    * Fails if the target is not a Rule.
    */
-  @VisibleForTesting // Should be package-private
   public Rule getRule(String targetName) {
     return (Rule) targets.get(targetName);
   }
 
   /**
    * Returns this package's workspace name.
-   *
-   * <p>Package-private to encourage callers to get their workspace name from a rule, not a
-   * package.</p>
    */
-  String getWorkspaceName() {
+  public String getWorkspaceName() {
     return workspaceName;
   }
 
@@ -523,39 +595,50 @@ public class Package {
     // stat(2) is executed.
     Path filename = getPackageDirectory().getRelative(targetName);
     String suffix;
-    if (!new PathFragment(targetName).isNormalized()) {
-      // Don't check for file existence in this case because the error message
-      // would be confusing and wrong. If the targetName is "foo/bar/.", and
-      // there is a directory "foo/bar", it doesn't mean that "//pkg:foo/bar/."
-      // is a valid label.
+    if (!PathFragment.isNormalized(targetName) || "*".equals(targetName)) {
+      // Don't check for file existence if the target name is not normalized
+      // because the error message would be confusing and wrong. If the
+      // targetName is "foo/bar/.", and there is a directory "foo/bar", it
+      // doesn't mean that "//pkg:foo/bar/." is a valid label.
+      // Also don't check if the target name is a single * character since
+      // it's invalid on Windows.
       suffix = "";
     } else if (filename.isDirectory()) {
-      suffix = "; however, a source directory of this name exists.  (Perhaps add "
-          + "'exports_files([\"" + targetName + "\"])' to " + name + "/BUILD, or define a "
-          + "filegroup?)";
+      suffix =
+          "; however, a source directory of this name exists.  (Perhaps add "
+              + "'exports_files([\""
+              + targetName
+              + "\"])' to "
+              + getName()
+              + "/BUILD, or define a "
+              + "filegroup?)";
     } else if (filename.exists()) {
-      suffix = "; however, a source file of this name exists.  (Perhaps add "
-          + "'exports_files([\"" + targetName + "\"])' to " + name + "/BUILD?)";
+      suffix =
+          "; however, a source file of this name exists.  (Perhaps add "
+              + "'exports_files([\""
+              + targetName
+              + "\"])' to "
+              + getName()
+              + "/BUILD?)";
     } else {
-      suffix = "";
+      suffix = SpellChecker.didYouMean(targetName, targets.keySet());
     }
 
+    throw makeNoSuchTargetException(targetName, suffix);
+  }
+
+  protected NoSuchTargetException makeNoSuchTargetException(String targetName, String suffix) {
+    Label label;
     try {
-      throw new NoSuchTargetException(createLabel(targetName), "target '" + targetName
-          + "' not declared in package '" + name + "'" + suffix + " defined by "
-          + this.filename);
+      label = Label.create(packageIdentifier, targetName);
     } catch (LabelSyntaxException e) {
       throw new IllegalArgumentException(targetName);
     }
-  }
-
-  /**
-   * Creates a label for a target inside this package.
-   *
-   * @throws LabelSyntaxException if the {@code targetName} is invalid
-   */
-  public Label createLabel(String targetName) throws LabelSyntaxException {
-    return Label.create(packageIdentifier, targetName);
+    String msg =
+        String.format(
+            "target '%s' not declared in package '%s'%s defined by %s",
+            targetName, getName(), suffix, filename.asPath().getPathString());
+    return new NoSuchTargetException(label, msg);
   }
 
   /**
@@ -579,11 +662,9 @@ public class Package {
     return defaultDeprecation;
   }
 
-  /**
-   * Gets the default header checking mode.
-   */
+  /** Gets the default header checking mode. */
   public String getDefaultHdrsCheck() {
-    return defaultHdrsCheck != null ? defaultHdrsCheck : "loose";
+    return defaultHdrsCheck != null ? defaultHdrsCheck : "strict";
   }
 
   /**
@@ -604,6 +685,11 @@ public class Package {
 
   public boolean isDefaultVisibilitySet() {
     return defaultVisibilitySet;
+  }
+
+  /** Gets the licenses list for the default applicable_licenses declared by this package. */
+  public Set<Label> getDefaultApplicableLicenses() {
+    return defaultApplicableLicenses;
   }
 
   /**
@@ -638,9 +724,19 @@ public class Package {
     return defaultRestrictedTo;
   }
 
+  public ImmutableList<String> getRegisteredExecutionPlatforms() {
+    return registeredExecutionPlatforms;
+  }
+
+  public ImmutableList<String> getRegisteredToolchains() {
+    return registeredToolchains;
+  }
+
   @Override
   public String toString() {
-    return "Package(" + name + ")="
+    return "Package("
+        + getName()
+        + ")="
         + (targets != null ? getTargets(Rule.class) : "initializing...");
   }
 
@@ -649,7 +745,7 @@ public class Package {
    * output.
    */
   public void dump(PrintStream out) {
-    out.println("  Package " + getName() + " (" + getFilename() + ")");
+    out.println("  Package " + getName() + " (" + getFilename().asPath() + ")");
 
     // Rules:
     out.println("    Rules");
@@ -675,68 +771,48 @@ public class Package {
     }
   }
 
+  public static Builder newExternalPackageBuilder(
+      Builder.Helper helper,
+      RootedPath workspacePath,
+      String runfilesPrefix,
+      StarlarkSemantics starlarkSemantics) {
+    return new Builder(
+            helper,
+            LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER,
+            runfilesPrefix,
+            starlarkSemantics.incompatibleNoImplicitFileExport(),
+            Builder.EMPTY_REPOSITORY_MAPPING)
+        .setFilename(workspacePath);
+  }
+
   /**
-   * Builder class for {@link Package} that does its own globbing.
-   *
-   * <p>Despite its name, this is the normal builder used when parsing BUILD files.
+   * A builder for {@link Package} objects. Only intended to be used by {@link PackageFactory} and
+   * {@link com.google.devtools.build.lib.skyframe.PackageFunction}.
    */
-  public static class LegacyBuilder extends Builder {
-    private Globber globber = null;
-
-    LegacyBuilder(PackageIdentifier packageId, String runfilesPrefix) {
-      super(packageId, runfilesPrefix);
-    }
-
-    /**
-     * Derive a LegacyBuilder from a normal Builder.
-     */
-    LegacyBuilder(Builder builder) {
-      super(builder.pkg);
-      if (builder.getFilename() != null) {
-        setFilename(builder.getFilename());
-      }
-    }
-
-    /**
-     * Sets the globber used for this package's glob expansions.
-     */
-    LegacyBuilder setGlobber(Globber globber) {
-      this.globber = globber;
-      return this;
-    }
-
-    /**
-     * Removes a target from the {@link Package} under construction. Intended to be used only by
-     * {@link com.google.devtools.build.lib.skyframe.PackageFunction} to remove targets whose
-     * labels cross subpackage boundaries.
-     */
-    public void removeTarget(Target target) {
-      if (target.getPackage() == pkg) {
-        this.targets.remove(target.getName());
-      }
-    }
-
-    /**
-     * Returns the glob patterns requested by {@link PackageFactory} during evaluation of this
-     * package's BUILD file. Intended to be used only by
-     * {@link com.google.devtools.build.lib.skyframe.PackageFunction} to mark the appropriate
-     * Skyframe dependencies after the fact.
-     */
-    public Set<Pair<String, Boolean>> getGlobPatterns() {
-      return globber.getGlobPatterns();
-    }
-  }
-
-  public static LegacyBuilder newExternalPackageBuilder(Path workspacePath, String runfilesPrefix) {
-    LegacyBuilder b = new LegacyBuilder(EXTERNAL_PACKAGE_IDENTIFIER, runfilesPrefix);
-    b.setFilename(workspacePath);
-    b.setMakeEnv(new MakeEnvironment.Builder());
-    return b;
-  }
-
   public static class Builder {
-    protected static Package newPackage(PackageIdentifier packageId, String runfilesPrefix) {
-      return new Package(packageId, runfilesPrefix);
+
+    public static final ImmutableMap<RepositoryName, RepositoryName> EMPTY_REPOSITORY_MAPPING =
+        ImmutableMap.of();
+
+    public interface Helper {
+      /**
+       * Returns a fresh {@link Package} instance that a {@link Builder} will internally mutate
+       * during package loading. Called by {@link PackageFactory}.
+       */
+      Package createFreshPackage(PackageIdentifier packageId, String runfilesPrefix);
+    }
+
+    /** {@link Helper} that simply calls the {@link Package} constructor. */
+    public static class DefaultHelper implements Helper {
+      public static final DefaultHelper INSTANCE = new DefaultHelper();
+
+      private DefaultHelper() {
+      }
+
+      @Override
+      public Package createFreshPackage(PackageIdentifier packageId, String runfilesPrefix) {
+        return new Package(packageId, runfilesPrefix);
+      }
     }
 
     /**
@@ -745,29 +821,52 @@ public class Package {
      * are applied during {@link #build}. See {@link Package#Package}
      * and {@link Package#finishInit} for details.
      */
-    protected Package pkg;
+    private final Package pkg;
 
-    private Path filename = null;
+    private final boolean noImplicitFileExport;
+    private final CallStack.Builder callStackBuilder = new CallStack.Builder();
+
+    // The map from each repository to that repository's remappings map.
+    // This is only used in the //external package, it is an empty map for all other packages.
+    public final HashMap<RepositoryName, HashMap<RepositoryName, RepositoryName>>
+        externalPackageRepositoryMappings = new HashMap<>();
+    /**
+     * The map of repository reassignments for BUILD packages loaded within external repositories.
+     * It contains an entry from "@<main workspace name>" to "@" for packages within the main
+     * workspace.
+     */
+    private final ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
+
+    private RootedPath filename = null;
     private Label buildFileLabel = null;
     private InputFile buildFile = null;
-    private MakeEnvironment.Builder makeEnv = null;
+    // TreeMap so that the iteration order of variables is predictable. This is useful so that the
+    // serialized representation is deterministic.
+    private TreeMap<String, String> makeEnv = new TreeMap<>();
     private RuleVisibility defaultVisibility = ConstantRuleVisibility.PRIVATE;
     private boolean defaultVisibilitySet;
     private List<String> defaultCopts = null;
     private List<String> features = new ArrayList<>();
     private List<Event> events = Lists.newArrayList();
+    private List<Postable> posts = Lists.newArrayList();
+    @Nullable private String ioExceptionMessage = null;
+    @Nullable private IOException ioException = null;
     private boolean containsErrors = false;
 
+    private ImmutableList<Label> defaultApplicableLicenses = ImmutableList.of();
     private License defaultLicense = License.NO_LICENSE;
     private Set<License.DistributionType> defaultDistributionSet = License.DEFAULT_DISTRIB;
 
-    protected Map<String, Target> targets = new HashMap<>();
-    protected Map<Label, EnvironmentGroup> environmentGroups = new HashMap<>();
+    private BiMap<String, Target> targets = HashBiMap.create();
+    private final Map<Label, EnvironmentGroup> environmentGroups = new HashMap<>();
 
-    protected Map<Label, Path> subincludes = null;
-    protected ImmutableList<Label> skylarkFileDependencies = ImmutableList.of();
+    private ImmutableList<Label> starlarkFileDependencies = ImmutableList.of();
 
-    protected ExternalPackageBuilder externalPackageData = new ExternalPackageBuilder();
+    private final List<String> registeredExecutionPlatforms = new ArrayList<>();
+    private final List<String> registeredToolchains = new ArrayList<>();
+
+    private ThirdPartyLicenseExistencePolicy thirdPartyLicenceExistencePolicy =
+        ThirdPartyLicenseExistencePolicy.USER_CONTROLLABLE;
 
     /**
      * True iff the "package" function has already been called in this package.
@@ -785,43 +884,108 @@ public class Package {
      */
     private Map<String, OutputFile> outputFilePrefixes = new HashMap<>();
 
+    private final Interner<ImmutableList<?>> listInterner = new ThreadCompatibleInterner<>();
+
+    private final Map<Location, String> generatorNameByLocation = new HashMap<>();
+
+    Map<Location, String> getGeneratorNameByLocation() {
+      return generatorNameByLocation;
+    }
+
+    @ThreadCompatible
+    private static class ThreadCompatibleInterner<T> implements Interner<T> {
+      private final Map<T, T> interns = new HashMap<>();
+
+      @Override
+      public T intern(T sample) {
+        T t = interns.get(sample);
+        if (t != null) {
+          return t;
+        }
+        interns.put(sample, sample);
+        return sample;
+      }
+    }
+
     private boolean alreadyBuilt = false;
 
-    private EventHandler builderEventHandler = new EventHandler() {
-      @Override
-      public void handle(Event event) {
-        addEvent(event);
-      }
-    };
-
-    protected Builder(Package pkg) {
-      this.pkg = pkg;
+    Builder(
+        Helper helper,
+        PackageIdentifier id,
+        String runfilesPrefix,
+        boolean noImplicitFileExport,
+        ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+      this.pkg = helper.createFreshPackage(id, runfilesPrefix);
+      this.noImplicitFileExport = noImplicitFileExport;
+      this.repositoryMapping = repositoryMapping;
       if (pkg.getName().startsWith("javatests/")) {
         setDefaultTestonly(true);
       }
     }
 
-    public Builder(PackageIdentifier id, String runfilesPrefix) {
-      this(newPackage(id, runfilesPrefix));
-    }
-
-    protected PackageIdentifier getPackageIdentifier() {
+    PackageIdentifier getPackageIdentifier() {
       return pkg.getPackageIdentifier();
     }
 
     /** Determine if we are in the WORKSPACE file or not */
-    public boolean isWorkspace() {
-      return pkg.getPackageIdentifier().equals(EXTERNAL_PACKAGE_IDENTIFIER);
+    boolean isWorkspace() {
+      return pkg.getPackageIdentifier().equals(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER);
+    }
+
+    String getPackageWorkspaceName() {
+      return pkg.getWorkspaceName();
     }
 
     /**
-     * Sets the name of this package's BUILD file.
+     * Updates the externalPackageRepositoryMappings entry for {@code repoWithin}. Adds new
+     * entry from {@code localName} to {@code mappedName} in {@code repoWithin}'s map.
+     *
+     * @param repoWithin the RepositoryName within which the mapping should apply
+     * @param localName the RepositoryName that actually appears in the WORKSPACE and BUILD files
+     *    in the {@code repoWithin} repository
+     * @param mappedName the RepositoryName by which localName should be referenced
      */
-    Builder setFilename(Path filename) {
+    Builder addRepositoryMappingEntry(
+        RepositoryName repoWithin, RepositoryName localName, RepositoryName mappedName) {
+      HashMap<RepositoryName, RepositoryName> mapping =
+          externalPackageRepositoryMappings
+              .computeIfAbsent(repoWithin, (RepositoryName k) -> new HashMap<>());
+      mapping.put(localName, mappedName);
+      return this;
+    }
+
+    /** Adds all the mappings from a given {@link Package}. */
+    Builder addRepositoryMappings(Package aPackage) {
+      ImmutableMap<RepositoryName, ImmutableMap<RepositoryName, RepositoryName>>
+          repositoryMappings = aPackage.externalPackageRepositoryMappings;
+      for (Map.Entry<RepositoryName, ImmutableMap<RepositoryName, RepositoryName>> repositoryName :
+          repositoryMappings.entrySet()) {
+        for (Map.Entry<RepositoryName, RepositoryName> repositoryNameRepositoryNameEntry :
+            repositoryName.getValue().entrySet()) {
+          addRepositoryMappingEntry(
+              repositoryName.getKey(),
+              repositoryNameRepositoryNameEntry.getKey(),
+              repositoryNameRepositoryNameEntry.getValue());
+        }
+      }
+      return this;
+    }
+
+    /** Get the repository mapping for this package */
+    ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping() {
+      return this.repositoryMapping;
+    }
+
+    Interner<ImmutableList<?>> getListInterner() {
+      return listInterner;
+    }
+
+    /** Sets the name of this package's BUILD file. */
+    Builder setFilename(RootedPath filename) {
       this.filename = filename;
       try {
-        buildFileLabel = createLabel(filename.getBaseName());
-        addInputFile(buildFileLabel, Location.fromFile(filename));
+        buildFileLabel = createLabel(filename.getRootRelativePath().getBaseName());
+        addInputFile(buildFileLabel, Location.fromFile(filename.asPath().toString()));
       } catch (LabelSyntaxException e) {
         // This can't actually happen.
         throw new AssertionError("Package BUILD file has an illegal name: " + filename);
@@ -829,28 +993,40 @@ public class Package {
       return this;
     }
 
-    public Label getBuildFileLabel() {
+    Label getBuildFileLabel() {
       return buildFileLabel;
     }
 
-    Path getFilename() {
+    /**
+     * Return a read-only copy of the name mapping of external repositories for a given repository.
+     * Reading that mapping directly from the builder allows to also take mappings into account that
+     * are only discovered while constructing the external package (e.g., the mapping of the name of
+     * the main workspace to the canonical main name '@').
+     */
+    ImmutableMap<RepositoryName, RepositoryName> getRepositoryMappingFor(RepositoryName name) {
+      Map<RepositoryName, RepositoryName> mapping = externalPackageRepositoryMappings.get(name);
+      if (mapping == null) {
+        return ImmutableMap.<RepositoryName, RepositoryName>of();
+      } else {
+        return ImmutableMap.<RepositoryName, RepositoryName>copyOf(mapping);
+      }
+    }
+
+    RootedPath getFilename() {
       return filename;
+    }
+
+    public List<Postable> getPosts() {
+      return posts;
     }
 
     public List<Event> getEvents() {
       return events;
     }
 
-    /**
-     * Sets this package's Make environment.
-     */
-    Builder setMakeEnv(MakeEnvironment.Builder makeEnv) {
-      this.makeEnv = makeEnv;
+    Builder setMakeVariable(String name, String value) {
+      this.makeEnv.put(name, value);
       return this;
-    }
-
-    MakeEnvironment.Builder getMakeEnvironment() {
-      return makeEnv;
     }
 
     /**
@@ -894,15 +1070,29 @@ public class Package {
       return this;
     }
 
+    public Builder setThirdPartyLicenceExistencePolicy(ThirdPartyLicenseExistencePolicy policy) {
+      this.thirdPartyLicenceExistencePolicy = policy;
+      return this;
+    }
+
+    public ThirdPartyLicenseExistencePolicy getThirdPartyLicenseExistencePolicy() {
+      return thirdPartyLicenceExistencePolicy;
+    }
+
     /**
      * Returns whether the "package" function has been called yet
      */
-    public boolean isPackageFunctionUsed() {
+    boolean isPackageFunctionUsed() {
       return packageFunctionUsed;
     }
 
-    public void setPackageFunctionUsed() {
+    void setPackageFunctionUsed() {
       packageFunctionUsed = true;
+    }
+
+    /** Sets the number of Starlark computation steps executed by this BUILD file. */
+    void setComputationSteps(long n) {
+      pkg.computationSteps = n;
     }
 
     /**
@@ -916,9 +1106,7 @@ public class Package {
       return this;
     }
 
-    /**
-     * Sets the default value of copts. Rule-level copts will append to this.
-     */
+    /** Sets the default value of copts. Rule-level copts will append to this. */
     public Builder setDefaultCopts(List<String> defaultCopts) {
       this.defaultCopts = defaultCopts;
       return this;
@@ -927,6 +1115,12 @@ public class Package {
     public Builder addFeatures(Iterable<String> features) {
       Iterables.addAll(this.features, features);
       return this;
+    }
+
+    Builder setIOExceptionAndMessage(IOException e, String message) {
+      this.ioException = e;
+      this.ioExceptionMessage = message;
+      return setContainsErrors();
     }
 
     /**
@@ -941,7 +1135,14 @@ public class Package {
       return containsErrors;
     }
 
-    public Builder addEvents(Iterable<Event> events) {
+    Builder addPosts(Iterable<Postable> posts) {
+      for (Postable post : posts) {
+        this.posts.add(post);
+      }
+      return this;
+    }
+
+    Builder addEvents(Iterable<Event> events) {
       for (Event event : events) {
         addEvent(event);
       }
@@ -953,9 +1154,26 @@ public class Package {
       return this;
     }
 
-    Builder setSkylarkFileDependencies(ImmutableList<Label> skylarkFileDependencies) {
-      this.skylarkFileDependencies = skylarkFileDependencies;
+    Builder setStarlarkFileDependencies(ImmutableList<Label> starlarkFileDependencies) {
+      this.starlarkFileDependencies = starlarkFileDependencies;
       return this;
+    }
+
+    /**
+     * Sets the default value to use for a rule's {@link RuleClass#APPLICABLE_LICENSES_ATTR}
+     * attribute when not explicitly specified by the rule. Records a package error if any labels
+     * are duplicated.
+     */
+    void setDefaultApplicableLicenses(List<Label> licenses, String attrName, Location location) {
+      if (hasDuplicateLabels(
+          licenses, "package " + pkg.getName(), attrName, location, this::addEvent)) {
+        setContainsErrors();
+      }
+      pkg.setDefaultApplicableLicenses(ImmutableSet.copyOf(licenses));
+    }
+
+    ImmutableList<Label> getDefaultApplicableLicenses() {
+      return defaultApplicableLicenses;
     }
 
     /**
@@ -989,8 +1207,8 @@ public class Package {
      * any labels are duplicated.
      */
     void setDefaultCompatibleWith(List<Label> environments, String attrName, Location location) {
-      if (!checkForDuplicateLabels(environments, "package " + pkg.getName(), attrName, location,
-          builderEventHandler)) {
+      if (hasDuplicateLabels(
+          environments, "package " + pkg.getName(), attrName, location, this::addEvent)) {
         setContainsErrors();
       }
       pkg.setDefaultCompatibleWith(ImmutableSet.copyOf(environments));
@@ -1002,8 +1220,8 @@ public class Package {
      * any labels are duplicated.
      */
     void setDefaultRestrictedTo(List<Label> environments, String attrName, Location location) {
-      if (!checkForDuplicateLabels(environments, "package " + pkg.getName(), attrName, location,
-          builderEventHandler)) {
+      if (hasDuplicateLabels(
+          environments, "package " + pkg.getName(), attrName, location, this::addEvent)) {
         setContainsErrors();
       }
 
@@ -1011,48 +1229,61 @@ public class Package {
     }
 
     /**
-     * Returns a new Rule belonging to this package instance, and uses the given Label.
+     * Creates a new {@link Rule} {@code r} where {@code r.getPackage()} is the {@link Package}
+     * associated with this {@link Builder}.
      *
-     * <p>Useful for RuleClass instantiation, where the rule name is checked by trying to create a
-     * Label. This label can then be used again here.
+     * <p>The created {@link Rule} will have no attribute values, no output files, and therefore
+     * will be in an invalid state.
      */
-    Rule newRuleWithLabel(Label label, RuleClass ruleClass, Location location) {
-      return newRuleWithLabelAndAttrContainer(label, ruleClass, location,
-          new AttributeContainer(ruleClass));
-    }
-
-    Rule newRuleWithLabelAndAttrContainer(Label label, RuleClass ruleClass, Location location,
+    Rule createRule(
+        Label label,
+        RuleClass ruleClass,
+        Location location,
+        List<StarlarkThread.CallStackEntry> callstack,
         AttributeContainer attributeContainer) {
-      return new Rule(pkg, label, ruleClass, location, attributeContainer);
+      return new Rule(
+          pkg, label, ruleClass, location, callStackBuilder.of(callstack), attributeContainer);
     }
 
     /**
-     * Called by the parser when a "mocksubinclude" is encountered, to record the
-     * mappings from labels to absolute paths upon which that the validity of
-     * this package depends.
+     * Same as {@link #createRule(Label, RuleClass, Location, List<StarlarkThread.CallStackEntry>,
+     * AttributeContainer)}, except allows specifying an {@link ImplicitOutputsFunction} override.
+     * Only use if you know what you're doing.
      */
-    void addSubinclude(Label label, Path resolvedPath) {
-      if (subincludes == null) {
-        // This is a TreeMap because the order needs to be deterministic.
-        subincludes = Maps.newTreeMap();
+    Rule createRule(
+        Label label,
+        RuleClass ruleClass,
+        Location location,
+        List<StarlarkThread.CallStackEntry> callstack,
+        AttributeContainer attributeContainer,
+        ImplicitOutputsFunction implicitOutputsFunction) {
+      return new Rule(
+          pkg,
+          label,
+          ruleClass,
+          location,
+          callStackBuilder.of(callstack),
+          attributeContainer,
+          implicitOutputsFunction);
+    }
+
+    @Nullable
+    Target getTarget(String name) {
+      return targets.get(name);
+    }
+
+    /**
+     * Removes a target from the {@link Package} under construction. Intended to be used only by
+     * {@link com.google.devtools.build.lib.skyframe.PackageFunction} to remove targets whose
+     * labels cross subpackage boundaries.
+     */
+    public void removeTarget(Target target) {
+      if (target.getPackage() == pkg) {
+        this.targets.remove(target.getName());
       }
-
-      Path oldResolvedPath = subincludes.put(label, resolvedPath);
-      if (oldResolvedPath != null && !oldResolvedPath.equals(resolvedPath)){
-        // The same label should have been resolved to the same path
-        throw new IllegalStateException("Ambiguous subinclude path");
-      }
     }
 
-    public Set<Label> getSubincludeLabels() {
-      return subincludes == null ? Sets.<Label>newHashSet() : subincludes.keySet();
-    }
-
-    public Map<Label, Path> getSubincludes() {
-      return subincludes == null ? Maps.<Label, Path>newHashMap() : subincludes;
-    }
-
-    public Collection<Target> getTargets() {
+    public Set<Target> getTargets() {
       return Package.getTargets(targets);
     }
 
@@ -1060,7 +1291,7 @@ public class Package {
      * Returns an (immutable, unordered) view of all the targets belonging to
      * this package which are instances of the specified class.
      */
-    <T extends Target> Iterable<T> getTargets(Class<T> targetClass) {
+    private <T extends Target> Iterable<T> getTargets(Class<T> targetClass) {
       return Package.getTargets(targets, targetClass);
     }
 
@@ -1118,7 +1349,7 @@ public class Package {
       }
       if (!((InputFile) cacheInstance).isVisibilitySpecified()
           || cacheInstance.getVisibility() != visibility
-          || cacheInstance.getLicense() != license) {
+          || !Objects.equals(cacheInstance.getLicense(), license)) {
         targets.put(filename, new InputFile(
             pkg, cacheInstance.getLabel(), cacheInstance.getLocation(), visibility, license));
       }
@@ -1154,20 +1385,24 @@ public class Package {
     }
 
     /**
-     * Checks if any labels in the given list appear multiple times and reports an appropriate
-     * error message if so. Returns true if no duplicates were found, false otherwise.
+     * Returns true if any labels in the given list appear multiple times, reporting an appropriate
+     * error message if so.
      *
-     * <p> TODO(bazel-team): apply this to all build functions (maybe automatically?), possibly
+     * <p>TODO(bazel-team): apply this to all build functions (maybe automatically?), possibly
      * integrate with RuleClass.checkForDuplicateLabels.
      */
-    private static boolean checkForDuplicateLabels(Collection<Label> labels, String owner,
-        String attrName, Location location, EventHandler eventHandler) {
+    private static boolean hasDuplicateLabels(
+        Collection<Label> labels,
+        String owner,
+        String attrName,
+        Location location,
+        EventHandler eventHandler) {
       Set<Label> dupes = CollectionUtils.duplicatedElementsOf(labels);
       for (Label dupe : dupes) {
         eventHandler.handle(Event.error(location, String.format(
             "label '%s' is duplicated in the '%s' list of '%s'", dupe, attrName, owner)));
       }
-      return dupes.isEmpty();
+      return !dupes.isEmpty();
     }
 
     /**
@@ -1177,8 +1412,8 @@ public class Package {
         EventHandler eventHandler, Location location)
         throws NameConflictException, LabelSyntaxException {
 
-      if (!checkForDuplicateLabels(environments, name, "environments", location, eventHandler)
-          || !checkForDuplicateLabels(defaults, name, "defaults", location, eventHandler)) {
+      if (hasDuplicateLabels(environments, name, "environments", location, eventHandler)
+          || hasDuplicateLabels(defaults, name, "defaults", location, eventHandler)) {
         setContainsErrors();
         return;
       }
@@ -1213,17 +1448,21 @@ public class Package {
       }
     }
 
-    void addRule(Rule rule) throws NameConflictException {
-      checkForConflicts(rule);
+    /**
+     * Same as {@link #addRule}, except with no name conflict checks.
+     *
+     * <p>Don't call this function unless you know what you're doing.
+     */
+    void addRuleUnchecked(Rule rule) {
+      Preconditions.checkArgument(rule.getPackage() == pkg);
       // Now, modify the package:
       for (OutputFile outputFile : rule.getOutputFiles()) {
         targets.put(outputFile.getName(), outputFile);
-        PathFragment outputFileFragment = new PathFragment(outputFile.getName());
-        for (int i = 1; i < outputFileFragment.segmentCount(); i++) {
+        PathFragment outputFileFragment = PathFragment.create(outputFile.getName());
+        int segmentCount = outputFileFragment.segmentCount();
+        for (int i = 1; i < segmentCount; i++) {
           String prefix = outputFileFragment.subFragment(0, i).toString();
-          if (!outputFilePrefixes.containsKey(prefix)) {
-            outputFilePrefixes.put(prefix, outputFile);
-          }
+          outputFilePrefixes.putIfAbsent(prefix, outputFile);
         }
       }
       targets.put(rule.getName(), rule);
@@ -1232,64 +1471,83 @@ public class Package {
       }
     }
 
-    private Builder beforeBuild() {
+    void addRule(Rule rule) throws NameConflictException {
+      checkForConflicts(rule);
+      addRuleUnchecked(rule);
+    }
+
+    void addRegisteredExecutionPlatforms(List<String> platforms) {
+      this.registeredExecutionPlatforms.addAll(platforms);
+    }
+
+    void addRegisteredToolchains(List<String> toolchains) {
+      this.registeredToolchains.addAll(toolchains);
+    }
+
+    private Builder beforeBuild(boolean discoverAssumedInputFiles) throws NoSuchPackageException {
       Preconditions.checkNotNull(pkg);
       Preconditions.checkNotNull(filename);
       Preconditions.checkNotNull(buildFileLabel);
       Preconditions.checkNotNull(makeEnv);
-      // Freeze subincludes.
-      subincludes = (subincludes == null)
-          ? Collections.<Label, Path>emptyMap()
-          : Collections.unmodifiableMap(subincludes);
+      if (ioException != null) {
+        throw new NoSuchPackageException(getPackageIdentifier(), ioExceptionMessage, ioException);
+      }
 
       // We create the original BUILD InputFile when the package filename is set; however, the
       // visibility may be overridden with an exports_files directive, so we need to obtain the
       // current instance here.
       buildFile = (InputFile) Preconditions.checkNotNull(targets.get(buildFileLabel.getName()));
 
-      List<Rule> rules = Lists.newArrayList(getTargets(Rule.class));
-
-      // All labels mentioned in a rule that refer to an unknown target in the
-      // current package are assumed to be InputFiles, so let's create them:
-      for (final Rule rule : rules) {
-        AggregatingAttributeMapper.of(rule).visitLabels(new AcceptsLabelAttribute() {
-          @Override
-          public void acceptLabelAttribute(Label label, Attribute attribute) {
-            createInputFileMaybe(label, rule.getAttributeLocation(attribute.getName()));
+      List<Label> labelsOfTestTargets = new ArrayList<>();
+      List<Rule> implicitTestSuiteRuleInstances = new ArrayList<>();
+      Map<Label, InputFile> newInputFiles = new HashMap<>();
+      for (final Rule rule : getTargets(Rule.class)) {
+        if (discoverAssumedInputFiles) {
+          // All labels mentioned in a rule that refer to an unknown target in the
+          // current package are assumed to be InputFiles, so let's create them:
+          for (AttributeMap.DepEdge depEdge : AggregatingAttributeMapper.of(rule).visitLabels()) {
+            InputFile inputFile = createInputFileMaybe(depEdge.getLabel(), rule.getLocation());
+            if (inputFile != null && !newInputFiles.containsKey(depEdge.getLabel())) {
+              newInputFiles.put(depEdge.getLabel(), inputFile);
+            }
           }
-        });
-      }
-
-      // "test_suite" rules have the idiosyncratic semantics of implicitly
-      // depending on all tests in the package, iff tests=[] and suites=[].
-      // Note, we implement this here when the Package is fully constructed,
-      // since clearly this information isn't available at Rule construction
-      // time, as forward references are permitted.
-      List<Label> allTests = new ArrayList<>();
-      for (Rule rule : rules) {
-        if (TargetUtils.isTestRule(rule) && !TargetUtils.hasManualTag(rule)) {
-          allTests.add(rule.getLabel());
         }
-      }
-      Collections.sort(allTests);
-      for (Rule rule : rules) {
+
+        // "test_suite" rules have the idiosyncratic semantics of implicitly
+        // depending on all tests in the package, iff tests=[] and suites=[].
+        // Note, we implement this here when the Package is fully constructed,
+        // since clearly this information isn't available at Rule construction
+        // time, as forward references are permitted.
+        if (TargetUtils.isTestRule(rule) && !TargetUtils.hasManualTag(rule)) {
+          labelsOfTestTargets.add(rule.getLabel());
+        }
+
         AttributeMap attributes = NonconfigurableAttributeMapper.of(rule);
         if (rule.getRuleClass().equals("test_suite")
-            && attributes.get("tests", BuildType.LABEL_LIST).isEmpty()
-            && (!attributes.has("suites", BuildType.LABEL_LIST)
-                || attributes.get("suites", BuildType.LABEL_LIST).isEmpty())) {
-          rule.setAttributeValueByName("$implicit_tests", allTests);
+            && attributes.get("tests", BuildType.LABEL_LIST).isEmpty()) {
+          implicitTestSuiteRuleInstances.add(rule);
+        }
+      }
+
+      for (InputFile inputFile : newInputFiles.values()) {
+        addInputFile(inputFile);
+      }
+
+      if (!implicitTestSuiteRuleInstances.isEmpty()) {
+        Collections.sort(labelsOfTestTargets);
+        for (Rule rule : implicitTestSuiteRuleInstances) {
+          rule.setAttributeValueByName("$implicit_tests", labelsOfTestTargets);
         }
       }
       return this;
     }
 
     /** Intended for use by {@link com.google.devtools.build.lib.skyframe.PackageFunction} only. */
-    public Builder buildPartial() {
+    public Builder buildPartial() throws NoSuchPackageException {
       if (alreadyBuilt) {
         return this;
       }
-      return beforeBuild();
+      return beforeBuild(/*discoverAssumedInputFiles=*/ true);
     }
 
     /** Intended for use by {@link com.google.devtools.build.lib.skyframe.PackageFunction} only. */
@@ -1298,10 +1556,8 @@ public class Package {
         return pkg;
       }
 
-      externalPackageData.build(this);
-
       // Freeze targets and distributions.
-      targets = ImmutableMap.copyOf(targets);
+      targets = Maps.unmodifiableBiMap(targets);
       defaultDistributionSet =
           Collections.unmodifiableSet(defaultDistributionSet);
 
@@ -1320,44 +1576,56 @@ public class Package {
       return pkg;
     }
 
-    protected ExternalPackageBuilder externalPackageData() {
-      return externalPackageData;
+    public Package build() throws NoSuchPackageException {
+      return build(/*discoverAssumedInputFiles=*/ true);
     }
 
-    public Package build() {
+    /**
+     * Build the package, optionally adding any labels in the package not already associated with a
+     * target as an input file.
+     */
+    Package build(boolean discoverAssumedInputFiles) throws NoSuchPackageException {
       if (alreadyBuilt) {
         return pkg;
       }
-      beforeBuild();
+      beforeBuild(discoverAssumedInputFiles);
       return finishBuild();
     }
 
     /**
-     * If "label" refers to a non-existent target in the current package, create
-     * an InputFile target.
+     * If "label" refers to a non-existent target in the current package, create an InputFile
+     * target.
      */
-    void createInputFileMaybe(Label label, Location location) {
-      if (label != null && label.getPackageFragment().equals(pkg.getNameFragment())) {
+    private InputFile createInputFileMaybe(Label label, Location location) {
+      if (label != null && label.getPackageIdentifier().equals(pkg.getPackageIdentifier())) {
         if (!targets.containsKey(label.getName())) {
-          addInputFile(label, location);
+          return noImplicitFileExport
+              ? new InputFile(
+                  pkg, label, location, ConstantRuleVisibility.PRIVATE, License.NO_LICENSE)
+              : new InputFile(pkg, label, location);
         }
       }
+      return null;
     }
 
     private InputFile addInputFile(Label label, Location location) {
-      InputFile inputFile = new InputFile(pkg, label, location);
-      Target prev = targets.put(label.getName(), inputFile);
+      return addInputFile(new InputFile(pkg, label, location));
+    }
+
+    private InputFile addInputFile(InputFile inputFile) {
+      Target prev = targets.put(inputFile.getLabel().getName(), inputFile);
       Preconditions.checkState(prev == null);
       return inputFile;
     }
 
     /**
-     * Precondition check for addRule.  We must maintain these invariants of the
-     * package:
-     * - Each name refers to at most one target.
-     * - No rule with errors is inserted into the package.
-     * - The generating rule of every output file in the package must itself be
-     *   in the package.
+     * Precondition check for addRule. We must maintain these invariants of the package:
+     *
+     * <ul>
+     * <li>Each name refers to at most one target.
+     * <li>No rule with errors is inserted into the package.
+     * <li>The generating rule of every output file in the package must itself be in the package.
+     * </ul>
      */
     private void checkForConflicts(Rule rule) throws NameConflictException {
       String name = rule.getName();
@@ -1383,8 +1651,9 @@ public class Package {
         }
 
         // Check if a prefix of this output file matches an already existing one
-        PathFragment outputFileFragment = new PathFragment(outputFileName);
-        for (int i = 1; i < outputFileFragment.segmentCount(); i++) {
+        PathFragment outputFileFragment = PathFragment.create(outputFileName);
+        int segmentCount = outputFileFragment.segmentCount();
+        for (int i = 1; i < segmentCount; i++) {
           String prefix = outputFileFragment.subFragment(0, i).toString();
           if (outputFiles.containsKey(prefix)) {
             throw conflictingOutputFile(outputFile, outputFiles.get(prefix));
@@ -1394,9 +1663,7 @@ public class Package {
             throw conflictingOutputFile(outputFile, (OutputFile) targets.get(prefix));
           }
 
-          if (!outputFilePrefixes.containsKey(prefix)) {
-            outputFilePrefixes.put(prefix, outputFile);
-          }
+          outputFilePrefixes.putIfAbsent(prefix, outputFile);
         }
       }
 
@@ -1404,20 +1671,18 @@ public class Package {
     }
 
     /**
-     * A utility method that checks for conflicts between
-     * input file names and output file names for a rule from a build
-     * file.
-     * @param rule the rule whose inputs and outputs are
-     *       to be checked for conflicts.
-     * @param outputFiles a set containing the names of output
-     *       files to be generated by the rule.
+     * A utility method that checks for conflicts between input file names and output file names for
+     * a rule from a build file.
+     *
+     * @param rule the rule whose inputs and outputs are to be checked for conflicts.
+     * @param outputFiles a set containing the names of output files to be generated by the rule.
      * @throws NameConflictException if a conflict is found.
      */
     private void checkForInputOutputConflicts(Rule rule, Set<String> outputFiles)
         throws NameConflictException {
-      PathFragment packageFragment = rule.getLabel().getPackageFragment();
+      PackageIdentifier packageIdentifier = rule.getLabel().getPackageIdentifier();
       for (Label inputLabel : rule.getLabels()) {
-        if (packageFragment.equals(inputLabel.getPackageFragment())
+        if (packageIdentifier.equals(inputLabel.getPackageIdentifier())
             && outputFiles.contains(inputLabel.getName())) {
           throw inputOutputNameConflict(rule, inputLabel.getName());
         }
@@ -1464,11 +1729,47 @@ public class Package {
     private static String conflictsWith(Target target) {
       String message = "conflicts with existing ";
       if (target instanceof OutputFile) {
-        return message + "generated file from rule '"
-          + ((OutputFile) target).getGeneratingRule().getName()
-          + "'";
+        message +=
+            "generated file from rule '"
+                + ((OutputFile) target).getGeneratingRule().getName()
+                + "'";
       } else {
-        return message + target.getTargetKind();
+        message += target.getTargetKind();
+      }
+      return message + ", defined at " + target.getLocation();
+    }
+  }
+
+  /** Package codec implementation. */
+  @VisibleForTesting
+  static final class PackageCodec implements ObjectCodec<Package> {
+    @Override
+    public Class<Package> getEncodedClass() {
+      return Package.class;
+    }
+
+    @Override
+    public void serialize(
+        SerializationContext context,
+        Package input,
+        CodedOutputStream codedOut)
+        throws IOException, SerializationException {
+      context.checkClassExplicitlyAllowed(Package.class, input);
+      PackageCodecDependencies codecDeps = context.getDependency(PackageCodecDependencies.class);
+      codecDeps.getPackageSerializer().serialize(context, input, codedOut);
+    }
+
+    @Override
+    public Package deserialize(
+        DeserializationContext context,
+        CodedInputStream codedIn)
+        throws SerializationException, IOException {
+      PackageCodecDependencies codecDeps = context.getDependency(PackageCodecDependencies.class);
+      try {
+        return codecDeps.getPackageSerializer().deserialize(context, codedIn);
+      } catch (InterruptedException e) {
+        throw new IllegalStateException(
+            "Unexpected InterruptedException during Package deserialization", e);
       }
     }
   }

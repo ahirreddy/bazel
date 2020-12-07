@@ -12,24 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
+
+import static com.google.common.truth.Truth.assertThat;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.junit.Assert.assertEquals;
 
 import com.google.common.base.Joiner;
-import com.google.devtools.build.lib.testutil.FoundationTestCaseForJunit4;
-
+import com.google.devtools.build.lib.testutil.FoundationTestCase;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-
-/**
- * Tests for {@link WriteBuildInfoPropertiesAction} utilities methods
- */
+/** Tests for {@link WriteBuildInfoPropertiesAction} utilities methods */
 @RunWith(JUnit4.class)
-public class WriteBuildInfoPropertiesActionTest extends FoundationTestCaseForJunit4 {
+public class WriteBuildInfoPropertiesActionTest extends FoundationTestCase {
 
   private static final Joiner LINE_JOINER = Joiner.on("\r\n");
   private static final Joiner LINEFEED_JOINER = Joiner.on("\n");
@@ -42,7 +39,7 @@ public class WriteBuildInfoPropertiesActionTest extends FoundationTestCaseForJun
         writer.write(testCase);
       }
     }
-    assertEquals(expected, new String(out.toByteArray(), UTF_8));
+    assertThat(new String(out.toByteArray(), UTF_8)).isEqualTo(expected);
   }
 
   @Test
@@ -50,13 +47,14 @@ public class WriteBuildInfoPropertiesActionTest extends FoundationTestCaseForJun
     assertStripFirstLine("", "");
     assertStripFirstLine("", "no linefeed");
     assertStripFirstLine("", "no", "linefeed");
-    assertStripFirstLine(LINEFEED_JOINER.join("toto", "titi"),
+    assertStripFirstLine(
+        LINEFEED_JOINER.join("toto", "titi"),
         LINEFEED_JOINER.join("# timestamp comment", "toto", "titi"));
-    assertStripFirstLine(LINE_JOINER.join("toto", "titi"),
-        LINE_JOINER.join("# timestamp comment", "toto", "titi"));
-    assertStripFirstLine(LINEFEED_JOINER.join("toto", "titi"),
-        "# timestamp comment\n", "toto\n", "titi");
-    assertStripFirstLine(LINE_JOINER.join("toto", "titi"),
-        "# timestamp comment\r\n", "toto\r\n", "titi");
+    assertStripFirstLine(
+        LINE_JOINER.join("toto", "titi"), LINE_JOINER.join("# timestamp comment", "toto", "titi"));
+    assertStripFirstLine(
+        LINEFEED_JOINER.join("toto", "titi"), "# timestamp comment\n", "toto\n", "titi");
+    assertStripFirstLine(
+        LINE_JOINER.join("toto", "titi"), "# timestamp comment\r\n", "toto\r\n", "titi");
   }
 }

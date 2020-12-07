@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
@@ -21,11 +22,18 @@ import java.io.ObjectOutputStream;
  * failure. Is not equal to anything, including itself, in order to force re-evaluation.
  */
 public final class ErrorTransienceValue implements SkyValue {
-  public static final SkyFunctionName FUNCTION_NAME = SkyFunctionName.create("ERROR_TRANSIENCE");
-  public static final SkyKey KEY = new SkyKey(FUNCTION_NAME, "ERROR_TRANSIENCE");
-  public static final ErrorTransienceValue INSTANCE = new ErrorTransienceValue();
+  private static final SkyFunctionName FUNCTION_NAME =
+      SkyFunctionName.create(
+          "ERROR_TRANSIENCE", ShareabilityOfValue.NEVER, FunctionHermeticity.NONHERMETIC);
+  @AutoCodec public static final SkyKey KEY = () -> FUNCTION_NAME;
+  @AutoCodec public static final ErrorTransienceValue INSTANCE = new ErrorTransienceValue();
 
   private ErrorTransienceValue() {}
+
+  @Override
+  public boolean dataIsShareable() {
+    return false;
+  }
 
   @Override
   public int hashCode() {

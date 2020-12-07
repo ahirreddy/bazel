@@ -15,20 +15,16 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier.RepositoryName;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
-import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import java.util.Map;
-
 import javax.annotation.Nullable;
 
 /**
@@ -45,26 +41,25 @@ public class RecursivePkgFunction implements SkyFunction {
     this.directories = directories;
   }
 
+  /**
+   * N.B.: May silently throw {@link com.google.devtools.build.lib.packages.NoSuchPackageException}
+   * in nokeep_going mode!
+   */
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env) {
+  public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
     return new MyTraversalFunction().visitDirectory((RecursivePkgKey) skyKey.argument(), env);
   }
 
   private class MyTraversalFunction
-      extends RecursiveDirectoryTraversalFunction<MyVisitor, RecursivePkgValue> {
+      extends RecursiveDirectoryTraversalFunction<MyPackageDirectoryConsumer, RecursivePkgValue> {
 
     private MyTraversalFunction() {
       super(directories);
     }
 
     @Override
-    protected RecursivePkgValue getEmptyReturn() {
-      return RecursivePkgValue.EMPTY;
-    }
-
-    @Override
-    protected MyVisitor getInitialVisitor() {
-      return new MyVisitor();
+    protected MyPackageDirectoryConsumer getInitialConsumer() {
+      return new MyPackageDirectoryConsumer();
     }
 
     @Override
@@ -75,33 +70,45 @@ public class RecursivePkgFunction implements SkyFunction {
     }
 
     @Override
-    protected RecursivePkgValue aggregateWithSubdirectorySkyValues(MyVisitor visitor,
-        Map<SkyKey, SkyValue> subdirectorySkyValues) {
+    protected RecursivePkgValue aggregateWithSubdirectorySkyValues(
+        MyPackageDirectoryConsumer consumer, Map<SkyKey, SkyValue> subdirectorySkyValues) {
       // Aggregate the transitive subpackages.
       for (SkyValue childValue : subdirectorySkyValues.values()) {
-        if (childValue != null) {
-          visitor.addTransitivePackages(((RecursivePkgValue) childValue).getPackages());
+        consumer.addTransitivePackages(((RecursivePkgValue) childValue).getPackages());
+        if (((RecursivePkgValue) childValue).hasErrors()) {
+          consumer.addTransitiveErrors();
         }
       }
-      return visitor.createRecursivePkgValue();
+      return consumer.createRecursivePkgValue();
     }
   }
 
-  private static class MyVisitor implements RecursiveDirectoryTraversalFunction.Visitor {
+  private static class MyPackageDirectoryConsumer
+      implements RecursiveDirectoryTraversalFunction.PackageDirectoryConsumer {
 
     private final NestedSetBuilder<String> packages = new NestedSetBuilder<>(Order.STABLE_ORDER);
+    private boolean hasErrors = false;
 
     @Override
-    public void visitPackageValue(Package pkg, Environment env) {
-      packages.add(pkg.getName());
+    public void notePackage(PathFragment pkgPath) {
+      packages.add(pkgPath.getPathString());
+    }
+
+    @Override
+    public void notePackageError(String noSuchPackageExceptionErrorMessage) {
+      hasErrors = true;
     }
 
     void addTransitivePackages(NestedSet<String> transitivePackages) {
       packages.addTransitive(transitivePackages);
     }
 
+    void addTransitiveErrors() {
+      hasErrors = true;
+    }
+
     RecursivePkgValue createRecursivePkgValue() {
-      return RecursivePkgValue.create(packages);
+      return RecursivePkgValue.create(packages, hasErrors);
     }
   }
 

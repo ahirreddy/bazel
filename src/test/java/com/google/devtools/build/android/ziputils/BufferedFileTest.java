@@ -14,20 +14,16 @@
 package com.google.devtools.build.android.ziputils;
 
 import static com.google.common.truth.Truth.assertWithMessage;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
+import static org.junit.Assert.assertThrows;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
-/**
- * Unit tests for {@link BufferedFile}.
- */
+/** Unit tests for {@link BufferedFile}. */
 @RunWith(JUnit4.class)
 public class BufferedFileTest {
 
@@ -190,21 +186,18 @@ public class BufferedFileTest {
 
   void assertException(String msg, FileChannel file, long off, long len, int maxAlloc,
       Class<?> expect) {
-    try {
-      new BufferedFile(file, off, len, maxAlloc);
-      fail(msg + " - no exception");
-    } catch (Exception ex) {
-      assertWithMessage(msg + " - exception, ").that(expect).isSameAs(ex.getClass());
-    }
+    Exception ex =
+        assertThrows(
+            msg + " - no exception",
+            Exception.class,
+            () -> new BufferedFile(file, off, len, maxAlloc));
+    assertWithMessage(msg + " - exception, ").that(expect).isSameInstanceAs(ex.getClass());
   }
 
   void assertException(String msg, BufferedFile instance, long off, int len, Class<?> expect) {
-    try {
-      instance.getBuffer(off, len);
-      fail(msg + " - no exception");
-    } catch (Exception ex) {
-      assertWithMessage(msg + " - exception, ").that(expect).isSameAs(ex.getClass());
-    }
+    Exception ex =
+        assertThrows(msg + " - no exception", Exception.class, () -> instance.getBuffer(off, len));
+    assertWithMessage(msg + " - exception, ").that(expect).isSameInstanceAs(ex.getClass());
   }
 
   void assertCase(String msg, BufferedFile instance, long off, int len, int expectLimit,
@@ -215,7 +208,7 @@ public class BufferedFileTest {
     assertWithMessage(msg + " - capacity, ").that(buf.capacity()).isAtLeast(expectLimit);
     assertWithMessage(msg + " - capacity, ").that(buf.capacity()).isAtMost(capacityBound);
     if (len > 0 && expectLimit > 0) {
-      assertEquals(msg + " - value, ", (byte) off, buf.get(0));
+      assertWithMessage(msg + " - value, ").that(buf.get(0)).isEqualTo((byte) off);
     }
   }
 

@@ -13,11 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -90,12 +89,7 @@ public class RelativePackageNameResolverTest {
   public void testTooFarUpwardsOneLevelThrows() throws Exception {
     createResolver("foo", true);
 
-    try {
-      resolver.resolve("../../bar");
-      fail("InvalidPackageNameException expected");
-    } catch (InvalidPackageNameException e) {
-      // good
-    }
+    assertThrows(InvalidPackageNameException.class, () -> resolver.resolve("../../bar"));
   }
 
   @Test
@@ -103,20 +97,15 @@ public class RelativePackageNameResolverTest {
     createResolver("foo/bar", true);
     assertResolvesTo("../../orange", "orange");
 
-    try {
-      resolver.resolve("../../../orange");
-      fail("InvalidPackageNameException expected");
-    } catch (InvalidPackageNameException e) {
-      // good
-    }
+    assertThrows(InvalidPackageNameException.class, () -> resolver.resolve("../../../orange"));
   }
 
   private void createResolver(String offset, boolean discardBuild) {
-    resolver = new RelativePackageNameResolver(new PathFragment(offset), discardBuild);
+    resolver = new RelativePackageNameResolver(PathFragment.create(offset), discardBuild);
   }
 
   private void assertResolvesTo(String relative, String expectedAbsolute) throws Exception {
     String result = resolver.resolve(relative);
-    assertEquals(expectedAbsolute, result);
+    assertThat(result).isEqualTo(expectedAbsolute);
   }
 }

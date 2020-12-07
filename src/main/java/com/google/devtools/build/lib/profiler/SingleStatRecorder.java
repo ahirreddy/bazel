@@ -42,7 +42,7 @@ public class SingleStatRecorder implements StatRecorder {
     histogram = new int[buckets];
   }
 
-  /** Create an snapshot of the the stats recorded up to now. */
+  /** Create an snapshot of the stats recorded up to now. */
   public MetricData snapshot() {
     synchronized (this) {
       ImmutableList.Builder<HistogramElement> result = ImmutableList.builder();
@@ -66,7 +66,8 @@ public class SingleStatRecorder implements StatRecorder {
       count++;
       double delta = duration - avg;
       avg += delta / count;
-      m2 += delta * (duration - avg);
+      double newDelta = duration - avg;
+      m2 += delta * newDelta;
       if (duration > max) {
         max = duration;
       }

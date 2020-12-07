@@ -29,6 +29,15 @@ enum ExitCode {
   // Bad environment variables. The user must modify their command line.
   BAD_ARGV = 2,
 
+  // The user interrupted the build, most probably with Ctrl-C.
+  INTERRUPTED = 8,
+
+  // The client or server lock is held, and --noblock_for_lock was passed, so
+  // this command fails fast.
+  LOCK_HELD_NOBLOCK_FOR_LOCK = 9,
+
+  // Something is wrong with the host Bazel is running on and a re-run of the
+  // same command probably will not help.
   LOCAL_ENVIRONMENTAL_ERROR = 36,
 
   // Unexpected server termination, due to e.g. external SIGKILL, misplaced

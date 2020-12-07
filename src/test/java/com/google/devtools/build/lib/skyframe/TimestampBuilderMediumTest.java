@@ -14,33 +14,30 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.cache.CompactPersistentActionCache;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.testutil.BlazeTestUtils;
 import com.google.devtools.build.lib.testutil.Suite;
 import com.google.devtools.build.lib.testutil.TestSpec;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.UnixGlob;
-
+import java.io.IOException;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.IOException;
-
 /**
- * These tests belong to {@link TimestampBuilderTest}, but they're in a
- * separate class for now because they are a little slower.
+ * These tests belong to {@link TimestampBuilderTest}, but they're in a separate class for now
+ * because they are a little slower.
  */
 @TestSpec(size = Suite.MEDIUM_TESTS)
 @RunWith(JUnit4.class)
@@ -60,10 +57,14 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     return new CompactPersistentActionCache(cacheRoot, clock);
   }
 
+  private static NestedSet<Artifact> asNestedSet(Artifact... artifacts) {
+    return NestedSetBuilder.create(Order.STABLE_ORDER, artifacts);
+  }
+
   /**
    * Creates and returns a new caching builder based on a given {@code cache}.
    */
-  private Builder persistentBuilder(CompactPersistentActionCache cache) {
+  private Builder persistentBuilder(CompactPersistentActionCache cache) throws Exception {
     return createBuilder(cache);
   }
 
@@ -74,48 +75,51 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
   @Test
   public void testUnneededInputs() throws Exception {
     Artifact hello = createSourceArtifact("hello");
-    BlazeTestUtils.makeEmptyFile(hello.getPath());
+    FileSystemUtils.createDirectoryAndParents(hello.getPath().getParentDirectory());
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content1");
     Artifact optional = createSourceArtifact("hello.optional");
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button = createActionButton(Sets.newHashSet(hello, optional), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello, optional), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
     cache = createCache();
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     BlazeTestUtils.makeEmptyFile(optional.getPath());
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content2");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     optional.getPath().delete();
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content3");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
     cache = createCache();
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
   }
 
   @Test
@@ -124,30 +128,31 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     Artifact hello = createSourceArtifact("hello");
     BlazeTestUtils.makeEmptyFile(hello.getPath());
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button = createActionButton(Sets.newHashSet(hello), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
-    FileSystemUtils.touchFile(hello.getPath());
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // rebuilt
+    hello.getPath().setWritable(true);
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "new content");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isTrue(); // rebuilt
+
+    button.pressed = false;
+    buildArtifacts(persistentBuilder(cache), goodbye);
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
     buildArtifacts(persistentBuilder(createCache()), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
   }
 
   @Test
@@ -157,34 +162,34 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     FileSystemUtils.createDirectoryAndParents(hello.getPath().getParentDirectory());
     FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content1");
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button = createActionButton(Sets.newHashSet(hello), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // still not rebuilt
+    assertThat(button.pressed).isFalse(); // still not rebuilt
 
     FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content2");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // rebuilt
+    assertThat(button.pressed).isTrue(); // rebuilt
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
     buildArtifacts(persistentBuilder(createCache()), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
   }
 
   @Test
@@ -197,28 +202,24 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     FileSystemUtils.writeContentAsLatin1(hello.getPath(), "hello");
     FileSystemUtils.writeContentAsLatin1(there.getPath(), "there");
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button =
-        createActionButton(
-            Sets.newLinkedHashSet(ImmutableList.of(hello, there)), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello, there), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Now create duplicate graph, with swapped order.
     clearActions();
     Artifact goodbye2 = createDerivedArtifact("goodbye");
-    Button button2 =
-        createActionButton(
-            Sets.newLinkedHashSet(ImmutableList.of(there, hello)), Sets.newHashSet(goodbye2));
+    Button button2 = createActionButton(asNestedSet(there, hello), ImmutableSet.of(goodbye2));
 
     button2.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button2.pressed); // still not rebuilt
+    assertThat(button2.pressed).isFalse(); // still not rebuilt
   }
 
   @Test
@@ -227,11 +228,11 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     Artifact goodbye = createDerivedArtifact("goodbye");
     FileSystemUtils.createDirectoryAndParents(goodbye.getPath().getParentDirectory());
     FileSystemUtils.writeContentAsLatin1(goodbye.getPath(), "test");
-    Button button = createActionButton(emptySet, Sets.newLinkedHashSet(ImmutableList.of(goodbye)));
+    Button button = createActionButton(emptyNestedSet, ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     // action1 is cached using the cache key /goodbye.
     assertThat(cache.get(goodbye.getExecPathString())).isNotNull();
@@ -240,12 +241,11 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     clearActions();
     Artifact hello = createDerivedArtifact("hello");
     Artifact goodbye2 = createDerivedArtifact("goodbye");
-    Button button2 =
-        createActionButton(emptySet, Sets.newLinkedHashSet(ImmutableList.of(hello, goodbye2)));
+    Button button2 = createActionButton(emptyNestedSet, ImmutableSet.of(hello, goodbye2));
 
     button2.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello, goodbye2);
-    assertTrue(button2.pressed); // rebuilt
+    assertThat(button2.pressed).isTrue(); // rebuilt
 
     // action2 is cached using the cache key /hello.
     assertThat(cache.get(hello.getExecPathString())).isNotNull();
@@ -262,15 +262,15 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     FileSystemUtils.createDirectoryAndParents(hello.getPath().getParentDirectory());
     FileSystemUtils.writeContentAsLatin1(hello.getPath(), "hello");
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button = createActionButton(Sets.newHashSet(hello), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Now create duplicate graph, replacing "hello" with "hi".
     clearActions();
@@ -278,46 +278,11 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     FileSystemUtils.createDirectoryAndParents(hi.getPath().getParentDirectory());
     FileSystemUtils.writeContentAsLatin1(hi.getPath(), "hello");
     Artifact goodbye2 = createDerivedArtifact("goodbye");
-    Button button2 = createActionButton(Sets.newHashSet(hi), Sets.newHashSet(goodbye2));
+    Button button2 = createActionButton(asNestedSet(hi), ImmutableSet.of(goodbye2));
 
     button2.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye2);
-    assertTrue(button2.pressed); // name changed. must rebuild.
-  }
-
-  @Test
-  public void testDuplicateInputs() throws Exception {
-    // (/hello,/hello) -> [action] -> /goodbye
-
-    Artifact hello = createSourceArtifact("hello");
-    FileSystemUtils.createDirectoryAndParents(hello.getPath().getParentDirectory());
-    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "hello");
-    Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button =
-        createActionButton(Lists.<Artifact>newArrayList(hello, hello), Sets.newHashSet(goodbye));
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
-
-    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "hello2");
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // rebuilt
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
-
-    // Creating a new persistent cache does not cause a rebuild
-    cache.save();
-    buildArtifacts(persistentBuilder(createCache()), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button2.pressed).isTrue(); // name changed. must rebuild.
   }
 
   /**
@@ -332,123 +297,125 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
     FileSystemUtils.createDirectoryAndParents(hello.getPath().getParentDirectory());
     FileSystemUtils.writeContentAsLatin1(hello.getPath(), "content1");
     Artifact goodbye = createDerivedArtifact("goodbye");
-    Button button = createActionButton(Sets.newHashSet(hello), Sets.newHashSet(goodbye));
+    Button button = createActionButton(asNestedSet(hello), ImmutableSet.of(goodbye));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent caches, including metadata cache does not cause
     // a rebuild
     cache.save();
     Builder builder = persistentBuilder(createCache());
     buildArtifacts(builder, goodbye);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
   }
 
   @Test
   public void testPersistentCache_ModifyingOutputCausesActionReexecution() throws Exception {
     // [action] -> /hello
     Artifact hello = createDerivedArtifact("hello");
-    Button button = createActionButton(emptySet, Sets.newHashSet(hello));
+    Button button = createActionButton(emptyNestedSet, ImmutableSet.of(hello));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
-    BlazeTestUtils.changeModtime(hello.getPath());
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // rebuilt
+    hello.getPath().setWritable(true);
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "new content");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isTrue(); // rebuilt
+
+    button.pressed = false;
+    buildArtifacts(persistentBuilder(cache), hello);
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
     buildArtifacts(persistentBuilder(createCache()), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
   }
 
   @Test
   public void testPersistentCache_missingFilenameIndexCausesActionReexecution() throws Exception {
     // [action] -> /hello
     Artifact hello = createDerivedArtifact("hello");
-    Button button = createActionButton(emptySet, Sets.newHashSet(hello));
+    Button button = createActionButton(emptyNestedSet, ImmutableSet.of(hello));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
-    BlazeTestUtils.changeModtime(hello.getPath());
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // rebuilt
+    hello.getPath().setWritable(true);
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "new content");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isTrue(); // rebuilt
+
+    button.pressed = false;
+    buildArtifacts(persistentBuilder(cache), hello);
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Creating a new persistent cache does not cause a rebuild
     cache.save();
 
     // Remove filename index file.
-    assertTrue(
-        Iterables.getOnlyElement(
-                UnixGlob.forPath(cacheRoot).addPattern("filename_index*").globInterruptible())
-            .delete());
+    assertThat(
+            Iterables.getOnlyElement(
+                    UnixGlob.forPath(cacheRoot).addPattern("filename_index*").globInterruptible())
+                .delete())
+        .isTrue();
 
     // Now first cache creation attempt should cause IOException while renaming corrupted files.
     // Second attempt will initialize empty cache, causing rebuild.
-    try {
-      createCache();
-      fail("Expected IOException");
-    } catch (IOException e) {
-      assertThat(e).hasMessage("Failed action cache referential integrity check: empty index");
-    }
+    IOException e = assertThrows(IOException.class, () -> createCache());
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("Failed action cache referential integrity check: empty index");
 
     buildArtifacts(persistentBuilder(createCache()), hello);
-    assertTrue(button.pressed); // rebuilt due to the missing filename index
+    assertThat(button.pressed).isTrue(); // rebuilt due to the missing filename index
   }
 
   @Test
   public void testPersistentCache_failedIntegrityCheckCausesActionReexecution() throws Exception {
     // [action] -> /hello
     Artifact hello = createDerivedArtifact("hello");
-    Button button = createActionButton(emptySet, Sets.newHashSet(hello));
+    Button button = createActionButton(emptyNestedSet, ImmutableSet.of(hello));
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // built
+    assertThat(button.pressed).isTrue(); // built
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
-    BlazeTestUtils.changeModtime(hello.getPath());
-
-    button.pressed = false;
-    buildArtifacts(persistentBuilder(cache), hello);
-    assertTrue(button.pressed); // rebuilt
+    hello.getPath().setWritable(true);
+    FileSystemUtils.writeContentAsLatin1(hello.getPath(), "new content");
 
     button.pressed = false;
     buildArtifacts(persistentBuilder(cache), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isTrue(); // rebuilt
+
+    button.pressed = false;
+    buildArtifacts(persistentBuilder(cache), hello);
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     cache.save();
 
@@ -461,31 +428,27 @@ public class TimestampBuilderMediumTest extends TimestampBuilderTestCase {
 
     // Add extra records to the action cache and indexer.
     Artifact helloExtra = createDerivedArtifact("hello_extra");
-    Button buttonExtra = createActionButton(emptySet, Sets.newHashSet(helloExtra));
+    Button buttonExtra = createActionButton(emptyNestedSet, ImmutableSet.of(helloExtra));
     buildArtifacts(persistentBuilder(cache), helloExtra);
-    assertTrue(buttonExtra.pressed); // built
+    assertThat(buttonExtra.pressed).isTrue(); // built
 
     cache.save();
-    assertTrue(indexPath.getFileSize() > indexCopy.getFileSize());
+    assertThat(indexPath.getFileSize()).isGreaterThan(indexCopy.getFileSize());
 
     // Validate current cache.
     buildArtifacts(persistentBuilder(createCache()), hello);
-    assertFalse(button.pressed); // not rebuilt
+    assertThat(button.pressed).isFalse(); // not rebuilt
 
     // Restore outdated file index.
     FileSystemUtils.copyFile(indexCopy, indexPath);
 
     // Now first cache creation attempt should cause IOException while renaming corrupted files.
     // Second attempt will initialize empty cache, causing rebuild.
-    try {
-      createCache();
-      fail("Expected IOException");
-    } catch (IOException e) {
-      assertThat(e.getMessage()).contains("Failed action cache referential integrity check");
-    }
+    IOException e = assertThrows(IOException.class, () -> createCache());
+    assertThat(e).hasMessageThat().contains("Failed action cache referential integrity check");
 
     // Validate cache with incorrect (out-of-date) filename index.
     buildArtifacts(persistentBuilder(createCache()), hello);
-    assertTrue(button.pressed); // rebuilt due to the out-of-date index
+    assertThat(button.pressed).isTrue(); // rebuilt due to the out-of-date index
   }
 }

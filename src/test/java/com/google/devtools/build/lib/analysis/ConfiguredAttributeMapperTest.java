@@ -14,23 +14,22 @@
 package com.google.devtools.build.lib.analysis;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
-import com.google.devtools.build.lib.syntax.Type;
-
+import com.google.devtools.build.lib.packages.ConfiguredAttributeMapper;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Unit tests for {@link ConfiguredAttributeMapper}.
@@ -42,24 +41,24 @@ import java.util.List;
  * all attribute mappers.
  */
 @RunWith(JUnit4.class)
-public class ConfiguredAttributeMapperTest extends BuildViewTestCaseForJunit4 {
+public class ConfiguredAttributeMapperTest extends BuildViewTestCase {
 
   /**
    * Returns a ConfiguredAttributeMapper bound to the given rule with the target configuration.
    */
   private ConfiguredAttributeMapper getMapper(String label) throws Exception {
-    return ConfiguredAttributeMapper.of(
-        (RuleConfiguredTarget) getConfiguredTarget(label));
+    ConfiguredTargetAndData ctad = getConfiguredTargetAndData(label);
+    return getMapperFromConfiguredTargetAndTarget(ctad);
   }
 
   private void writeConfigRules() throws Exception {
     scratch.file("conditions/BUILD",
         "config_setting(",
         "    name = 'a',",
-        "    values = {'compilation_mode': 'opt'})",
+        "    values = {'define': 'mode=a'})",
         "config_setting(",
         "    name = 'b',",
-        "    values = {'compilation_mode': 'dbg'})");
+        "    values = {'define': 'mode=b'})");
   }
 
   /**
@@ -80,14 +79,14 @@ public class ConfiguredAttributeMapperTest extends BuildViewTestCaseForJunit4 {
         "        '" + BuildType.Selector.DEFAULT_CONDITION_KEY + "': 'default command',",
         "    }))");
 
-    useConfiguration("-c", "opt");
-    assertEquals("a command", getMapper("//a:gen").get("cmd", Type.STRING));
+    useConfiguration("--define", "mode=a");
+    assertThat(getMapper("//a:gen").get("cmd", Type.STRING)).isEqualTo("a command");
 
-    useConfiguration("-c", "dbg");
-    assertEquals("b command", getMapper("//a:gen").get("cmd", Type.STRING));
+    useConfiguration("--define", "mode=b");
+    assertThat(getMapper("//a:gen").get("cmd", Type.STRING)).isEqualTo("b command");
 
-    useConfiguration("-c", "fastbuild");
-    assertEquals("default command", getMapper("//a:gen").get("cmd", Type.STRING));
+    useConfiguration("--define", "mode=c");
+    assertThat(getMapper("//a:gen").get("cmd", Type.STRING)).isEqualTo("default command");
   }
 
   /**
@@ -115,35 +114,34 @@ public class ConfiguredAttributeMapperTest extends BuildViewTestCaseForJunit4 {
         "    name = 'defaultdep',",
         "    srcs = ['defaultdep.sh'])");
 
-    final List<Label> visitedLabels = new ArrayList<>();
-    AttributeMap.AcceptsLabelAttribute testVisitor =
-        new AttributeMap.AcceptsLabelAttribute() {
-          @Override
-          public void acceptLabelAttribute(Label label, Attribute attribute) {
-            if (label.toString().contains("//a:")) { // Ignore implicit common dependencies.
-              visitedLabels.add(label);
-            }
-          }
-        };
+    List<Label> visitedLabels = new ArrayList<>();
+    Label binSrc = Label.parseAbsolute("//a:bin.sh", ImmutableMap.of());
 
-    final Label binSrc = Label.parseAbsolute("//a:bin.sh");
-
-    useConfiguration("-c", "opt");
-    getMapper("//a:bin").visitLabels(testVisitor);
+    useConfiguration("--define", "mode=a");
+    addRelevantLabels(getMapper("//a:bin").visitLabels(), visitedLabels);
     assertThat(visitedLabels)
-        .containsExactlyElementsIn(ImmutableList.of(binSrc, Label.parseAbsolute("//a:adep")));
+        .containsExactly(binSrc, Label.parseAbsolute("//a:adep", ImmutableMap.of()));
 
     visitedLabels.clear();
-    useConfiguration("-c", "dbg");
-    getMapper("//a:bin").visitLabels(testVisitor);
+    useConfiguration("--define", "mode=b");
+    addRelevantLabels(getMapper("//a:bin").visitLabels(), visitedLabels);
     assertThat(visitedLabels)
-        .containsExactlyElementsIn(ImmutableList.of(binSrc, Label.parseAbsolute("//a:bdep")));
+        .containsExactly(binSrc, Label.parseAbsolute("//a:bdep", ImmutableMap.of()));
 
     visitedLabels.clear();
-    useConfiguration("-c", "fastbuild");
-    getMapper("//a:bin").visitLabels(testVisitor);
+    useConfiguration("--define", "mode=c");
+    addRelevantLabels(getMapper("//a:bin").visitLabels(), visitedLabels);
     assertThat(visitedLabels)
-        .containsExactlyElementsIn(ImmutableList.of(binSrc, Label.parseAbsolute("//a:defaultdep")));
+        .containsExactly(binSrc, Label.parseAbsolute("//a:defaultdep", ImmutableMap.of()));
+  }
+
+  private static void addRelevantLabels(
+      Collection<AttributeMap.DepEdge> depEdges, Collection<Label> visitedLabels) {
+    depEdges
+        .stream()
+        .map(AttributeMap.DepEdge::getLabel)
+        .filter((label) -> label.getPackageIdentifier().getPackageFragment().toString().equals("a"))
+        .forEach(visitedLabels::add);
   }
 
   /**
@@ -173,17 +171,22 @@ public class ConfiguredAttributeMapperTest extends BuildViewTestCaseForJunit4 {
         "sh_binary(",
         "    name = 'defaultdep',",
         "    srcs = ['defaultdep.sh'])");
-    useConfiguration("-c", "dbg");
+    useConfiguration("--define", "mode=b");
 
     // Target configuration is in dbg mode, so we should match //conditions:b:
     assertThat(getMapper("//a:gen").get("tools", BuildType.LABEL_LIST))
-        .containsExactlyElementsIn(ImmutableList.of(Label.parseAbsolute("//a:bdep")));
+        .containsExactly(Label.parseAbsolute("//a:bdep", ImmutableMap.of()));
 
     // Verify the "tools" dep uses a different configuration that's not also in "dbg":
-    assertEquals(Attribute.ConfigurationTransition.HOST,
-        getTarget("//a:gen").getAssociatedRule().getRuleClassObject()
-            .getAttributeByName("tools").getConfigurationTransition());
-    assertEquals(CompilationMode.OPT, getHostConfiguration().getCompilationMode());
+    assertThat(
+            getTarget("//a:gen")
+                .getAssociatedRule()
+                .getRuleClassObject()
+                .getAttributeByName("tools")
+                .getTransitionFactory()
+                .isHost())
+        .isTrue();
+    assertThat(getHostConfiguration().getCompilationMode()).isEqualTo(CompilationMode.OPT);
   }
 
   @Test
@@ -202,8 +205,102 @@ public class ConfiguredAttributeMapperTest extends BuildViewTestCaseForJunit4 {
         ")");
     useConfiguration("--define", "foo=a", "--define", "bar=d");
     assertThat(getMapper("//hello:gen").get("srcs", BuildType.LABEL_LIST))
-        .containsExactlyElementsIn(
-            ImmutableList.of(
-                Label.parseAbsolute("//hello:a.in"), Label.parseAbsolute("//hello:d.in")));
+        .containsExactly(
+            Label.parseAbsolute("//hello:a.in", ImmutableMap.of()),
+            Label.parseAbsolute("//hello:d.in", ImmutableMap.of()));
+  }
+
+  @Test
+  public void testNoneValuesMeansAttributeIsNotExplicitlySet() throws Exception {
+    writeConfigRules();
+    scratch.file("a/BUILD",
+        "genrule(",
+        "    name = 'gen',",
+        "    srcs = [],",
+        "    outs = ['out'],",
+        "    cmd = '',",
+        "    message = select({",
+        "        '//conditions:a': 'defined message',",
+        "        '//conditions:b': None,",
+        "    }))");
+
+    useConfiguration("--define", "mode=a");
+    assertThat(getMapper("//a:gen").isAttributeValueExplicitlySpecified("message")).isTrue();
+
+    useConfiguration("--define", "mode=b");
+    assertThat(getMapper("//a:gen").isAttributeValueExplicitlySpecified("message")).isFalse();
+  }
+
+  @Test
+  public void testNoneValuesWithMultipleSelectsAllNone() throws Exception {
+    writeConfigRules();
+    scratch.file("a/BUILD",
+        "genrule(",
+        "    name = 'gen',",
+        "    srcs = [],",
+        "    outs = ['out'],",
+        "    cmd = '',",
+        "    message = select({",
+        "        '//conditions:a': 'defined message 1',",
+        "        '//conditions:b': None,",
+        "    }) + select({",
+        "        '//conditions:a': 'defined message 2',",
+        "        '//conditions:b': None,",
+        "    }),",
+        ")");
+
+    useConfiguration("--define", "mode=a");
+    assertThat(getMapper("//a:gen").isAttributeValueExplicitlySpecified("message")).isTrue();
+
+    useConfiguration("--define", "mode=b");
+    assertThat(getMapper("//a:gen").isAttributeValueExplicitlySpecified("message")).isFalse();
+  }
+
+  @Test
+  public void testNoneValueOnDefaultConditionWithNullDefault() throws Exception {
+    writeConfigRules();
+    scratch.file("a/BUILD",
+        "cc_library(",
+        "    name = 'lib',",
+        "    srcs = ['lib.cc'],",
+        "    linkstamp = select({",
+        "        '//conditions:a': 'notused_linkstamp.cc',",
+        "        '" + BuildType.Selector.DEFAULT_CONDITION_KEY + "': None,",
+        "    }),",
+        ")");
+
+    useConfiguration();
+    assertThat(getMapper("//a:lib").isAttributeValueExplicitlySpecified("linkstamp")).isFalse();
+    assertThat(getMapper("//a:lib").get("linkstamp", BuildType.LABEL)).isNull();
+  }
+
+  @Test
+  public void testNoneValueOnMandatoryAttribute() throws Exception {
+    scratch.file("a/BUILD", "alias(name='a', actual=select({'//conditions:default': None}))");
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//a:a");
+    assertContainsEvent("Mandatory attribute 'actual' resolved to 'None'");
+  }
+
+  @Test
+  public void testAliasedConfigSetting() throws Exception {
+    writeConfigRules();
+    scratch.file(
+        "a/BUILD",
+        "alias(",
+        "    name = 'aliased_a',",
+        "    actual = '//conditions:a',",
+        ")",
+        "genrule(",
+        "    name = 'gen',",
+        "    srcs = [],",
+        "    outs = ['out'],",
+        "    cmd = '',",
+        "    message = select({",
+        "        ':aliased_a': 'defined message',",
+        "        '//conditions:default': None,",
+        "    }))");
+    useConfiguration("--define", "mode=a");
+    assertThat(getMapper("//a:gen").get("message", Type.STRING)).isEqualTo("defined message");
   }
 }

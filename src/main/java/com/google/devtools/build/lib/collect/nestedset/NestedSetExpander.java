@@ -1,4 +1,4 @@
-// Copyright 2014 The Bazel Authors. All rights reserved.
+// Copyright 2020 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,18 +13,20 @@
 // limitations under the License.
 package com.google.devtools.build.lib.collect.nestedset;
 
-import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
+import java.util.concurrent.TimeoutException;
 
 /**
- * An expander that converts a nested set into a flattened collection.
+ * Helper class to expand {@link NestedSet} instances.
  *
- * <p>Expanders are initialized statically (there is one for each order), so they should
- * contain no state and all methods must be threadsafe.
+ * <p>Implementations besides {@link #DEFAULT} may wish to implement callbacks or timeouts for
+ * dealing with expansions of sets from storage.
  */
-interface NestedSetExpander<E> {
-  /**
-   * Flattens the NestedSet into the builder.
-   */
-  void expandInto(NestedSet<E> nestedSet, Uniqueifier uniqueifier,
-      ImmutableCollection.Builder<E> builder);
+public interface NestedSetExpander {
+
+  <T> ImmutableList<? extends T> toListInterruptibly(NestedSet<? extends T> nestedSet)
+      throws InterruptedException, TimeoutException;
+
+  /** Simply delegates to {@link NestedSet#toListInterruptibly} without doing anything special. */
+  NestedSetExpander DEFAULT = NestedSet::toListInterruptibly;
 }

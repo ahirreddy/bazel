@@ -16,155 +16,132 @@ package com.google.devtools.build.lib.syntax;
 import javax.annotation.Nullable;
 
 /**
- * Syntax node for a Parameter in a function (or lambda) definition; it's a subclass of Argument,
- * and contrasts with the class Argument.Passed of arguments in a function call.
+ * Syntax node for a parameter in a function definition.
  *
- * <p>There are four concrete subclasses of Parameter: Mandatory, Optional, Star, StarStar.
- *
- * <p>See FunctionSignature for how a valid list of Parameter's is organized as a signature, e.g.
- * def foo(mandatory, optional = e1, *args, mandatorynamedonly, optionalnamedonly = e2, **kw): ...
- *
- * <p>V is the class of a defaultValue (Expression at compile-time, Object at runtime),
- * T is the class of a type (Expression at compile-time, SkylarkType at runtime).
+ * <p>Parameters may be of four forms, as in {@code def f(a, b=c, *args, **kwargs)}. They are
+ * represented by the subclasses Mandatory, Optional, Star, and StarStar.
  */
-public abstract class Parameter<V, T> extends Argument {
+public abstract class Parameter extends Node {
 
-  @Nullable protected String name;
-  @Nullable protected final T type;
+  @Nullable private final Identifier id;
 
-  private Parameter(@Nullable String name, @Nullable T type) {
-    this.name = name;
-    this.type = type;
-  }
-  private Parameter(@Nullable String name) {
-    this.name = name;
-    this.type = null;
+  private Parameter(FileLocations locs, @Nullable Identifier id) {
+    super(locs);
+    this.id = id;
   }
 
-  public boolean isMandatory() {
-    return false;
+  @Nullable
+  public String getName() {
+    return id != null ? id.getName() : null;
   }
-  public boolean isOptional() {
-    return false;
+
+  @Nullable
+  public Identifier getIdentifier() {
+    return id;
   }
-  public boolean isStar() {
-    return false;
-  }
-  public boolean isStarStar() {
-    return false;
-  }
-  @Nullable public String getName() {
-    return name;
-  }
-  public boolean hasName() {
-    return true;
-  }
-  @Nullable public T getType() {
-    return type;
-  }
-  @Nullable public V getDefaultValue() {
+
+  @Nullable
+  public Expression getDefaultValue() {
     return null;
   }
 
-  /** mandatory parameter (positional or key-only depending on position): Ident */
-  public static class Mandatory<V, T> extends Parameter<V, T> {
-
-    public Mandatory(String name) {
-      super(name);
-    }
-
-    public Mandatory(String name, @Nullable T type) {
-      super(name, type);
-    }
-
-    @Override public boolean isMandatory() {
-      return true;
+  /**
+   * Syntax node for a mandatory parameter, {@code f(id)}. It may be positional or keyword-only
+   * depending on its position.
+   */
+  public static final class Mandatory extends Parameter {
+    Mandatory(FileLocations locs, Identifier id) {
+      super(locs, id);
     }
 
     @Override
-    public String toString() {
-      return name.toString();
+    public int getStartOffset() {
+      return getIdentifier().getStartOffset();
+    }
+
+    @Override
+    public int getEndOffset() {
+      return getIdentifier().getEndOffset();
     }
   }
 
-  /** optional parameter (positional or key-only depending on position): Ident = Value */
-  public static class Optional<V, T> extends Parameter<V, T> {
-    public final V defaultValue;
+  /**
+   * Syntax node for an optional parameter, {@code f(id=expr).}. It may be positional or
+   * keyword-only depending on its position.
+   */
+  public static final class Optional extends Parameter {
 
-    public Optional(String name, @Nullable V defaultValue) {
-      super(name);
+    public final Expression defaultValue;
+
+    Optional(FileLocations locs, Identifier id, @Nullable Expression defaultValue) {
+      super(locs, id);
       this.defaultValue = defaultValue;
     }
 
-    public Optional(String name, @Nullable T type, @Nullable V defaultValue) {
-      super(name, type);
-      this.defaultValue = defaultValue;
-    }
-
-    @Override @Nullable public V getDefaultValue() {
+    @Override
+    @Nullable
+    public Expression getDefaultValue() {
       return defaultValue;
     }
 
-    @Override public boolean isOptional() {
-      return true;
+    @Override
+    public int getStartOffset() {
+      return getIdentifier().getStartOffset();
+    }
+
+    @Override
+    public int getEndOffset() {
+      return getDefaultValue().getEndOffset();
     }
 
     @Override
     public String toString() {
-      return name + "=" + defaultValue;
+      return getName() + "=" + defaultValue;
     }
   }
 
-  /** extra positionals parameter (star): *identifier */
-  public static class Star<V, T> extends Parameter<V, T> {
-    public Star(@Nullable String name, @Nullable T type) {
-      super(name, type);
-    }
+  /** Syntax node for a star parameter, {@code f(*id)} or or {@code f(..., *, ...)}. */
+  public static final class Star extends Parameter {
+    private final int starOffset;
 
-    public Star(@Nullable String name) {
-      super(name);
+    Star(FileLocations locs, int starOffset, @Nullable Identifier id) {
+      super(locs, id);
+      this.starOffset = starOffset;
     }
 
     @Override
-    public boolean hasName() {
-      return name != null;
+    public int getStartOffset() {
+      return starOffset;
     }
 
-    @Override public boolean isStar() {
-      return true;
-    }
-
-    @Override public String toString() {
-      if (name == null) {
-        return "*";
-      } else {
-        return "*" + name;
-      }
+    @Override
+    public int getEndOffset() {
+      return getIdentifier().getEndOffset();
     }
   }
 
-  /** extra keywords parameter (star_star): **identifier */
-  public static class StarStar<V, T> extends Parameter<V, T> {
-    public StarStar(String name, @Nullable T type) {
-      super(name, type);
-    }
+  /** Syntax node for a parameter of the form {@code f(**id)}. */
+  public static final class StarStar extends Parameter {
+    private final int starStarOffset;
 
-    public StarStar(String name) {
-      super(name);
-    }
-
-    @Override public boolean isStarStar() {
-      return true;
+    StarStar(FileLocations locs, int starStarOffset, Identifier id) {
+      super(locs, id);
+      this.starStarOffset = starStarOffset;
     }
 
     @Override
-    public String toString() {
-      return "**" + name;
+    public int getStartOffset() {
+      return starStarOffset;
+    }
+
+    @Override
+    public int getEndOffset() {
+      return getIdentifier().getEndOffset();
     }
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 }

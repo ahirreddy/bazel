@@ -16,17 +16,15 @@ package com.google.devtools.build.lib.analysis;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.ExtraActionArtifactsProvider.ExtraArtifactSet;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.extra.ExtraActionMapProvider;
+import com.google.devtools.build.lib.analysis.extra.ExtraActionSpec;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.rules.extra.ExtraActionMapProvider;
-import com.google.devtools.build.lib.rules.extra.ExtraActionSpec;
-
 import java.util.List;
+import java.util.Set;
 
 /**
  * A collection of static methods related to ExtraActions.
@@ -42,14 +40,15 @@ class ExtraActionUtils {
    * extra_action are reported to the {@link AnalysisEnvironment} for
    * bookkeeping.
    */
-  static ExtraActionArtifactsProvider createExtraActionProvider(RuleContext ruleContext) {
+  static ExtraActionArtifactsProvider createExtraActionProvider(
+      Set<ActionAnalysisMetadata> actionsWithoutExtraAction, RuleContext ruleContext) {
     BuildConfiguration configuration = ruleContext.getConfiguration();
-    if (configuration.isHostConfiguration()) {
+    if (configuration.isToolConfiguration()) {
       return ExtraActionArtifactsProvider.EMPTY;
     }
 
-    ImmutableList<Artifact> extraActionArtifacts = ImmutableList.of();
-    NestedSetBuilder<ExtraArtifactSet> builder = NestedSetBuilder.stableOrder();
+    ImmutableList<Artifact.DerivedArtifact> extraActionArtifacts = ImmutableList.of();
+    NestedSetBuilder<Artifact.DerivedArtifact> builder = NestedSetBuilder.stableOrder();
 
     List<Label> actionListenerLabels = configuration.getActionListeners();
     if (!actionListenerLabels.isEmpty()
@@ -57,16 +56,18 @@ class ExtraActionUtils {
       ExtraActionsVisitor visitor =
           new ExtraActionsVisitor(ruleContext, computeMnemonicsToExtraActionMap(ruleContext));
 
-      // The action list is modified within the body of the loop by the addExtraAction() call,
+      // The action list is modified within the body of the loop by the maybeAddExtraAction() call,
       // thus the copy
-      for (Action action : ImmutableList.copyOf(
-          ruleContext.getAnalysisEnvironment().getRegisteredActions())) {
-        visitor.addExtraAction(action);
+      for (ActionAnalysisMetadata action :
+          ImmutableList.copyOf(ruleContext.getAnalysisEnvironment().getRegisteredActions())) {
+        if (!actionsWithoutExtraAction.contains(action)) {
+          visitor.maybeAddExtraAction(action);
+        }
       }
 
       extraActionArtifacts = visitor.getAndResetExtraArtifacts();
       if (!extraActionArtifacts.isEmpty()) {
-        builder.add(ExtraArtifactSet.of(ruleContext.getLabel(), extraActionArtifacts));
+        builder.addAll(extraActionArtifacts);
       }
     }
 
@@ -77,7 +78,9 @@ class ExtraActionUtils {
     }
 
     return ExtraActionArtifactsProvider.create(
-        NestedSetBuilder.<Artifact>stableOrder().addAll(extraActionArtifacts).build(),
+        NestedSetBuilder.<Artifact.DerivedArtifact>stableOrder()
+            .addAll(extraActionArtifacts)
+            .build(),
         builder.build());
   }
 
@@ -91,7 +94,7 @@ class ExtraActionUtils {
     // We copy the multimap here every time. This could be expensive.
     Multimap<String, ExtraActionSpec> mnemonicToExtraActionMap = HashMultimap.create();
     for (TransitiveInfoCollection actionListener :
-        ruleContext.getPrerequisites(":action_listener", Mode.HOST)) {
+        ruleContext.getPrerequisites(":action_listener", TransitionMode.HOST)) {
       ExtraActionMapProvider provider = actionListener.getProvider(ExtraActionMapProvider.class);
       if (provider == null) {
         ruleContext.ruleError(String.format(

@@ -13,102 +13,343 @@
 // limitations under the License.
 package com.google.devtools.build.lib.query2.engine;
 
-
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.devtools.build.lib.collect.CompactHashSet;
-
+import com.google.devtools.build.lib.collect.compacthashset.CompactHashSet;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.MutableMap;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskCallable;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ThreadSafeMutableSet;
+import java.util.AbstractSet;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.annotation.Nullable;
 
 /** Several query utilities to make easier to work with query callbacks and uniquifiers. */
 public final class QueryUtil {
 
   private QueryUtil() { }
 
-  /** A callback that can aggregate all the partial results in one set */
-  public static class AggregateAllCallback<T> implements Callback<T> {
+  /** A {@link Callback} that can aggregate all the partial results into one set. */
+  public interface AggregateAllCallback<T, S extends Set<T>> extends Callback<T> {
+    /** Returns a {@link Set} of all the results. */
+    S getResult();
+  }
 
-    private final CompactHashSet<T> result = CompactHashSet.create();
+  /** A {@link OutputFormatterCallback} that is also a {@link AggregateAllCallback}. */
+  public abstract static class AggregateAllOutputFormatterCallback<T, S extends Set<T>>
+      extends ThreadSafeOutputFormatterCallback<T> implements AggregateAllCallback<T, S>  {
+  }
+
+  private static class AggregateAllOutputFormatterCallbackImpl<T>
+      extends AggregateAllOutputFormatterCallback<T, ThreadSafeMutableSet<T>> {
+    private final ThreadSafeMutableSet<T> result;
+
+    private AggregateAllOutputFormatterCallbackImpl(QueryEnvironment<T> env) {
+      this.result = env.createThreadSafeMutableSet();
+    }
 
     @Override
-    public void process(Iterable<T> partialResult) throws QueryException, InterruptedException {
+    public final void processOutput(Iterable<T> partialResult) {
       Iterables.addAll(result, partialResult);
     }
 
-    public Set<T> getResult() {
+    @Override
+    public ThreadSafeMutableSet<T> getResult() {
       return result;
     }
+  }
+
+  private static class OrderedAggregateAllOutputFormatterCallbackImpl<T>
+      extends AggregateAllOutputFormatterCallback<T, Set<T>> {
+    private final Set<T> resultSet;
+    private final List<T> resultList;
+
+    private OrderedAggregateAllOutputFormatterCallbackImpl(QueryEnvironment<T> env) {
+      this.resultSet = env.createThreadSafeMutableSet();
+      this.resultList = new ArrayList<>();
+    }
 
     @Override
-    public String toString() {
-      return "Aggregate all: " + result;
+    public final synchronized void processOutput(Iterable<T> partialResult) {
+      for (T element : partialResult) {
+        if (resultSet.add(element)) {
+          resultList.add(element);
+        }
+      }
+    }
+
+    @Override
+    public synchronized Set<T> getResult() {
+      // A CompactHashSet's iteration order is the same as its insertion order.
+      CompactHashSet<T> result = CompactHashSet.createWithExpectedSize(resultList.size());
+      result.addAll(resultList);
+      return result;
     }
   }
 
   /**
-   * Fully evaluate a {@code QueryExpression} and return a set with all the results.
-   *
-   * <p>Should ony be used by QueryExpressions when it is the only way of achieving correctness.
+   * Returns a fresh {@link AggregateAllOutputFormatterCallback} instance whose
+   * {@link AggregateAllCallback#getResult} returns all the elements of the result in the order they
+   * were processed.
    */
-  public static <T> Set<T> evalAll(QueryEnvironment<T> env, QueryExpression expr)
-      throws QueryException, InterruptedException {
-    AggregateAllCallback<T> callback = new AggregateAllCallback<>();
-    env.eval(expr, callback);
-    return callback.result;
+  public static <T> AggregateAllOutputFormatterCallback<T, Set<T>>
+      newOrderedAggregateAllOutputFormatterCallback(QueryEnvironment<T> env) {
+    return new OrderedAggregateAllOutputFormatterCallbackImpl<>(env);
   }
 
   /**
-   * Notify {@code parentCallback} only about the events that match {@code retainIfTrue} predicate.
-   *
-   * @param parentCallback The parent callback to notify with the matching elements
-   * @param retainIfTrue A predicate that defines what elements to notify to the parent callback.
+   * Returns a fresh {@link AggregateAllCallback} instance that aggregates all of the values into an
+   * {@link ThreadSafeMutableSet}.
    */
-  public static <T> Callback<T> filteredCallback(final Callback<T> parentCallback,
-      final Predicate<T> retainIfTrue) {
-    return new Callback<T>() {
-      @Override
-      public void process(Iterable<T> partialResult) throws QueryException, InterruptedException {
-        Iterable<T> filter = Iterables.filter(partialResult, retainIfTrue);
-        if (!Iterables.isEmpty(filter)) {
-          parentCallback.process(filter);
-        }
-      }
-
-      @Override
-      public String toString() {
-        return "filtered parentCallback of : " + retainIfTrue;
-      }
-    };
+  public static <T> AggregateAllCallback<T, ThreadSafeMutableSet<T>> newAggregateAllCallback(
+      QueryEnvironment<T> env) {
+    return new AggregateAllOutputFormatterCallbackImpl<>(env);
   }
 
   /**
-   * An uniquifier that uses a CompactHashSet and a key extractor for making the elements unique.
+   * Returns a {@link QueryTaskFuture} representing the evaluation of {@code expr} as a mutable,
+   * thread safe {@link Set} comprised of all the results.
    *
-   * <p>Using a key extractor allows to improve memory since we don't have to keep the whole element
-   * in the set but just the key.
+   * <p>Should only be used by QueryExpressions when it is the only way of achieving correctness.
    */
-  public abstract static class AbstractUniquifier<T, K> implements Uniquifier<T> {
+  public static <T> QueryTaskFuture<ThreadSafeMutableSet<T>> evalAll(
+      QueryEnvironment<T> env, QueryExpressionContext<T> context, QueryExpression expr) {
+    final AggregateAllCallback<T, ThreadSafeMutableSet<T>> callback = newAggregateAllCallback(env);
+    return env.whenSucceedsCall(
+        env.eval(expr, context, callback),
+        new QueryTaskCallable<ThreadSafeMutableSet<T>>() {
+          @Override
+          public ThreadSafeMutableSet<T> call() {
+            return callback.getResult();
+          }
+        });
+  }
 
-    private final CompactHashSet<K> alreadySeen = CompactHashSet.create();
+  /**
+   * A mutable thread safe {@link Set} that uses a {@link KeyExtractor} for determining equality of
+   * its elements. This is useful e.g. when {@code T} isn't guaranteed to have a useful
+   * {@link Object#equals} and {@link Object#hashCode} but {@code K} is.
+   */
+  public static class ThreadSafeMutableKeyExtractorBackedSetImpl<T, K>
+      extends AbstractSet<T> implements ThreadSafeMutableSet<T> {
+    private final KeyExtractor<T, K> extractor;
+    private final Class<T> elementClass;
+    private final ConcurrentMap<K, T> map;
+
+    public ThreadSafeMutableKeyExtractorBackedSetImpl(
+        KeyExtractor<T, K> extractor, Class<T> elementClass) {
+      this(extractor, elementClass, /*concurrencyLevel=*/ 1);
+    }
+
+    public ThreadSafeMutableKeyExtractorBackedSetImpl(
+        KeyExtractor<T, K> extractor,
+        Class<T> elementClass,
+        int concurrencyLevel) {
+      this.extractor = extractor;
+      this.elementClass = elementClass;
+      this.map =
+          new ConcurrentHashMap<>(/*initialCapacity=*/ concurrencyLevel, /*loadFactor=*/ 0.75f);
+    }
 
     @Override
-    public final ImmutableList<T> unique(Iterable<T> newElements) {
+    public Iterator<T> iterator() {
+      return map.values().iterator();
+    }
+
+    @Override
+    public int size() {
+      return map.size();
+    }
+
+    @Override
+    public boolean add(T element) {
+      return map.putIfAbsent(extractor.extractKey(element), element) == null;
+    }
+
+    @Override
+    public boolean contains(Object obj) {
+      if (!elementClass.isInstance(obj)) {
+        return false;
+      }
+      T element = elementClass.cast(obj);
+      return map.containsKey(extractor.extractKey(element));
+    }
+
+    @Override
+    public boolean remove(Object obj) {
+      if (!elementClass.isInstance(obj)) {
+        return false;
+      }
+      T element = elementClass.cast(obj);
+      return map.remove(extractor.extractKey(element)) != null;
+    }
+  }
+
+  /**
+   * A {@link MutableMap} implementation that uses a {@link KeyExtractor} for determining equality
+   * of its keys.
+   */
+  public static class MutableKeyExtractorBackedMapImpl<T, K, V> implements MutableMap<T, V> {
+    private final KeyExtractor<T, K> extractor;
+    private final HashMap<K, V> map;
+
+    public MutableKeyExtractorBackedMapImpl(KeyExtractor<T, K> extractor) {
+      this.extractor = extractor;
+      this.map = new HashMap<>();
+    }
+
+    @Override
+    @Nullable
+    public V get(T key) {
+      return map.get(extractor.extractKey(key));
+    }
+
+    @Override
+    public V put(T key, V value) {
+      return map.put(extractor.extractKey(key), value);
+    }
+  }
+
+  /** A {@link Uniquifier} whose methods do not throw {@link QueryException}. */
+  public interface NonExceptionalUniquifier<T> extends Uniquifier<T> {
+    @Override
+    boolean unique(T newElement);
+
+    @Override
+    ImmutableList<T> unique(Iterable<T> newElements);
+  }
+
+  /**
+   * A {@link NonExceptionalUniquifier} that doesn't do anything and always says an element is
+   * unique.
+   */
+  public static class NullUniquifierImpl<T> implements NonExceptionalUniquifier<T> {
+    private static final NullUniquifierImpl<Object> INSTANCE = new NullUniquifierImpl<>();
+
+    private NullUniquifierImpl() {
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> NullUniquifierImpl<T> instance() {
+      return (NullUniquifierImpl<T>) INSTANCE;
+    }
+
+    @Override
+    public boolean uniquePure(T newElement) {
+      return true;
+    }
+
+    @Override
+    public boolean unique(T newElement) {
+      return true;
+    }
+
+    @Override
+    public ImmutableList<T> unique(Iterable<T> newElements) {
+      return ImmutableList.copyOf(newElements);
+    }
+  }
+
+  /** A trivial {@link Uniquifier} implementation. */
+  public static class UniquifierImpl<T, K> implements NonExceptionalUniquifier<T> {
+    private final KeyExtractor<T, K> extractor;
+    private final Set<K> alreadySeen;
+
+    public UniquifierImpl(KeyExtractor<T, K> extractor) {
+      this(extractor, /*queryEvaluationParallelismLevel=*/ 1);
+    }
+
+    public UniquifierImpl(KeyExtractor<T, K> extractor, int queryEvaluationParallelismLevel) {
+      this.extractor = extractor;
+      this.alreadySeen =
+          Collections.newSetFromMap(
+              // Note that ConcurrentHashMap sadly only uses these 3 parameters as an *initial*
+              // sizing hint.
+              new ConcurrentHashMap<>(
+                  /*initialCapacity=*/ 16,
+                  /*loadFactor=*/ 0.75f,
+                  /*concurrencyLevel=*/ queryEvaluationParallelismLevel));
+    }
+
+    @Override
+    public boolean uniquePure(T element) {
+      return !alreadySeen.contains(extractor.extractKey(element));
+    }
+
+    @Override
+    public boolean unique(T element) {
+      return alreadySeen.add(extractor.extractKey(element));
+    }
+
+    @Override
+    public ImmutableList<T> unique(Iterable<T> newElements) {
       ImmutableList.Builder<T> result = ImmutableList.builder();
       for (T element : newElements) {
-        if (alreadySeen.add(extractKey(element))) {
+        if (unique(element)) {
           result.add(element);
         }
       }
       return result.build();
     }
+  }
 
-    /** Extracts an unique key that represents the target. For example the label. */
-    protected abstract K extractKey(T t);
+  /** A trivial {@link MinDepthUniquifier} implementation. */
+  public static class MinDepthUniquifierImpl<T, K> implements MinDepthUniquifier<T> {
+    private final KeyExtractor<T, K> extractor;
+    private final ConcurrentMap<K, AtomicInteger> alreadySeenAtDepth;
+
+    public MinDepthUniquifierImpl(KeyExtractor<T, K> extractor, int concurrencyLevel) {
+      this.extractor = extractor;
+      this.alreadySeenAtDepth =
+          new ConcurrentHashMap<>(/*initialCapacity=*/ concurrencyLevel, /*loadFactor=*/ 0.75f);
+    }
 
     @Override
-    public String toString() {
-      return this.getClass().getName() + " uniquifier :" + alreadySeen;
+    public final ImmutableList<T> uniqueAtDepthLessThanOrEqualTo(
+        Iterable<T> newElements, int depth) {
+      ImmutableList.Builder<T> resultBuilder = ImmutableList.builder();
+      for (T newElement : newElements) {
+        if (uniqueAtDepthLessThanOrEqualTo(newElement, depth)) {
+          resultBuilder.add(newElement);
+        }
+      }
+      return resultBuilder.build();
+    }
+
+    @Override
+    public boolean uniqueAtDepthLessThanOrEqualTo(T newElement, int depth) {
+      AtomicInteger newDepth = new AtomicInteger(depth);
+      AtomicInteger previousDepth =
+          alreadySeenAtDepth.putIfAbsent(extractor.extractKey(newElement), newDepth);
+      if (previousDepth == null) {
+        return true;
+      }
+      if (depth < previousDepth.get()) {
+        synchronized (previousDepth) {
+          if (depth < previousDepth.get()) {
+            // We've seen the element before, but never at a depth this shallow.
+            previousDepth.set(depth);
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    @Override
+    public boolean uniqueAtDepthLessThanOrEqualToPure(T newElement, int depth) {
+      AtomicInteger previousDepth = alreadySeenAtDepth.get(extractor.extractKey(newElement));
+      return previousDepth != null
+          ? depth < previousDepth.get()
+          : true;
     }
   }
 }

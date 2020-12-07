@@ -13,14 +13,16 @@
 // limitations under the License.
 package com.google.devtools.build.lib.query2.engine;
 
+import static java.util.stream.Collectors.joining;
+
 import com.google.common.base.Functions;
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Argument;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ArgumentType;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
 import java.util.Collection;
 import java.util.List;
 
@@ -36,10 +38,23 @@ public class FunctionExpression extends QueryExpression {
     this.args = ImmutableList.copyOf(args);
   }
 
+  public QueryFunction getFunction() {
+    return function;
+  }
+
+  public List<Argument> getArgs() {
+    return args;
+  }
+
   @Override
-  public <T> void eval(QueryEnvironment<T> env, Callback<T> callback)
-      throws QueryException, InterruptedException {
-    function.eval(env, this, args, callback);
+  public <T> QueryTaskFuture<Void> eval(
+      QueryEnvironment<T> env, QueryExpressionContext<T> context, Callback<T> callback) {
+    QueryTaskFuture<Void> result;
+    try (SilentCloseable closeable =
+        Profiler.instance().profile("function.eval/" + function.getName())) {
+      result = function.eval(env, context, this, args, callback);
+    }
+    return result;
   }
 
   @Override
@@ -52,8 +67,15 @@ public class FunctionExpression extends QueryExpression {
   }
 
   @Override
+  public <T, C> T accept(QueryExpressionVisitor<T, C> visitor, C context) {
+    return visitor.visit(this, context);
+  }
+
+  @Override
   public String toString() {
-    return function.getName() +
-        "(" + Joiner.on(", ").join(Iterables.transform(args, Functions.toStringFunction())) + ")";
+    return function.getName()
+        + "("
+        + args.stream().map(Functions.toStringFunction()).collect(joining(", "))
+        + ")";
   }
 }

@@ -14,8 +14,20 @@
 package com.google.devtools.build.lib.actions;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.devtools.build.lib.unsafe.StringUnsafe;
 import com.google.devtools.build.lib.util.FileType;
+import com.google.devtools.build.lib.util.GccParamFileEscaper;
+import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Support for parameter file generation (as used by gcc and other tools, e.g.
@@ -31,10 +43,8 @@ import com.google.devtools.build.lib.vfs.PathFragment;
  */
 public class ParameterFile {
 
-  /**
-   * Different styles of parameter files.
-   */
-  public static enum ParameterFileType {
+  /** Different styles of parameter files. */
+  public enum ParameterFileType {
     /**
      * A parameter file with every parameter on a separate line. This format
      * cannot handle newlines in parameters. It is currently used for most
@@ -45,13 +55,18 @@ public class ParameterFile {
     UNQUOTED,
 
     /**
-     * A parameter file where each parameter is correctly quoted for shell
-     * use, and separated by white space (space, tab, newline). This format is
-     * safe for all characters, but must be specially supported by the tool. In
-     * particular, it must not be used with gcc and related tools, which do not
-     * support this format as it is.
+     * A parameter file where each parameter is correctly quoted for shell use, and separated by
+     * white space (space, tab, newline). This format is safe for all characters, but must be
+     * specially supported by the tool. In particular, it must not be used with gcc and related
+     * tools, which do not support this format as it is.
      */
-    SHELL_QUOTED;
+    SHELL_QUOTED,
+
+    /**
+     * A parameter file where each parameter is correctly quoted for gcc or clang use, and separated
+     * by white space (space, tab, newline).
+     */
+    GCC_QUOTED;
   }
 
   @VisibleForTesting
@@ -76,4 +91,98 @@ public class ParameterFile {
     return original.replaceName(original.getBaseName() + "-" + flavor + ".params");
   }
 
+  /** Writes an argument list to a parameter file. */
+  public static void writeParameterFile(
+      OutputStream out, Iterable<String> arguments, ParameterFileType type, Charset charset)
+      throws IOException {
+    OutputStream bufferedOut = new BufferedOutputStream(out);
+    switch (type) {
+      case SHELL_QUOTED:
+        writeContent(bufferedOut, ShellEscaper.escapeAll(arguments), charset);
+        break;
+      case GCC_QUOTED:
+        writeContent(bufferedOut, GccParamFileEscaper.escapeAll(arguments), charset);
+        break;
+      case UNQUOTED:
+        writeContent(bufferedOut, arguments, charset);
+        break;
+    }
+  }
+
+  private static void writeContent(
+      OutputStream outputStream, Iterable<String> arguments, Charset charset) throws IOException {
+    if (charset.equals(StandardCharsets.ISO_8859_1) && StringUnsafe.canUse()) {
+      writeContentLatin1Jdk9(outputStream, arguments);
+    } else if (charset.equals(StandardCharsets.UTF_8) && StringUnsafe.canUse()) {
+      writeContentUtf8Jdk9(outputStream, arguments);
+    } else {
+      // Generic charset support
+      OutputStreamWriter out = new OutputStreamWriter(outputStream, charset);
+      for (String line : arguments) {
+        out.write(line);
+        out.write('\n');
+      }
+      out.flush();
+    }
+  }
+
+  /**
+   * Fast LATIN-1 path that avoids GC overhead. This takes advantage of the fact that strings are
+   * encoded as either LATIN-1 or UTF-16 under JDK9. When LATIN-1 we can simply copy the byte
+   * buffer, when UTF-16 we can fail loudly.
+   */
+  private static void writeContentLatin1Jdk9(OutputStream outputStream, Iterable<String> arguments)
+      throws IOException {
+    StringUnsafe stringUnsafe = StringUnsafe.getInstance();
+    for (String line : arguments) {
+      if (stringUnsafe.getCoder(line) == StringUnsafe.LATIN1) {
+        byte[] bytes = stringUnsafe.getByteArray(line);
+        outputStream.write(bytes);
+      } else {
+        // Error case, encode with '?' characters
+        ByteBuffer encodedBytes = StandardCharsets.ISO_8859_1.encode(CharBuffer.wrap(line));
+        outputStream.write(
+            encodedBytes.array(),
+            encodedBytes.arrayOffset(),
+            encodedBytes.arrayOffset() + encodedBytes.limit());
+      }
+      outputStream.write('\n');
+    }
+    outputStream.flush();
+  }
+
+  /**
+   * Fast UTF-8 path that tries to coder GC overhead. This takes advantage of the fact that strings
+   * are encoded as either LATIN-1 or UTF-16 under JDK9. When LATIN-1 we can check if the buffer is
+   * ASCII and copy that directly (since this is both valid LATIN-1 and UTF-8), in all other cases
+   * we must re-encode.
+   */
+  private static void writeContentUtf8Jdk9(OutputStream outputStream, Iterable<String> arguments)
+      throws IOException {
+    CharsetEncoder encoder = StandardCharsets.UTF_8.newEncoder();
+    StringUnsafe stringUnsafe = StringUnsafe.getInstance();
+    for (String line : arguments) {
+      byte[] bytes = stringUnsafe.getByteArray(line);
+      if (stringUnsafe.getCoder(line) == StringUnsafe.LATIN1 && isAscii(bytes)) {
+        outputStream.write(bytes);
+      } else {
+        ByteBuffer encodedBytes = encoder.encode(CharBuffer.wrap(line));
+        outputStream.write(
+            encodedBytes.array(),
+            encodedBytes.arrayOffset(),
+            encodedBytes.arrayOffset() + encodedBytes.limit());
+      }
+      outputStream.write('\n');
+    }
+    outputStream.flush();
+  }
+
+  private static boolean isAscii(byte[] latin1Bytes) {
+    boolean hiBitSet = false;
+    int n = latin1Bytes.length;
+    for (int i = 0; i < n; ++i) {
+      hiBitSet |= ((latin1Bytes[i] & 0x80) != 0);
+    }
+    return !hiBitSet;
+  }
 }

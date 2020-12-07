@@ -15,74 +15,137 @@
 package com.google.devtools.build.lib.analysis;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.BaseSpawn;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.io.IOException;
 import java.util.Map;
-import java.util.Map.Entry;
+import javax.annotation.Nullable;
 
-/**
- * {@link RunfilesSupplier} implementation wrapping directory to {@link Runfiles} objects mappings.
- */
+/** {@link RunfilesSupplier} implementation wrapping a single {@link Runfiles} directory mapping. */
+// TODO(bazel-team): Consider renaming to SingleRunfilesSupplierImpl.
+@AutoCodec
 public class RunfilesSupplierImpl implements RunfilesSupplier {
-
-  private final ImmutableMap<PathFragment, Runfiles> inputRunfiles;
+  private final PathFragment runfilesDir;
+  private final Runfiles runfiles;
+  @Nullable private final Artifact manifest;
+  private final boolean buildRunfileLinks;
+  private final boolean runfileLinksEnabled;
 
   /**
-   * Create an instance for an executable.
+   * Create an instance for runfiles directory.
    *
-   * @param executable the executable the runfiles are for, used for determining the runfiles
-   *    directory
+   * @param runfilesDir the path of the runfiles directory relative to the exec root
    * @param runfiles the associated runfiles
+   * @param buildRunfileLinks whether runfile symlinks are created during build
+   * @param runfileLinksEnabled whether it's allowed to create runfile symlinks
    */
-  public RunfilesSupplierImpl(Artifact executable, Runfiles runfiles) {
-    this(BaseSpawn.runfilesForFragment(executable.getExecPath()), runfiles);
+  public RunfilesSupplierImpl(
+      PathFragment runfilesDir,
+      Runfiles runfiles,
+      boolean buildRunfileLinks,
+      boolean runfileLinksEnabled) {
+    this(runfilesDir, runfiles, /* manifest= */ null, buildRunfileLinks, runfileLinksEnabled);
   }
 
   /**
-   * Create an instance when you have a a single mapping.
+   * Create an instance mapping {@code runfiles} to {@code runfilesDir}.
    *
    * @param runfilesDir the desired runfiles directory. Should be relative.
-   * @param runfiles the runfiles for runfilesDir
+   * @param runfiles the runfiles for runilesDir.
+   * @param manifest runfiles' associated runfiles manifest artifact, if present. Important: this
+   *     parameter will be used to filter the resulting spawn's inputs to not poison downstream
+   *     caches.
+   * @param buildRunfileLinks whether runfile symlinks are created during build
+   * @param runfileLinksEnabled whether it's allowed to create runfile symlinks
    */
-  public RunfilesSupplierImpl(PathFragment runfilesDir, Runfiles runfiles) {
-    this.inputRunfiles = ImmutableMap.of(runfilesDir, runfiles);
+  @AutoCodec.Instantiator
+  public RunfilesSupplierImpl(
+      PathFragment runfilesDir,
+      Runfiles runfiles,
+      @Nullable Artifact manifest,
+      boolean buildRunfileLinks,
+      boolean runfileLinksEnabled) {
+    Preconditions.checkArgument(!runfilesDir.isAbsolute());
+    this.runfilesDir = Preconditions.checkNotNull(runfilesDir);
+    this.runfiles = Preconditions.checkNotNull(runfiles);
+    this.manifest = manifest;
+    this.buildRunfileLinks = buildRunfileLinks;
+    this.runfileLinksEnabled = runfileLinksEnabled;
   }
 
+  /** Use this constructor in tests only. */
   @VisibleForTesting
-  public RunfilesSupplierImpl(Map<PathFragment, Runfiles> inputRunfiles) {
-    this.inputRunfiles = ImmutableMap.copyOf(inputRunfiles);
+  public RunfilesSupplierImpl(PathFragment runfilesDir, Runfiles runfiles) {
+    this(
+        runfilesDir,
+        runfiles,
+        /* manifest= */ null,
+        /* buildRunfileLinks= */ false,
+        /* runfileLinksEnabled= */ false);
+  }
+
+  /** Creates a runfiles supplier */
+  public static RunfilesSupplier create(RunfilesSupport runfilesSupport) {
+    return new RunfilesSupplierImpl(
+        runfilesSupport.getRunfilesDirectoryExecPath(),
+        runfilesSupport.getRunfiles(),
+        runfilesSupport.isBuildRunfileLinks(),
+        runfilesSupport.isRunfilesEnabled());
+  }
+
+  /** creates a runfiles supplier */
+  public static RunfilesSupplier create(
+      PathFragment runfilesDir,
+      Runfiles runfiles,
+      @Nullable Artifact manifest,
+      BuildConfiguration configuration) {
+    return new RunfilesSupplierImpl(
+        runfilesDir,
+        runfiles,
+        manifest,
+        configuration.buildRunfileLinks(),
+        configuration.buildRunfilesManifests());
   }
 
   @Override
-  public Iterable<Artifact> getArtifacts() {
-    ImmutableSet.Builder<Artifact> builder = ImmutableSet.builder();
-    for (Entry<PathFragment, Runfiles> entry : inputRunfiles.entrySet()) {
-      builder.addAll(
-          Iterables.filter(entry.getValue().getAllArtifacts(), Artifact.MIDDLEMAN_FILTER));
-    }
-    return builder.build();
+  public NestedSet<Artifact> getArtifacts() {
+    return runfiles.getAllArtifacts();
   }
 
   @Override
   public ImmutableSet<PathFragment> getRunfilesDirs() {
-    return inputRunfiles.keySet();
+    return ImmutableSet.of(runfilesDir);
   }
 
   @Override
-  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings() throws IOException {
-    ImmutableMap.Builder<PathFragment, Map<PathFragment, Artifact>> result =
-        ImmutableMap.builder();
-    for (Entry<PathFragment, Runfiles> entry : inputRunfiles.entrySet()) {
-      result.put(entry.getKey(), entry.getValue().getRunfilesInputs(null, null));
-    }
-    return result.build();
+  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings(
+      ArtifactPathResolver resolver) throws IOException {
+    return ImmutableMap.of(
+        runfilesDir,
+        runfiles.getRunfilesInputs(/*eventHandler=*/ null, /*location=*/ null, resolver));
   }
 
+  @Override
+  public ImmutableList<Artifact> getManifests() {
+    return manifest != null ? ImmutableList.of(manifest) : ImmutableList.<Artifact>of();
+  }
+
+  @Override
+  public boolean isBuildRunfileLinks(PathFragment runfilesDir) {
+    return buildRunfileLinks && this.runfilesDir.equals(runfilesDir);
+  }
+
+  @Override
+  public boolean isRunfileLinksEnabled(PathFragment runfilesDir) {
+    return runfileLinksEnabled && this.runfilesDir.equals(runfilesDir);
+  }
 }

@@ -13,9 +13,25 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-/** Indicates some sort of IO error while dealing with a Skylark extension. */
+import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
+import java.io.IOException;
+
+/** Indicates some sort of IO error while dealing with a Starlark extension. */
 public class ErrorReadingSkylarkExtensionException extends Exception {
-  public ErrorReadingSkylarkExtensionException(Exception e) {
+  private final Transience transience;
+
+  public ErrorReadingSkylarkExtensionException(BuildFileNotFoundException e) {
     super(e.getMessage(), e);
+    this.transience = Transience.PERSISTENT;
+  }
+
+  public ErrorReadingSkylarkExtensionException(IOException e, Transience transience) {
+    super(e.getMessage(), e);
+    this.transience = transience;
+  }
+
+  Transience getTransience() {
+    return transience;
   }
 }

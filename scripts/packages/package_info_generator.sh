@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/usr/bin/env bash
 
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -eu
+
 # Generate a README.md for the package from the information provided
 # by the build status command.
 
@@ -23,7 +25,7 @@ git_hash=
 url=
 built_by=
 build_log=
-commit_msg=
+release_notes=
 
 for i in "${@}"; do
   while read line; do
@@ -42,8 +44,8 @@ for i in "${@}"; do
       RELEASE_BUILD_LOG)
         build_log="$value"
         ;;
-      RELEASE_COMMIT_MSG)
-        commit_msg="$value"
+      RELEASE_NOTES)
+        release_notes="$value"
         ;;
       RELEASE_COMMIT_URL)
         commit_url="$value"
@@ -58,10 +60,10 @@ if [ -z "${release_name}" ]; then
   # Not a release
   echo "# Binary package at HEAD (@$git_hash)"
 else
-  echo "# $commit_msg"  # Make the first line the header
+  echo "# ${release_notes}"  # Make the first line the header
   # Subsection for environment
   echo
-  echo "## Build informations"
+  echo "## Build information"
 fi
 if [ -n "${built_by-}" ]; then
   if [ -n "${build_log}" ]; then

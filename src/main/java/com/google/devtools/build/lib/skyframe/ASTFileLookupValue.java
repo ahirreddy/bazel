@@ -15,26 +15,43 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.syntax.BuildFileAST;
-import com.google.devtools.build.skyframe.SkyKey;
-import com.google.devtools.build.skyframe.SkyValue;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.syntax.StarlarkFile;
+import com.google.devtools.build.skyframe.AbstractSkyKey;
+import com.google.devtools.build.skyframe.NotComparableSkyValue;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 
 /**
- * A value that represents an AST file lookup result. There are two subclasses: one for the
- * case where the file is found, and another for the case where the file is missing (but there
- * are no other errors).
+ * A value that represents an AST file lookup result. There are two subclasses: one for the case
+ * where the file is found, and another for the case where the file is missing (but there are no
+ * other errors).
  */
-abstract class ASTFileLookupValue implements SkyValue {
+// In practice, if a ASTFileLookupValue is re-computed (i.e. not changed pruned), then it will
+// almost certainly be unequal to the previous value. This is because of (i) the change-pruning
+// semantics of the PackageLookupValue dep and the FileValue dep; consider the latter: if the
+// FileValue for the bzl file has changed, then the contents of the bzl file probably changed and
+// (ii) we don't currently have Starlark-semantic-equality in StarlarkFile, so two StarlarkFile
+// instances representing two different contents of a bzl file will be different.
+// TODO(bazel-team): Consider doing better here. As a pre-req, we would need
+// Starlark-semantic-equality in StarlarkFile, rather than equality naively based on the contents of
+// the bzl file. For a concrete example, the contents of comment lines do not currently impact
+// Starlark semantics.
+public abstract class ASTFileLookupValue implements NotComparableSkyValue {
   public abstract boolean lookupSuccessful();
-  public abstract BuildFileAST getAST();
-  public abstract String getErrorMsg();
-  
-  /** If the file is found, this class encapsulates the parsed AST. */
-  private static class ASTLookupWithFile extends ASTFileLookupValue {
-    private final BuildFileAST ast;
 
-    private ASTLookupWithFile(BuildFileAST ast) {
+  public abstract StarlarkFile getAST();
+
+  public abstract String getErrorMsg();
+
+  /** If the file is found, this class encapsulates the parsed AST. */
+  @AutoCodec.VisibleForSerialization
+  public static class ASTLookupWithFile extends ASTFileLookupValue {
+    private final StarlarkFile ast;
+
+    private ASTLookupWithFile(StarlarkFile ast) {
       Preconditions.checkNotNull(ast);
       this.ast = ast;
     }
@@ -45,7 +62,7 @@ abstract class ASTFileLookupValue implements SkyValue {
     }
 
     @Override
-    public BuildFileAST getAST() {
+    public StarlarkFile getAST() {
       return this.ast;
     }
 
@@ -55,9 +72,10 @@ abstract class ASTFileLookupValue implements SkyValue {
           "attempted to retrieve unsuccessful lookup reason for successful lookup");
     }
   }
- 
+
   /** If the file isn't found, this class encapsulates a message with the reason. */
-  private static class ASTLookupNoFile extends ASTFileLookupValue {
+  @AutoCodec.VisibleForSerialization
+  public static class ASTLookupNoFile extends ASTFileLookupValue {
     private final String errorMsg;
 
     private ASTLookupNoFile(String errorMsg) {
@@ -70,7 +88,7 @@ abstract class ASTFileLookupValue implements SkyValue {
     }
 
     @Override
-    public BuildFileAST getAST() {
+    public StarlarkFile getAST() {
       throw new IllegalStateException("attempted to retrieve AST from an unsuccessful lookup");
     }
 
@@ -84,17 +102,43 @@ abstract class ASTFileLookupValue implements SkyValue {
     return new ASTLookupNoFile(
         String.format("Unable to load package for '%s': %s", fileLabel, reason));
   }
-  
+
+  static ASTFileLookupValue forMissingFile(Label fileLabel) {
+    return new ASTLookupNoFile(
+        String.format("Unable to load file '%s': file doesn't exist", fileLabel));
+  }
+
   static ASTFileLookupValue forBadFile(Label fileLabel) {
     return new ASTLookupNoFile(
-        String.format("Unable to load file '%s': file doesn't exist or isn't a file", fileLabel));
+        String.format("Unable to load file '%s': it isn't a regular file", fileLabel));
   }
-  
-  public static ASTFileLookupValue withFile(BuildFileAST ast) {
+
+  public static ASTFileLookupValue withFile(StarlarkFile ast) {
     return new ASTLookupWithFile(ast);
   }
 
-  static SkyKey key(Label astFileLabel) {
-    return new SkyKey(SkyFunctions.AST_FILE_LOOKUP, astFileLabel);
+  public static Key key(Label astFileLabel) {
+    return ASTFileLookupValue.Key.create(astFileLabel);
+  }
+
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class Key extends AbstractSkyKey<Label> {
+    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+
+    private Key(Label arg) {
+      super(arg);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static Key create(Label arg) {
+      return interner.intern(new Key(arg));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.AST_FILE_LOOKUP;
+    }
   }
 }

@@ -13,52 +13,31 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
-import com.google.common.base.Functions;
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Iterators;
-import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
-import com.google.devtools.build.lib.analysis.actions.CommandLine;
-import com.google.devtools.build.lib.analysis.actions.SpawnAction;
-import com.google.devtools.build.lib.rules.android.AndroidResourcesProvider.ResourceContainer;
-import com.google.devtools.build.lib.rules.android.AndroidResourcesProvider.ResourceType;
 
-import java.util.ArrayList;
-import java.util.List;
-
-/**
- * Builder for creating aar generator action.
- */
+/** Builder for creating aar generator action. */
 public class AarGeneratorBuilder {
 
-  private ResourceContainer primary;
+  private AndroidResources primaryResources;
+  private AndroidAssets primaryAssets;
+
   private Artifact manifest;
   private Artifact rTxt;
   private Artifact classes;
-  private boolean strictMerge;
+  private ImmutableList<Artifact> proguardSpecs = ImmutableList.of();
 
   private Artifact aarOut;
+  private boolean throwOnResourceConflict;
 
-  private final RuleContext ruleContext;
-  private final SpawnAction.Builder builder;
-
-  /**
-   * Creates an {@link AarGeneratorBuilder}.
-   *
-   * @param ruleContext The {@link RuleContext} that is used to register the {@link Action}.
-   */
-  public AarGeneratorBuilder(RuleContext ruleContext) {
-    this.ruleContext = ruleContext;
-    this.builder = new SpawnAction.Builder();
+  public AarGeneratorBuilder withPrimaryResources(AndroidResources primaryResources) {
+    this.primaryResources = primaryResources;
+    return this;
   }
 
-  public AarGeneratorBuilder withPrimary(ResourceContainer primary) {
-    this.primary = primary;
+  public AarGeneratorBuilder withPrimaryAssets(AndroidAssets primaryAssets) {
+    this.primaryAssets = primaryAssets;
     return this;
   }
 
@@ -82,72 +61,42 @@ public class AarGeneratorBuilder {
     return this;
   }
 
-  public AarGeneratorBuilder strictResourceMerging() {
-    this.strictMerge = true;
+  public AarGeneratorBuilder setProguardSpecs(ImmutableList<Artifact> proguardSpecs) {
+    this.proguardSpecs = proguardSpecs;
     return this;
   }
 
-  public void build(ActionConstructionContext context) {
-    List<Artifact> outs = new ArrayList<>();
-    List<Artifact> ins = new ArrayList<>();
-    List<String> args = new ArrayList<>();
-
-    args.add("--mainData");
-    addPrimaryResourceContainer(ins, args, primary);
-
-    if (manifest != null) {
-      args.add("--manifest");
-      args.add(manifest.getExecPathString());
-      ins.add(manifest);
-    }
-
-    if (rTxt != null) {
-      args.add("--rtxt");
-      args.add(rTxt.getExecPathString());
-      ins.add(rTxt);
-    }
-
-    if (classes != null) {
-      args.add("--classes");
-      args.add(classes.getExecPathString());
-      ins.add(classes);
-    }
-
-    if (!strictMerge) {
-      args.add("--nostrictMerge");
-    }
-
-    args.add("--aarOutput");
-    args.add(aarOut.getExecPathString());
-    outs.add(aarOut);
-
-    ruleContext.registerAction(this.builder
-        .addInputs(ImmutableList.<Artifact>copyOf(ins))
-        .addOutputs(ImmutableList.<Artifact>copyOf(outs))
-        .setCommandLine(CommandLine.of(args, false))
-        .setExecutable(
-            ruleContext.getExecutablePrerequisite("$android_aar_generator", Mode.HOST))
-        .setProgressMessage("Building AAR package")
-        .setMnemonic("AARGenerator")
-        .build(context));
+  public AarGeneratorBuilder setThrowOnResourceConflict(boolean throwOnResourceConflict) {
+    this.throwOnResourceConflict = throwOnResourceConflict;
+    return this;
   }
 
-  private void addPrimaryResourceContainer(List<Artifact> inputs, List<String> args,
-      ResourceContainer container) {
-    Iterables.addAll(inputs, container.getArtifacts());
-    inputs.add(container.getManifest());
+  public void build(AndroidDataContext dataContext) {
+    BusyBoxActionBuilder builder =
+        BusyBoxActionBuilder.create(dataContext, "GENERATE_AAR")
+            // no R.txt, because it will be generated from this action.
+            .addInput(
+                "--mainData",
+                String.format(
+                    "%s:%s:%s",
+                    AndroidDataConverter.rootsToString(primaryResources.getResourceRoots()),
+                    AndroidDataConverter.rootsToString(primaryAssets.getAssetRoots()),
+                    manifest.getExecPathString()),
+                Iterables.concat(
+                    primaryResources.getResources(),
+                    primaryAssets.getAssets(),
+                    ImmutableList.of(manifest)))
+            .addInput("--manifest", manifest)
+            .maybeAddInput("--rtxt", rTxt)
+            .maybeAddInput("--classes", classes);
 
-    // no R.txt, because it will be generated from this action.
-    args.add(String.format("%s:%s:%s",
-        convertRoots(container, ResourceType.RESOURCES),
-        convertRoots(container, ResourceType.ASSETS),
-        container.getManifest().getExecPathString()
-    ));
-  }
+    for (Artifact proguardSpec : proguardSpecs) {
+      builder.addInput("--proguardSpec", proguardSpec);
+    }
 
-  private static String convertRoots(ResourceContainer container, ResourceType resourceType) {
-    return Joiner.on("#").join(
-        Iterators.transform(
-            container.getRoots(resourceType).iterator(), Functions.toStringFunction()));
+    builder
+        .addOutput("--aarOutput", aarOut)
+        .maybeAddFlag("--throwOnResourceConflict", throwOnResourceConflict)
+        .buildAndRegister("Building AAR package", "AARGenerator");
   }
 }

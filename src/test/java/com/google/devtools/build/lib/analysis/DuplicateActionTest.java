@@ -14,10 +14,9 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import static org.junit.Assert.assertFalse;
+import static com.google.common.truth.Truth.assertThat;
 
-import com.google.devtools.build.lib.analysis.util.AnalysisTestCaseForJunit4;
-
+import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -26,7 +25,7 @@ import org.junit.runners.JUnit4;
  * Tests for duplicate action detection and handling when incremental analysis is enabled.
  */
 @RunWith(JUnit4.class)
-public class DuplicateActionTest extends AnalysisTestCaseForJunit4 {
+public class DuplicateActionTest extends AnalysisTestCase {
 
   @Test
   public void testDuplicateBuildInfoHeaderAction() throws Exception {
@@ -38,19 +37,7 @@ public class DuplicateActionTest extends AnalysisTestCaseForJunit4 {
         "cc_binary(name = 'b', srcs = ['b.cc'], deps = [':c'], stamp = 1)",
         "cc_library(name = 'c', linkstamp = 'stamp.cc')");
     update("//a:a", "//a:b");
-    assertFalse(hasErrors(getConfiguredTarget("//a:a")));
-    assertFalse(hasErrors(getConfiguredTarget("//a:b")));
-  }
-
-  /**
-   *  Same test with loading phase disabled.
-   */
-  @RunWith(JUnit4.class)
-  public static class DuplicateActionTestWithoutLoading extends DuplicateActionTest {
-
-    @Override
-    protected boolean isLoadingEnabled() {
-      return false;
-    }
+    assertThat(hasErrors(getConfiguredTarget("//a:a"))).isFalse();
+    assertThat(hasErrors(getConfiguredTarget("//a:b"))).isFalse();
   }
 }

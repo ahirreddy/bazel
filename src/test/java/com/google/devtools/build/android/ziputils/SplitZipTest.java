@@ -14,23 +14,23 @@
 package com.google.devtools.build.android.ziputils;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static com.google.common.truth.Truth.assertWithMessage;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
+import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableSet;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Arrays;
+import java.util.Date;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Date;
-
-/**
- * Unit tests for {@link SplitZip}.
- */
+/** Unit tests for {@link SplitZip}. */
 @RunWith(JUnit4.class)
 public class SplitZipTest {
   private FakeFileSystem fileSystem;
@@ -50,24 +50,23 @@ public class SplitZipTest {
   }
 
   @Test
-  public void testSetOutput() {
+  public void testSetOutput_null() {
     SplitZip instance = new SplitZip();
-    try {
-      instance.addOutput((String) null);
-      fail("should have failed");
-    } catch (Exception ex) {
-      assertTrue("NullPointerException expected", ex instanceof NullPointerException);
-    }
-    try {
+    Exception ex = assertThrows(Exception.class, () -> instance.addOutput((String) null));
+    assertWithMessage("NullPointerException expected")
+        .that(ex instanceof NullPointerException)
+        .isTrue();
+  }
+
+  @Test
+  public void testSetOutput() throws IOException {
+    SplitZip instance = new SplitZip();
       SplitZip result = instance
           .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
               "out/shard1.jar"))
           .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
               "out/shard2.jar"));
-      assertSame(instance, result);
-    } catch (IOException ex) {
-      fail("Unexpected exception: " + ex);
-    }
+      assertThat(result).isSameInstanceAs(instance);
   }
 
   @Test
@@ -75,7 +74,7 @@ public class SplitZipTest {
     SplitZip instance = new SplitZip();
     String res = "res";
     SplitZip result = instance.setResourceFile(res);
-    assertSame(instance, result);
+    assertThat(result).isSameInstanceAs(instance);
   }
 
   @Test
@@ -90,9 +89,9 @@ public class SplitZipTest {
   public void testSetMainClassListFile() {
     SplitZip instance = new SplitZip();
     SplitZip result = instance.setMainClassListFile((String) null);
-    assertSame(instance, result);
+    assertThat(result).isSameInstanceAs(instance);
     result = instance.setMainClassListFile("no format checks");
-    assertSame(instance, result);
+    assertThat(result).isSameInstanceAs(instance);
   }
 
   @Test
@@ -110,7 +109,7 @@ public class SplitZipTest {
   public void testSetEntryDate() {
     SplitZip instance = new SplitZip();
     SplitZip result = instance.setEntryDate(null);
-    assertSame(instance, result);
+    assertThat(result).isSameInstanceAs(instance);
   }
 
   @Test
@@ -119,7 +118,7 @@ public class SplitZipTest {
     Date now = new Date();
     instance.setEntryDate(now);
     Date result = instance.getEntryDate();
-    assertSame(result, now);
+    assertThat(now).isSameInstanceAs(result);
     instance.setEntryDate(null);
     assertThat(instance.getEntryDate()).isNull();
   }
@@ -128,33 +127,37 @@ public class SplitZipTest {
   public void testUseDefaultEntryDate() {
     SplitZip instance = new SplitZip();
     SplitZip result = instance.useDefaultEntryDate();
-    assertSame(instance, result);
+    assertThat(result).isSameInstanceAs(instance);
     Date date = instance.getEntryDate();
     assertThat(date).isEqualTo(DosTime.DOS_EPOCH);
   }
 
   @Test
   public void testAddInput() {
-    try {
-      SplitZip instance = new SplitZip();
-      String noexists = "noexists.zip";
-      instance.addInput(noexists);
-      fail("should not be able to add non existing file: " + noexists);
-    } catch (IOException ex) {
-      assertTrue("FileNotFoundException expected", ex instanceof FileNotFoundException);
-    }
+    SplitZip instance = new SplitZip();
+    String noexists = "noexists.zip";
+    IOException ex =
+        assertThrows(
+            "should not be able to add non existing file: " + noexists,
+            IOException.class,
+            () -> instance.addInput(noexists));
+    assertWithMessage("FileNotFoundException expected")
+        .that(ex instanceof FileNotFoundException)
+        .isTrue();
   }
 
   @Test
   public void testAddInputs() {
-    try {
-      SplitZip instance = new SplitZip();
-      String noexists = "noexists.zip";
-      instance.addInputs(Arrays.asList(noexists));
-      fail("should not be able to add non existing file: " + noexists);
-    } catch (IOException ex) {
-      assertTrue("FileNotFoundException expected", ex instanceof FileNotFoundException);
-    }
+    SplitZip instance = new SplitZip();
+    String noexists = "noexists.zip";
+    IOException ex =
+        assertThrows(
+            "should not be able to add non existing file: " + noexists,
+            IOException.class,
+            () -> instance.addInputs(Arrays.asList(noexists)));
+    assertWithMessage("FileNotFoundException expected")
+        .that(ex instanceof FileNotFoundException)
+        .isTrue();
   }
 
   @Test
@@ -266,47 +269,80 @@ public class SplitZipTest {
   }
 
   @Test
-  public void testSplitInTwo() {
-    try {
-      new ZipFileBuilder()
-          .add("pkg1/test1.class", "hello world")
-          .add("pkg2/test1.class", "hello world")
-          .add("pkg1/test2.class", "how are you")
-          .add("pkg2/test2.class", "how are you")
-          .add("pkg1/test3.class", "bye bye")
-          .add("pkg2/test3.class", "bye bye")
-          .create("input.jar");
+  public void testSplitOnPackageBoundary() throws IOException {
+    new ZipFileBuilder()
+        .add("pkg1/test1.class", "hello world")
+        .add("pkg2/test1.class", "hello world")
+        .add("pkg1/test2.class", "how are you")
+        .add("pkg2/test2.class", "how are you")
+        // no third file in pkg1 to test splitting early on package boundary
+        .add("pkg2/test3.class", "bye bye")
+        .create("input.jar");
 
-      new SplitZip()
-          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
-              "out/shard1.jar"))
-          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
-              "out/shard2.jar"))
-          .setVerbose(true)
-          .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
-          .run()
-          .close();
+    new SplitZip()
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+            "out/shard1.jar"))
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
+            "out/shard2.jar"))
+        .setVerbose(true)
+        .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
+        .run()
+        .close();
 
-      new ZipFileBuilder()
-          .add("pkg1/test1.class", "hello world")
-          .add("pkg1/test2.class", "how are you")
-          .add("pkg1/test3.class", "bye bye")
-          .create("expected/shard1.jar");
-      new ZipFileBuilder()
-          .add("pkg2/test1.class", "hello world")
-          .add("pkg2/test2.class", "how are you")
-          .add("pkg2/test3.class", "bye bye")
-          .create("expected/shard2.jar");
+    new ZipFileBuilder()
+        .add("pkg1/test1.class", "hello world")
+        .add("pkg1/test2.class", "how are you")
+        .create("expected/shard1.jar");
+    new ZipFileBuilder()
+        .add("pkg2/test1.class", "hello world")
+        .add("pkg2/test2.class", "how are you")
+        .add("pkg2/test3.class", "bye bye")
+        .create("expected/shard2.jar");
 
-      assertThat(fileSystem.toByteArray("out/shard1.jar"))
-          .isEqualTo(fileSystem.toByteArray("expected/shard1.jar"));
+    assertWithMessage("shard1")
+        .that(fileSystem.toByteArray("out/shard1.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard1.jar"));
 
-      assertThat(fileSystem.toByteArray("out/shard2.jar"))
-          .isEqualTo(fileSystem.toByteArray("expected/shard2.jar"));
+    assertWithMessage("shard2")
+        .that(fileSystem.toByteArray("out/shard2.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard2.jar"));
+  }
 
-    } catch (IOException e) {
-      fail("Exception: " + e);
-    }
+  @Test
+  public void testSplitSinglePackageInTwo() throws IOException {
+    new ZipFileBuilder()
+        .add("a.class", "hello world")
+        .add("b.class", "how are you")
+        .add("c.class", "bye bye")
+        .add("d.class", "good night")
+        .create("input.jar");
+
+    new SplitZip()
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+            "out/shard1.jar"))
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
+            "out/shard2.jar"))
+        .setVerbose(true)
+        .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
+        .run()
+        .close();
+
+    new ZipFileBuilder()
+        .add("a.class", "hello world")
+        .add("b.class", "how are you")
+        .create("expected/shard1.jar");
+    new ZipFileBuilder()
+        .add("c.class", "bye bye")
+        .add("d.class", "good night")
+        .create("expected/shard2.jar");
+
+    assertWithMessage("shard1")
+        .that(fileSystem.toByteArray("out/shard1.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard1.jar"));
+
+    assertWithMessage("shard2")
+        .that(fileSystem.toByteArray("out/shard2.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard2.jar"));
   }
 
   @Test
@@ -390,15 +426,17 @@ public class SplitZipTest {
       String classFileList = "pkg1/test1.class\npkg2/test2.class\n";
       fileSystem.addFile("main_dex_list.txt", classFileList);
 
-      new SplitZip()
-          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
-              "out/shard1.jar"))
-          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
-              "out/shard2.jar"))
-          .setMainClassListFile(fileSystem.getInputStream("main_dex_list.txt"))
-          .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
-          .run()
-          .close();
+      try (InputStream mainDex = fileSystem.getInputStream("main_dex_list.txt")) {
+        new SplitZip()
+            .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+                "out/shard1.jar"))
+            .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
+                "out/shard2.jar"))
+            .setMainClassListStreamForTesting(mainDex)
+            .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
+            .run()
+            .close();
+      }
 
       new ZipFileBuilder()
           .add("pkg1/test1.class", "hello world")
@@ -423,6 +461,112 @@ public class SplitZipTest {
     } catch (IOException e) {
       fail("Exception: " + e);
     }
+  }
+
+  @Test
+  public void testInputFilter() throws Exception {
+    new ZipFileBuilder()
+        .add("pkg/test.txt", "hello world")
+        .add("pkg/test2.txt", "how are you")
+        .add("pkg/test.class", "hello world")
+        .add("pkg/test2.class", "how are you")
+        .add("pkg/R$attr.class", "bye bye")
+        .create("input.zip");
+
+    new ZipFileBuilder()
+        .add("pkg/test.txt", "hello world")
+        .add("pkg/test2.class", "how are you")
+        .create("expected.zip");
+    byte[] expectedBytes = fileSystem.toByteArray("expected.zip");
+
+    new SplitZip()
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+            "out/shard1.jar"))
+        .setVerbose(true)
+        .addInput(new ZipIn(fileSystem.getInputChannel("input.zip"), "input.zip"))
+        .setInputFilter(
+            Predicates.in(ImmutableSet.of("pkg/test.txt", "pkg/test2.class", "pkg2/test.class")))
+        .run()
+        .close();
+
+    byte[] outputBytes = fileSystem.toByteArray("out/shard1.jar");
+    assertThat(outputBytes).isEqualTo(expectedBytes);
+  }
+
+  @Test
+  public void testInputFilter_splitDexedClasses() throws Exception {
+    new ZipFileBuilder()
+        .add("pkg/test.class.dex", "hello world")
+        .add("pkg/test2.class", "how are you")
+        .add("pkg/R$attr.class", "bye bye")
+        .create("input.zip");
+
+    new ZipFileBuilder()
+        .add("pkg/test.class.dex", "hello world")
+        .add("pkg/R$attr.class", "bye bye")
+        .create("expected.zip");
+    byte[] expectedBytes = fileSystem.toByteArray("expected.zip");
+
+    new SplitZip()
+        .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+            "out/shard1.jar"))
+        .setVerbose(true)
+        .addInput(new ZipIn(fileSystem.getInputChannel("input.zip"), "input.zip"))
+        .setInputFilter(
+            Predicates.in(ImmutableSet.of("pkg/test.class", "pkg/R$attr.class")))
+        .setSplitDexedClasses(true)
+        .run()
+        .close();
+
+    byte[] outputBytes = fileSystem.toByteArray("out/shard1.jar");
+    assertThat(outputBytes).isEqualTo(expectedBytes);
+  }
+
+  @Test
+  public void testInputFilter_mainDexFilter() throws Exception {
+    new ZipFileBuilder()
+        .add("pkg1/test1.class", "hello world")
+        .add("pkg2/test1.class", "how are you")
+        .add("pkg1/test2.class", "hello world")
+        .add("pkg2/test2.class", "how are you")
+        .add("pkg1/test3.class", "bye bye")
+        .add("pkg2/test3.class", "bye bye")
+        .create("input.jar");
+
+    String classFileList = "pkg1/test1.class\npkg2/test2.class\n";
+    fileSystem.addFile("main_dex_list.txt", classFileList);
+
+    try (InputStream mainDex = fileSystem.getInputStream("main_dex_list.txt")) {
+      new SplitZip()
+          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard1.jar", false),
+              "out/shard1.jar"))
+          .addOutput(new ZipOut(fileSystem.getOutputChannel("out/shard2.jar", false),
+              "out/shard2.jar"))
+          .setVerbose(true)
+          .setMainClassListStreamForTesting(mainDex)
+          .addInput(new ZipIn(fileSystem.getInputChannel("input.jar"), "input.jar"))
+          .setInputFilter(
+              Predicates.in(
+                  ImmutableSet.of("pkg1/test1.class", "pkg2/test1.class", "pkg3/test1.class")))
+          .setSplitDexedClasses(true)
+          .run()
+          .close();
+    }
+
+    // 1st shard contains only main dex list classes also in the filter
+    new ZipFileBuilder()
+        .add("pkg1/test1.class", "hello world")
+        .create("expected/shard1.jar");
+
+    new ZipFileBuilder()
+        .add("pkg2/test1.class", "how are you")
+        .create("expected/shard2.jar");
+
+    assertThat(fileSystem.toByteArray("out/shard1.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard1.jar"));
+
+    assertThat(fileSystem.toByteArray("out/shard2.jar"))
+        .isEqualTo(fileSystem.toByteArray("expected/shard2.jar"));
   }
 
   @Test

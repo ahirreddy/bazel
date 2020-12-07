@@ -14,27 +14,39 @@
 
 package com.google.devtools.build.lib.rules.apple;
 
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Ordering;
-
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skylarkbuildapi.apple.DottedVersionApi;
+import com.google.devtools.build.lib.syntax.Printer;
 import java.util.ArrayList;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.annotation.Nullable;
 
 /**
- * Represents a value with multiple components, separated by periods, for example {@code 4.5.6} or
- * {@code 5.0.1beta2}. Components must start with a non-negative integer and at least one component
- * must be present.
+ * Represents Xcode versions and allows parsing them.
  *
- * <p>Specifically, the format of a component is {@code \d+([a-z]+\d*)?}.
+ * <p>Xcode versions are formed of multiple components, separated by periods, for example {@code
+ * 4.5.6} or {@code 5.0.1beta2}. Components must start with a non-negative integer and at least one
+ * component must be present.
+ *
+ * <p>Specifically, the format of a component is {@code \d+([a-z0-9]*?)?(\d+)?}.
+ *
+ * <p>If this smells a lot like semver, it does, but Xcode versions are sometimes special. This is
+ * why this class is in the {@code apple} package and has to remain as such.
  *
  * <p>Dotted versions are ordered using natural integer sorting on components in order from first to
  * last where any missing element is considered to have the value 0 if they don't contain any
  * non-numeric characters. For example:
+ *
  * <pre>
  *   3.1.25 > 3.1.1
  *   3.1.20 > 3.1.2
@@ -49,6 +61,7 @@ import java.util.regex.Pattern;
  * compared lexicographically, and if <i>they</i> turn out to be the same, the final (optional)
  * integer is compared. As with the leading integer, this final integer is considered to be 0 if not
  * present. For example:
+ *
  * <pre>
  *   3.1.1 > 3.1.1beta3
  *   3.1.1beta1 > 3.1.0
@@ -62,39 +75,122 @@ import java.util.regex.Pattern;
  *
  * <p>This class is immutable and can safely be shared among threads.
  */
-public final class DottedVersion implements Comparable<DottedVersion> {
+@Immutable
+@AutoCodec
+public final class DottedVersion implements DottedVersionApi<DottedVersion> {
+  /** Wrapper class for {@link DottedVersion} whose {@link #equals(Object)} method is string
+   * equality.
+   *
+   * <p>This is necessary because Bazel assumes that
+   * {@link com.google.devtools.build.lib.analysis.config.FragmentOptions} that are equal yield
+   * fragments that are the same. However, this does not hold if the options hold a
+   * {@link DottedVersion} because trailing zeroes are not considered significant when comparing
+   * them, but they do matter in configuration fragments (for example, they end up in output
+   * directory names)</p>
+   * */
+  @Immutable
+  public static final class Option {
+    private final DottedVersion version;
+
+    private Option(DottedVersion version) {
+      this.version = Preconditions.checkNotNull(version);
+    }
+
+    public DottedVersion get() {
+      return version;
+    }
+
+    @Override
+    public int hashCode() {
+      return version.stringRepresentation.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+
+      if (!(o instanceof Option)) {
+        return false;
+      }
+
+      return version.stringRepresentation.equals(((Option) o).version.stringRepresentation);
+    }
+  }
+
+  public static DottedVersion maybeUnwrap(DottedVersion.Option option) {
+    return option != null ? option.get() : null;
+  }
+
+  public static Option option(DottedVersion version) {
+    return version == null ? null : new Option(version);
+  }
   private static final Splitter DOT_SPLITTER = Splitter.on('.');
-  private static final Pattern COMPONENT_PATTERN = Pattern.compile("(\\d+)(?:([a-z]+)(\\d*))?");
+  private static final Pattern COMPONENT_PATTERN =
+      Pattern.compile("(\\d+)([a-z0-9]*?)?(\\d+)?", Pattern.CASE_INSENSITIVE);
   private static final String ILLEGAL_VERSION =
-      "Dotted version components must all be of the form \\d+([a-z]+\\d*)? but got %s";
+      "Dotted version components must all be of the form \\d+([a-z0-9]*?)?(\\d+)? but got '%s'";
   private static final String NO_ALPHA_SEQUENCE = null;
-  private static final Component ZERO_COMPONENT = new Component(0, NO_ALPHA_SEQUENCE, 0);
+  private static final Component ZERO_COMPONENT = new Component(0, NO_ALPHA_SEQUENCE, 0, "0");
+
+  /** Exception thrown when parsing an invalid dotted version. */
+  public static class InvalidDottedVersionException extends Exception {
+    InvalidDottedVersionException(String msg) {
+      super(msg);
+    }
+
+    InvalidDottedVersionException(String msg, Throwable cause) {
+      super(msg, cause);
+    }
+  }
+
+  /**
+   * Create a dotted version by parsing the given version string. Throws an unchecked exception if
+   * the argument is malformed.
+   */
+  public static DottedVersion fromStringUnchecked(String version) {
+    try {
+      return fromString(version);
+    } catch (InvalidDottedVersionException e) {
+      throw new IllegalArgumentException(e);
+    }
+  }
 
   /**
    * Generates a new dotted version from the given version string.
    *
-   * @throws IllegalArgumentException if the passed string is not a valid dotted version
+   * @throws InvalidDottedVersionException if the passed string is not a valid dotted version
    */
-  public static DottedVersion fromString(String version) {
+  public static DottedVersion fromString(String version) throws InvalidDottedVersionException {
+    if (Strings.isNullOrEmpty(version)) {
+      throw new InvalidDottedVersionException(String.format(ILLEGAL_VERSION, version));
+    }
     ArrayList<Component> components = new ArrayList<>();
     for (String component : DOT_SPLITTER.split(version)) {
       components.add(toComponent(component, version));
     }
 
-    // Remove trailing (but not the first) zero components for easier comparison and hashcoding.
+    int numOriginalComponents = components.size();
+
+    // Remove trailing (but not the first or middle) zero components for easier comparison and
+    // hashcoding.
     for (int i = components.size() - 1; i > 0; i--) {
       if (components.get(i).equals(ZERO_COMPONENT)) {
         components.remove(i);
+      } else {
+        break;
       }
     }
 
-    return new DottedVersion(ImmutableList.copyOf(components), version);
+    return new DottedVersion(ImmutableList.copyOf(components), version, numOriginalComponents);
   }
 
-  private static Component toComponent(String component, String version) {
+  private static Component toComponent(String component, String version)
+      throws InvalidDottedVersionException {
     Matcher parsedComponent = COMPONENT_PATTERN.matcher(component);
     if (!parsedComponent.matches()) {
-      throw new IllegalArgumentException(String.format(ILLEGAL_VERSION, version));
+      throw new InvalidDottedVersionException(String.format(ILLEGAL_VERSION, version));
     }
 
     int firstNumber;
@@ -102,7 +198,7 @@ public final class DottedVersion implements Comparable<DottedVersion> {
     int secondNumber = 0;
     firstNumber = parseNumber(parsedComponent, 1, version);
 
-    if (parsedComponent.group(2) != null) {
+    if (!Strings.isNullOrEmpty(parsedComponent.group(2))) {
       alphaSequence = parsedComponent.group(2);
     }
 
@@ -110,25 +206,30 @@ public final class DottedVersion implements Comparable<DottedVersion> {
       secondNumber = parseNumber(parsedComponent, 3, version);
     }
 
-    return new Component(firstNumber, alphaSequence, secondNumber);
+    return new Component(firstNumber, alphaSequence, secondNumber, component);
   }
 
-  private static int parseNumber(Matcher parsedComponent, int group, String version) {
+  private static int parseNumber(Matcher parsedComponent, int group, String version)
+      throws InvalidDottedVersionException {
     int firstNumber;
     try {
       firstNumber = Integer.parseInt(parsedComponent.group(group));
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(String.format(ILLEGAL_VERSION, version));
+      throw new InvalidDottedVersionException(String.format(ILLEGAL_VERSION, version), e);
     }
     return firstNumber;
   }
 
   private final ImmutableList<Component> components;
   private final String stringRepresentation;
+  private final int numOriginalComponents;
 
-  private DottedVersion(ImmutableList<Component> components, String version) {
+  @AutoCodec.VisibleForSerialization
+  DottedVersion(
+      ImmutableList<Component> components, String stringRepresentation, int numOriginalComponents) {
     this.components = components;
-    this.stringRepresentation = version;
+    this.stringRepresentation = stringRepresentation;
+    this.numOriginalComponents = numOriginalComponents;
   }
 
   @Override
@@ -143,6 +244,75 @@ public final class DottedVersion implements Comparable<DottedVersion> {
       }
     }
     return 0;
+  }
+
+  @Override
+  public int compareTo_skylark(DottedVersion other) {
+    return compareTo(other);
+  }
+
+  /**
+   * Returns the string representation of this dotted version, padded or truncated to the specified
+   * number of components.
+   *
+   * <p>For example, a dotted version of "7.3.0" will return "7" if one is requested, "7.3" if two
+   * are requested, "7.3.0" if three are requested, and "7.3.0.0" if four are requested.
+   *
+   * @param numComponents a positive number of dot-separated numbers that should be present in the
+   *     returned string representation
+   */
+  public String toStringWithComponents(int numComponents) {
+    Preconditions.checkArgument(numComponents > 0,
+        "Can't serialize as a version with %s components", numComponents);
+    ImmutableList.Builder<Component> stringComponents = ImmutableList.builder();
+    if (numComponents <= components.size()) {
+      stringComponents.addAll(components.subList(0, numComponents));
+    } else {
+      stringComponents.addAll(components);
+      for (int i = components.size(); i < numComponents; i++) {
+        stringComponents.add(ZERO_COMPONENT);
+      }
+    }
+    return Joiner.on('.').join(stringComponents.build());
+  }
+
+  /**
+   * Returns the string representation of this dotted version, padded to a minimum number of
+   * components if the string representation does not already contain that many components.
+   *
+   * <p>For example, a dotted version of "7.3" will return "7.3" with either one or two components
+   * requested, "7.3.0" if three are requested, and "7.3.0.0" if four are requested.
+   *
+   * <p>Trailing zero components at the end of a string representation will not be removed. For
+   * example, a dotted version of "1.0.0" will return "1.0.0" if only one or two components are
+   * requested.
+   *
+   * @param numMinComponents the minimum number of dot-separated numbers that should be present in
+   *     the returned string representation
+   */
+  public String toStringWithMinimumComponents(int numMinComponents) {
+    return toStringWithComponents(Math.max(this.numOriginalComponents, numMinComponents));
+  }
+
+  /**
+   * Returns true if this version number has any alphabetic characters, such as 'alpha' in
+   * "7.3alpha.2".
+   */
+  public boolean hasAlphabeticCharacters() {
+    for (Component component : components) {
+      if (!Objects.equals(component.alphaSequence, NO_ALPHA_SEQUENCE)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns the number of components in this version number. For example, "7.3.0" has three
+   * components.
+   */
+  public int numComponents() {
+    return components.size();
   }
 
   @Override
@@ -174,15 +344,29 @@ public final class DottedVersion implements Comparable<DottedVersion> {
     return ZERO_COMPONENT;
   }
 
-  private static final class Component implements Comparable<Component> {
-    private final int firstNumber;
-    private final String alphaSequence;
-    private final int secondNumber;
+  @Override
+  public void repr(Printer printer) {
+    printer.append(stringRepresentation);
+  }
 
-    public Component(int firstNumber, String alphaSequence, int secondNumber) {
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static final class Component implements Comparable<Component> {
+    private final int firstNumber;
+    @Nullable private final String alphaSequence;
+    private final int secondNumber;
+    private final String stringRepresentation;
+
+    @AutoCodec.VisibleForSerialization
+    Component(
+        int firstNumber,
+        @Nullable String alphaSequence,
+        int secondNumber,
+        String stringRepresentation) {
       this.firstNumber = firstNumber;
       this.alphaSequence = alphaSequence;
       this.secondNumber = secondNumber;
+      this.stringRepresentation = stringRepresentation;
     }
 
     @Override
@@ -209,6 +393,11 @@ public final class DottedVersion implements Comparable<DottedVersion> {
     @Override
     public int hashCode() {
       return Objects.hash(firstNumber, alphaSequence, secondNumber);
+    }
+
+    @Override
+    public String toString() {
+      return stringRepresentation;
     }
   }
 }

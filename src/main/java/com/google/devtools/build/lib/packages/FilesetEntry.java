@@ -14,36 +14,42 @@
 
 package com.google.devtools.build.lib.packages;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-
+import com.google.common.base.Objects;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.skylarkbuildapi.FilesetEntryApi;
 import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.SkylarkModule;
-import com.google.devtools.build.lib.syntax.SkylarkValue;
+import com.google.devtools.build.lib.syntax.StarlarkValue;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
-
 import javax.annotation.Nullable;
 
 /**
  * FilesetEntry is a value object used to represent a "FilesetEntry" inside a "Fileset" BUILD rule.
  */
-@SkylarkModule(
-    name = "FilesetEntry",
-    doc = "",
-    documented = false)
-public final class FilesetEntry implements SkylarkValue {
+@Immutable
+@ThreadSafe
+public final class FilesetEntry implements StarlarkValue, FilesetEntryApi {
+
+  public static final SymlinkBehavior DEFAULT_SYMLINK_BEHAVIOR = SymlinkBehavior.COPY;
+  public static final String DEFAULT_STRIP_PREFIX = ".";
+  public static final String STRIP_PREFIX_WORKSPACE = "%workspace%";
 
   @Override
   public boolean isImmutable() {
+    // TODO(laszlocsomor): set this to true. I think we could do this right now, but am not sure.
+    // Maybe we have to verify that Starlark recognizes every member's type to be recursively
+    // immutable; as of 15/01/2016 this is not true for enum types in general, to name an example.
     return false;
   }
 
@@ -63,25 +69,25 @@ public final class FilesetEntry implements SkylarkValue {
   }
 
   @Override
-  public void write(Appendable buffer, char quotationMark) {
-      Printer.append(buffer, "FilesetEntry(srcdir = ");
-      Printer.write(buffer, getSrcLabel().toString(), quotationMark);
-      Printer.append(buffer, ", files = ");
-      Printer.write(buffer, makeStringList(getFiles()), quotationMark);
-      Printer.append(buffer, ", excludes = ");
-      Printer.write(buffer, makeList(getExcludes()), quotationMark);
-      Printer.append(buffer, ", destdir = ");
-      Printer.write(buffer, getDestDir().getPathString(), quotationMark);
-      Printer.append(buffer, ", strip_prefix = ");
-      Printer.write(buffer, getStripPrefix(), quotationMark);
-      Printer.append(buffer, ", symlinks = ");
-      Printer.append(buffer, quotationMark);
-      Printer.append(buffer, getSymlinkBehavior().toString());
-      Printer.append(buffer, quotationMark);
-      Printer.append(buffer, ")");
+  public void repr(Printer printer) {
+    printer.append("FilesetEntry(srcdir = ");
+    printer.repr(getSrcLabel().toString());
+    printer.append(", files = ");
+    printer.repr(makeStringList(getFiles()));
+    printer.append(", excludes = ");
+    printer.repr(makeList(getExcludes()));
+    printer.append(", destdir = ");
+    printer.repr(getDestDir().getPathString());
+    printer.append(", strip_prefix = ");
+    printer.repr(getStripPrefix());
+    printer.append(", symlinks = ");
+    printer.repr(getSymlinkBehavior().toString());
+    printer.append(")");
   }
 
   /** SymlinkBehavior decides what to do when a source file of a FilesetEntry is a symlink. */
+  @Immutable
+  @ThreadSafe
   public enum SymlinkBehavior {
     /** Just copies the symlink as-is. May result in dangling links. */
     COPY,
@@ -89,7 +95,7 @@ public final class FilesetEntry implements SkylarkValue {
     DEREFERENCE;
 
     public static SymlinkBehavior parse(String value) throws IllegalArgumentException {
-      return valueOf(value.toUpperCase());
+      return valueOf(value.toUpperCase(Locale.ENGLISH));
     }
 
     @Override
@@ -117,18 +123,19 @@ public final class FilesetEntry implements SkylarkValue {
    * @param stripPrefix the prefix to strip from the package-relative path. If ".", keep only the
    *        basename.
    */
-  public FilesetEntry(Label srcLabel,
+  public FilesetEntry(
+      Label srcLabel,
       @Nullable List<Label> files,
-      @Nullable List<String> excludes,
-      String destDir,
-      SymlinkBehavior symlinkBehavior,
-      String stripPrefix) {
-    this.srcLabel = checkNotNull(srcLabel);
-    this.destDir = new PathFragment((destDir == null) ? "" : destDir);
+      @Nullable Collection<String> excludes,
+      @Nullable String destDir,
+      @Nullable SymlinkBehavior symlinkBehavior,
+      @Nullable String stripPrefix) {
+    this.srcLabel = Preconditions.checkNotNull(srcLabel);
     this.files = files == null ? null : ImmutableList.copyOf(files);
     this.excludes = (excludes == null || excludes.isEmpty()) ? null : ImmutableSet.copyOf(excludes);
-    this.symlinkBehavior = symlinkBehavior;
-    this.stripPrefix = stripPrefix;
+    this.destDir = PathFragment.create((destDir == null) ? "" : destDir);
+    this.symlinkBehavior = symlinkBehavior == null ? DEFAULT_SYMLINK_BEHAVIOR : symlinkBehavior;
+    this.stripPrefix = stripPrefix == null ? DEFAULT_STRIP_PREFIX : stripPrefix;
   }
 
   /**
@@ -153,7 +160,7 @@ public final class FilesetEntry implements SkylarkValue {
   }
 
   /**
-   * @return an immutable list of excludes. Null if none specified.
+   * @return an immutable set of excludes. Null if none specified.
    */
   @Nullable
   public ImmutableSet<String> getExcludes() {
@@ -206,10 +213,16 @@ public final class FilesetEntry implements SkylarkValue {
       return "Cannot specify files with Fileset label '" + srcLabel + "'";
     } else if (destDir.isAbsolute()) {
       return "Cannot specify absolute destdir '" + destDir + "'";
-    } else if (!stripPrefix.equals(".") && files == null) {
-      return "If the strip prefix is not '.', files must be specified";
-    } else if (new PathFragment(stripPrefix).containsUplevelReferences()) {
+    } else if (!stripPrefix.equals(DEFAULT_STRIP_PREFIX) && files == null) {
+      return "If the strip prefix is not \"" + DEFAULT_STRIP_PREFIX + "\", files must be specified";
+    } else if (stripPrefix.startsWith("/")) {
+      return "Cannot specify absolute strip prefix; perhaps you need to use \""
+          + STRIP_PREFIX_WORKSPACE + "\"";
+    } else if (PathFragment.create(stripPrefix).containsUplevelReferences()) {
       return "Strip prefix must not contain uplevel references";
+    } else if (stripPrefix.startsWith("%") && !stripPrefix.startsWith(STRIP_PREFIX_WORKSPACE)) {
+      return "If the strip_prefix starts with \"%\" then it must start with \""
+          + STRIP_PREFIX_WORKSPACE + "\"";
     } else {
       return null;
     }
@@ -217,9 +230,40 @@ public final class FilesetEntry implements SkylarkValue {
 
   @Override
   public String toString() {
-    return String.format("FilesetEntry(srcdir=%s, destdir=%s, strip_prefix=%s, symlinks=%s, "
-        + "%d file(s) and %d excluded)", srcLabel, destDir, stripPrefix, symlinkBehavior,
+    return String.format(
+        "FilesetEntry(srcdir=%s, destdir=%s, strip_prefix=%s, symlinks=%s, "
+            + "%d file(s) and %d excluded)",
+        srcLabel,
+        destDir,
+        stripPrefix,
+        symlinkBehavior,
         files != null ? files.size() : 0,
         excludes != null ? excludes.size() : 0);
   }
+
+  @Override
+  public int hashCode() {
+    return Objects.hashCode(srcLabel, files, excludes, destDir, symlinkBehavior, stripPrefix);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+
+    if (!(other instanceof FilesetEntry)) {
+      return false;
+    }
+
+    FilesetEntry that = (FilesetEntry) other;
+    return Objects.equal(srcLabel, that.srcLabel)
+        && Objects.equal(files, that.files)
+        && Objects.equal(excludes, that.excludes)
+        && Objects.equal(destDir, that.destDir)
+        && Objects.equal(symlinkBehavior, that.symlinkBehavior)
+        && Objects.equal(stripPrefix, that.stripPrefix);
+  }
+
+
 }

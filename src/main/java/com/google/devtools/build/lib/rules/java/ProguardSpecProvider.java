@@ -14,23 +14,64 @@
 package com.google.devtools.build.lib.rules.java;
 
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.BuiltinProvider;
+import com.google.devtools.build.lib.packages.NativeInfo;
+import com.google.devtools.build.lib.skylarkbuildapi.java.ProguardSpecProviderApi;
+import com.google.devtools.build.lib.syntax.EvalException;
 
-/**
- * A target that can provide proguard specifications to Android binaries.
- */
+/** A target that can provide proguard specifications to Android binaries. */
 @Immutable
-public final class ProguardSpecProvider implements TransitiveInfoProvider {
+public final class ProguardSpecProvider extends NativeInfo
+    implements ProguardSpecProviderApi<Artifact> {
+
+  public static final String PROVIDER_NAME = "ProguardSpecProvider";
+  public static final Provider PROVIDER = new Provider();
 
   private final NestedSet<Artifact> transitiveProguardSpecs;
 
   public ProguardSpecProvider(NestedSet<Artifact> transitiveProguardSpecs) {
+    super(PROVIDER);
     this.transitiveProguardSpecs = transitiveProguardSpecs;
+  }
+
+  @Override
+  public Depset /*<Artifact>*/ getTransitiveProguardSpecsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveProguardSpecs);
   }
 
   public NestedSet<Artifact> getTransitiveProguardSpecs() {
     return transitiveProguardSpecs;
+  }
+
+  public static ProguardSpecProvider merge(Iterable<ProguardSpecProvider> providers) {
+    NestedSetBuilder<Artifact> specs = NestedSetBuilder.stableOrder();
+    for (ProguardSpecProvider wrapper : providers) {
+      specs.addTransitive(wrapper.getTransitiveProguardSpecs());
+    }
+    return new ProguardSpecProvider(specs.build());
+  }
+
+  /** Provider class for {@link ProguardSpecProvider} objects. */
+  public static class Provider extends BuiltinProvider<ProguardSpecProvider>
+      implements ProguardSpecProviderApi.Provider<Artifact> {
+    private Provider() {
+      super(PROVIDER_NAME, ProguardSpecProvider.class);
+    }
+
+    public String getName() {
+      return PROVIDER_NAME;
+    }
+
+    @Override
+    public ProguardSpecProvider create(Depset specs) throws EvalException {
+      return new ProguardSpecProvider(
+          NestedSetBuilder.<Artifact>stableOrder()
+              .addTransitive(Depset.cast(specs, Artifact.class, "specs"))
+              .build());
+    }
   }
 }

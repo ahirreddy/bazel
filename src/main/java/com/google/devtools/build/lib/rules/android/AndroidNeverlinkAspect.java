@@ -14,19 +14,22 @@
 package com.google.devtools.build.lib.rules.android;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredAspect;
-import com.google.devtools.build.lib.analysis.ConfiguredNativeAspectFactory;
-import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.ConfiguredAspectFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.AspectDefinition;
 import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.NativeAspectClass;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
 import com.google.devtools.build.lib.rules.java.JavaCommon;
-import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
-import com.google.devtools.build.lib.rules.java.JavaRuntimeJarProvider;
-
+import com.google.devtools.build.lib.rules.java.JavaInfo;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -38,7 +41,7 @@ import java.util.List;
  * <p>One would think that using the compile time classpath would be enough, but alas, those are
  * ijars,
  */
-public class AndroidNeverlinkAspect implements ConfiguredNativeAspectFactory {
+public class AndroidNeverlinkAspect extends NativeAspectClass implements ConfiguredAspectFactory {
   public static final String NAME = "AndroidNeverlinkAspect";
   private static final ImmutableList<String> ATTRIBUTES =
       ImmutableList.of(
@@ -46,10 +49,14 @@ public class AndroidNeverlinkAspect implements ConfiguredNativeAspectFactory {
 
   @Override
   public ConfiguredAspect create(
-      ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
+      ConfiguredTargetAndData ctadBase,
+      RuleContext ruleContext,
+      AspectParameters parameters,
+      String toolsRepository)
+      throws ActionConflictException {
     if (!JavaCommon.getConstraints(ruleContext).contains("android")
         && !ruleContext.getRule().getRuleClass().startsWith("android_")) {
-      return new ConfiguredAspect.Builder(NAME, ruleContext).build();
+      return new ConfiguredAspect.Builder(ruleContext).build();
     }
 
     List<TransitiveInfoCollection> deps = new ArrayList<>();
@@ -62,29 +69,38 @@ public class AndroidNeverlinkAspect implements ConfiguredNativeAspectFactory {
         continue;
       }
 
-      deps.addAll(ruleContext.getPrerequisites(attribute, Mode.TARGET));
+      deps.addAll(ruleContext.getPrerequisites(attribute, TransitionMode.TARGET));
     }
 
-    return new ConfiguredAspect.Builder(NAME, ruleContext)
+    NestedSetBuilder<Artifact> runtimeJars = NestedSetBuilder.naiveLinkOrder();
+    runtimeJars.addAll(JavaInfo.getJavaInfo(ctadBase.getConfiguredTarget()).getDirectRuntimeJars());
+    AndroidLibraryResourceClassJarProvider provider =
+        AndroidLibraryResourceClassJarProvider.getProvider(ctadBase.getConfiguredTarget());
+    if (provider != null) {
+      runtimeJars.addTransitive(provider.getResourceClassJars());
+    }
+    return new ConfiguredAspect.Builder(ruleContext)
         .addProvider(
-            AndroidNeverLinkLibrariesProvider.class,
-            new AndroidNeverLinkLibrariesProvider(
+            AndroidNeverLinkLibrariesProvider.create(
                 AndroidCommon.collectTransitiveNeverlinkLibraries(
-                    ruleContext,
-                    deps,
-                    base.getProvider(JavaRuntimeJarProvider.class).getRuntimeJars())))
+                    ruleContext, deps, runtimeJars.build())))
         .build();
   }
 
   @Override
   public AspectDefinition getDefinition(AspectParameters aspectParameters) {
-    AspectDefinition.Builder builder = new AspectDefinition.Builder("AndroidNeverlinkAspect");
+    AspectDefinition.Builder builder = new AspectDefinition.Builder(this);
     for (String attribute : ATTRIBUTES) {
-      builder.attributeAspect(attribute, AndroidNeverlinkAspect.class);
+      builder.propagateAlongAttribute(attribute);
     }
 
     return builder
-        .requireProvider(JavaCompilationArgsProvider.class)
+        .requireSkylarkProviders(StarlarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey()))
+        .requireSkylarkProviders(
+            StarlarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey()),
+            StarlarkProviderIdentifier.forKey(
+                AndroidLibraryResourceClassJarProvider.PROVIDER.getKey()))
+        .requiresConfigurationFragments()
         .build();
   }
 }

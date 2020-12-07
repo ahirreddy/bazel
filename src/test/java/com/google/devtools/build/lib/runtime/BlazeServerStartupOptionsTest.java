@@ -13,17 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
-import com.google.devtools.common.options.OptionsParser;
+import static com.google.common.truth.Truth.assertThat;
 
+import com.google.devtools.common.options.OptionsParser;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import static org.junit.Assert.assertNull;
-
-/**
- * A regression test for {@link BlazeServerStartupOptions}.
- */
+/** A regression test for {@link BlazeServerStartupOptions}. */
 @RunWith(JUnit4.class)
 public class BlazeServerStartupOptionsTest {
 
@@ -31,9 +28,10 @@ public class BlazeServerStartupOptionsTest {
   // value is provided.
   @Test
   public void testOutputBaseIsNullByDefault() throws Exception {
-    OptionsParser parser = OptionsParser.newOptionsParser(BlazeServerStartupOptions.class);
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(BlazeServerStartupOptions.class).build();
     parser.parse();
     BlazeServerStartupOptions result = parser.getOptions(BlazeServerStartupOptions.class);
-    assertNull(result.outputBase);
+    assertThat(result.outputBase).isNull();
   }
 }

@@ -15,14 +15,11 @@ package com.google.devtools.build.docgen;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableMap.Builder;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 /**
  * A class to contain the base definition of common BUILD rule attributes.
@@ -46,14 +43,19 @@ public class PredefinedAttributes {
    */
   public static final ImmutableList<String> COMMON_ATTRIBUTES_DOCFILES =
       ImmutableList.of(
+          "templates/attributes/common/compatible_with.html",
           "templates/attributes/common/data.html",
           "templates/attributes/common/deprecation.html",
           "templates/attributes/common/deps.html",
           "templates/attributes/common/distribs.html",
+          "templates/attributes/common/exec_compatible_with.html",
+          "templates/attributes/common/exec_properties.html",
           "templates/attributes/common/features.html",
           "templates/attributes/common/licenses.html",
+          "templates/attributes/common/restricted_to.html",
           "templates/attributes/common/tags.html",
           "templates/attributes/common/testonly.html",
+          "templates/attributes/common/toolchains.html",
           "templates/attributes/common/visibility.html");
 
   /**
@@ -67,7 +69,7 @@ public class PredefinedAttributes {
 
   private static ImmutableMap<String, RuleDocumentationAttribute> generateAttributeMap(
       String commonType, ImmutableList<String> filenames) {
-    Builder<String, RuleDocumentationAttribute> builder =
+    ImmutableMap.Builder<String, RuleDocumentationAttribute> builder =
         ImmutableMap.<String, RuleDocumentationAttribute>builder();
     for (String filename : filenames) {
       String name = Files.getNameWithoutExtension(filename);
@@ -85,12 +87,12 @@ public class PredefinedAttributes {
     return builder.build();
   }
 
-  public static final Map<String, RuleDocumentationAttribute> COMMON_ATTRIBUTES =
+  public static final ImmutableMap<String, RuleDocumentationAttribute> COMMON_ATTRIBUTES =
       generateAttributeMap(DocgenConsts.COMMON_ATTRIBUTES, COMMON_ATTRIBUTES_DOCFILES);
 
-  public static final Map<String, RuleDocumentationAttribute> BINARY_ATTRIBUTES =
+  public static final ImmutableMap<String, RuleDocumentationAttribute> BINARY_ATTRIBUTES =
       generateAttributeMap(DocgenConsts.BINARY_ATTRIBUTES, BINARY_ATTRIBUTES_DOCFILES);
 
-  public static final Map<String, RuleDocumentationAttribute> TEST_ATTRIBUTES =
+  public static final ImmutableMap<String, RuleDocumentationAttribute> TEST_ATTRIBUTES =
       generateAttributeMap(DocgenConsts.TEST_ATTRIBUTES, TEST_ATTRIBUTES_DOCFILES);
 }

@@ -13,40 +13,67 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
-import static org.junit.Assert.assertEquals;
 
-import com.google.devtools.build.lib.testutil.FoundationTestCaseForJunit4;
+import static com.google.common.truth.Truth.assertThat;
+
+import com.google.devtools.build.lib.skyframe.serialization.testutils.FsUtils;
+import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester;
+import com.google.devtools.build.lib.testutil.FoundationTestCase;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.Path;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * Unit tests for {@link BlazeDirectories}.
- */
+/** Unit tests for {@link BlazeDirectories}. */
 @RunWith(JUnit4.class)
-public class BlazeDirectoriesTest extends FoundationTestCaseForJunit4 {
+public class BlazeDirectoriesTest extends FoundationTestCase {
 
   @Test
-  public void testCreatingDirectories() {
-    FileSystem fs = scratch.getFileSystem();
-    Path installBase = fs.getPath("/my/install");
-    Path outputBase = fs.getPath("/my/output");
-    Path workspace = fs.getPath("/my/ws");
-    BlazeDirectories directories = new BlazeDirectories(installBase, outputBase, workspace);
-    assertEquals(directories.getExecRoot(), outputBase.getChild("ws"));
-
-    workspace = null;
-    directories = new BlazeDirectories(installBase, outputBase, workspace);
-    assertEquals(directories.getExecRoot(),
-        outputBase.getChild(BlazeDirectories.DEFAULT_EXEC_ROOT));
-
-    workspace = fs.getPath("/");
-    directories = new BlazeDirectories(installBase, outputBase, workspace);
-    assertEquals(directories.getExecRoot(),
-        outputBase.getChild(BlazeDirectories.DEFAULT_EXEC_ROOT));
+  public void testCodec() throws Exception {
+    new SerializationTester(
+            new BlazeDirectories(
+                new ServerDirectories(
+                    FsUtils.TEST_FILESYSTEM.getPath("/install_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/output_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/user_root")),
+                FsUtils.TEST_FILESYSTEM.getPath("/workspace"),
+                /* defaultSystemJavabase= */ null,
+                TestConstants.PRODUCT_NAME),
+            new BlazeDirectories(
+                new ServerDirectories(
+                    FsUtils.TEST_FILESYSTEM.getPath("/install_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/output_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/user_root"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/output_base/execroot"),
+                    "1234abcd1234abcd1234abcd1234abcd"),
+                FsUtils.TEST_FILESYSTEM.getPath("/workspace"),
+                /* defaultSystemJavabase= */ null,
+                TestConstants.PRODUCT_NAME),
+            new BlazeDirectories(
+                new ServerDirectories(
+                    FsUtils.TEST_FILESYSTEM.getPath("/install_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/output_base"),
+                    FsUtils.TEST_FILESYSTEM.getPath("/user_root")),
+                FsUtils.TEST_FILESYSTEM.getPath("/workspace"),
+                /* defaultSystemJavabase= */ null,
+                TestConstants.PRODUCT_NAME))
+        .addDependency(FileSystem.class, FsUtils.TEST_FILESYSTEM)
+        .runTests();
   }
 
+  @Test
+  public void testBlazeExecIsNullInBazel() {
+    BlazeDirectories directories =
+        new BlazeDirectories(
+            new ServerDirectories(
+                FsUtils.TEST_FILESYSTEM.getPath("/install_base"),
+                FsUtils.TEST_FILESYSTEM.getPath("/output_base"),
+                FsUtils.TEST_FILESYSTEM.getPath("/user_root")),
+            FsUtils.TEST_FILESYSTEM.getPath("/workspace"),
+            /* defaultSystemJavabase= */ null,
+            /* productName = */ "bazel");
+    assertThat(directories.getBlazeExecRoot()).isNull();
+    assertThat(directories.getBlazeOutputPath()).isNull();
+  }
 }

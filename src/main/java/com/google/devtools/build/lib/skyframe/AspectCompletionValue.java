@@ -13,35 +13,44 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.Function;
+import com.google.auto.value.AutoValue;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
+import com.google.devtools.build.lib.skyframe.CompletionFunction.TopLevelActionLookupKey;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import java.util.Collection;
 
 /**
  * The value of an AspectCompletion. Currently this just stores an Aspect.
  */
 public class AspectCompletionValue implements SkyValue {
-  private final AspectValue aspectValue;
+  @AutoCodec static final AspectCompletionValue INSTANCE = new AspectCompletionValue();
 
-  AspectCompletionValue(AspectValue aspectValue) {
-    this.aspectValue = aspectValue;
+  private AspectCompletionValue() {}
+
+  public static Iterable<SkyKey> keys(Collection<AspectKey> keys, TopLevelArtifactContext ctx) {
+    return Iterables.transform(keys, k -> AspectCompletionKey.create(k, ctx));
   }
 
-  public AspectValue getAspectValue() {
-    return aspectValue;
-  }
+  /** The key of an AspectCompletionValue. */
+  @AutoValue
+  public abstract static class AspectCompletionKey implements TopLevelActionLookupKey {
+    public static AspectCompletionKey create(
+        AspectKey aspectKey, TopLevelArtifactContext topLevelArtifactContext) {
+      return new AutoValue_AspectCompletionValue_AspectCompletionKey(
+          topLevelArtifactContext, aspectKey);
+    }
 
-  public static Iterable<SkyKey> keys(Collection<AspectValue> targets) {
-    return Iterables.transform(
-        targets,
-        new Function<AspectValue, SkyKey>() {
-          @Override
-          public SkyKey apply(AspectValue aspectValue) {
-            return new SkyKey(SkyFunctions.ASPECT_COMPLETION, aspectValue.getKey());
-          }
-        });
+    @Override
+    public abstract AspectKey actionLookupKey();
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.ASPECT_COMPLETION;
+    }
   }
 }

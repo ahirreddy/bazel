@@ -14,10 +14,10 @@
 
 package com.google.devtools.build.lib.packages;
 
+import static com.google.devtools.build.lib.packages.Attribute.ANY_RULE;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
@@ -28,39 +28,56 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Interner;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.PatchTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.SplitTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
+import com.google.devtools.build.lib.events.NullEventHandler;
+import com.google.devtools.build.lib.packages.Attribute.ComputedDefault;
+import com.google.devtools.build.lib.packages.Attribute.SkylarkComputedDefaultTemplate;
+import com.google.devtools.build.lib.packages.Attribute.SkylarkComputedDefaultTemplate.CannotPrecomputeDefaultsException;
+import com.google.devtools.build.lib.packages.BuildType.LabelConversionContext;
 import com.google.devtools.build.lib.packages.BuildType.SelectorList;
 import com.google.devtools.build.lib.packages.ConfigurationFragmentPolicy.MissingFragmentPolicy;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.syntax.Argument;
-import com.google.devtools.build.lib.syntax.BaseFunction;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.FragmentClassNameResolver;
-import com.google.devtools.build.lib.syntax.FuncallExpression;
-import com.google.devtools.build.lib.syntax.GlobList;
-import com.google.devtools.build.lib.syntax.Runtime;
-import com.google.devtools.build.lib.syntax.SkylarkList;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
+import com.google.devtools.build.lib.packages.RuleFactory.AttributeValues;
+import com.google.devtools.build.lib.packages.Type.ConversionException;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
+import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.lib.syntax.Sequence;
+import com.google.devtools.build.lib.syntax.Starlark;
+import com.google.devtools.build.lib.syntax.StarlarkCallable;
+import com.google.devtools.build.lib.syntax.StarlarkThread;
+import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.util.StringUtil;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
@@ -68,41 +85,76 @@ import javax.annotation.concurrent.Immutable;
  * Instances of RuleClass encapsulate the set of attributes of a given "class" of rule, such as
  * <code>cc_binary</code>.
  *
- * <p>This is an instance of the "meta-class" pattern for Rules: we achieve using <i>values</i>
- * what subclasses achieve using <i>types</i>.  (The "Design Patterns" book doesn't include this
- * pattern, so think of it as something like a cross between a Flyweight and a State pattern. Like
- * Flyweight, we avoid repeatedly storing data that belongs to many instances. Like State, we
- * delegate from Rule to RuleClass for the specific behavior of that rule (though unlike state, a
- * Rule object never changes its RuleClass).  This avoids the need to declare one Java class per
- * class of Rule, yet achieves the same behavior.)
+ * <p>This is an instance of the "meta-class" pattern for Rules: we achieve using <i>values</i> what
+ * subclasses achieve using <i>types</i>. (The "Design Patterns" book doesn't include this pattern,
+ * so think of it as something like a cross between a Flyweight and a State pattern. Like Flyweight,
+ * we avoid repeatedly storing data that belongs to many instances. Like State, we delegate from
+ * Rule to RuleClass for the specific behavior of that rule (though unlike state, a Rule object
+ * never changes its RuleClass). This avoids the need to declare one Java class per class of Rule,
+ * yet achieves the same behavior.)
  *
  * <p>The use of a metaclass also allows us to compute a mapping from Attributes to small integers
- * and share this between all rules of the same metaclass.  This means we can save the attribute
+ * and share this between all rules of the same metaclass. This means we can save the attribute
  * dictionary for each rule instance using an array, which is much more compact than a hashtable.
  *
  * <p>Rule classes whose names start with "$" are considered "abstract"; since they are not valid
  * identifiers, they cannot be named in the build language. However, they are useful for grouping
  * related attributes which are inherited.
  *
- * <p>The exact values in this class are important.  In particular:
+ * <p>The exact values in this class are important. In particular:
+ *
  * <ul>
- * <li>Changing an attribute from MANDATORY to OPTIONAL creates the potential for null-pointer
- *     exceptions in code that expects a value.
- * <li>Attributes whose names are preceded by a "$" or a ":" are "hidden", and cannot be redefined
- *     in a BUILD file.  They are a useful way of adding a special dependency. By convention,
- *     attributes starting with "$" are implicit dependencies, and those starting with a ":" are
- *     late-bound implicit dependencies, i.e. dependencies that can only be resolved when the
- *     configuration is known.
- * <li>Attributes should not be introduced into the hierarchy higher then necessary.
- * <li>The 'deps' and 'data' attributes are treated specially by the code that builds the runfiles
- *     tree.  All targets appearing in these attributes appears beneath the ".runfiles" tree; in
- *     addition, "deps" may have rule-specific semantics.
+ *   <li>Changing an attribute from MANDATORY to OPTIONAL creates the potential for null-pointer
+ *       exceptions in code that expects a value.
+ *   <li>Attributes whose names are preceded by a "$" or a ":" are "hidden", and cannot be redefined
+ *       in a BUILD file. They are a useful way of adding a special dependency. By convention,
+ *       attributes starting with "$" are implicit dependencies, and those starting with a ":" are
+ *       late-bound implicit dependencies, i.e. dependencies that can only be resolved when the
+ *       configuration is known.
+ *   <li>Attributes should not be introduced into the hierarchy higher then necessary.
+ *   <li>The 'deps' and 'data' attributes are treated specially by the code that builds the runfiles
+ *       tree. All targets appearing in these attributes appears beneath the ".runfiles" tree; in
+ *       addition, "deps" may have rule-specific semantics.
  * </ul>
+ *
+ * TODO(bazel-team): Consider breaking up this class in more manageable subclasses.
  */
+// Non-final only for mocking in tests. Do not subclass!
 @Immutable
-public final class RuleClass {
-  public static final Function<? super Rule, Map<String, Label>> NO_EXTERNAL_BINDINGS =
-        Functions.<Map<String, Label>>constant(ImmutableMap.<String, Label>of());
+@AutoCodec
+public class RuleClass {
+
+  /**
+   * Maximum attributes per RuleClass. Current value was chosen to be high enough to be considered a
+   * non-breaking change for reasonable use. It was also chosen to be low enough to give significant
+   * headroom before hitting {@link AttributeContainer}'s limits.
+   */
+  private static final int MAX_ATTRIBUTES = 200;
+
+  /**
+   * Maximum attribute name length. Chosen to accommodate existing and prevent extreme outliers from
+   * forming - extreme values create bloat, both in memory usage and various outputs, including but
+   * not limited to, query output.
+   */
+  private static final int MAX_ATTRIBUTE_NAME_LENGTH = 128;
+
+  @AutoCodec
+  static final Function<? super Rule, Map<String, Label>> NO_EXTERNAL_BINDINGS =
+      Functions.<Map<String, Label>>constant(ImmutableMap.<String, Label>of());
+
+  @AutoCodec
+  static final Function<? super Rule, Set<String>> NO_OPTION_REFERENCE =
+      Functions.<Set<String>>constant(ImmutableSet.<String>of());
+
+  public static final PathFragment THIRD_PARTY_PREFIX = PathFragment.create("third_party");
+  public static final PathFragment EXPERIMENTAL_PREFIX = PathFragment.create("experimental");
+  public static final String EXEC_COMPATIBLE_WITH_ATTR = "exec_compatible_with";
+  public static final String EXEC_PROPERTIES = "exec_properties";
+  /*
+   * The attribute that declares the set of license labels which apply to this target.
+   */
+  public static final String APPLICABLE_LICENSES_ATTR = "applicable_licenses";
+
   /**
    * A constraint for the package name of the Rule instances.
    */
@@ -159,45 +211,42 @@ public final class RuleClass {
     }
   }
 
-  /**
-   * Using this callback function, rules can override their own configuration during the
-   * analysis phase.
-   */
-  public interface Configurator<TConfig, TRule> {
-    TConfig apply(TRule rule, TConfig configuration);
-
-    /**
-     * Describes the Bazel feature this configurator is used for. Used for checking that dynamic
-     * configuration transitions are only applied to expected configurator types.
-     */
-    String getCategory();
-  }
-
-  /**
-   * A factory or builder class for rule implementations.
-   */
-  public interface ConfiguredTargetFactory<TConfiguredTarget, TContext> {
+  /** A factory or builder class for rule implementations. */
+  public interface ConfiguredTargetFactory<
+      TConfiguredTarget, TContext, TActionConflictException extends Throwable> {
     /**
      * Returns a fully initialized configured target instance using the given context.
+     *
+     * @throws RuleErrorException if configured target creation could not be completed due to rule
+     *     errors
+     * @throws TActionConflictException if there were conflicts during action registration
      */
-    TConfiguredTarget create(TContext ruleContext) throws InterruptedException;
+    TConfiguredTarget create(TContext ruleContext)
+        throws InterruptedException, RuleErrorException, TActionConflictException;
+
+    /**
+     * Exception indicating that configured target creation could not be completed. General error
+     * messaging should be done via {@link RuleErrorConsumer}; this exception only interrupts
+     * configured target creation in cases where it can no longer continue.
+     */
+    final class RuleErrorException extends Exception {
+      RuleErrorException() {
+        super();
+      }
+
+      RuleErrorException(String message) {
+        super(message);
+      }
+
+      RuleErrorException(Throwable cause) {
+        super(cause);
+      }
+
+      RuleErrorException(String message, Throwable cause) {
+        super(message, cause);
+      }
+    }
   }
-
-  /**
-   * Default rule configurator, it doesn't change the assigned configuration.
-   */
-  public static final RuleClass.Configurator<Object, Object> NO_CHANGE =
-      new RuleClass.Configurator<Object, Object>() {
-        @Override
-        public Object apply(Object rule, Object configuration) {
-          return configuration;
-        }
-
-        @Override
-        public String getCategory() {
-          return "core";
-        }
-  };
 
   /**
    * For Bazel's constraint system: the attribute that declares the set of environments a rule
@@ -226,14 +275,31 @@ public final class RuleClass {
       "$" + COMPATIBLE_ENVIRONMENT_ATTR;
 
   /**
-   * Checks if an attribute is part of the constraint system.
+   * Name of the attribute that stores all {@link
+   * com.google.devtools.build.lib.rules.config.ConfigRuleClasses} labels this rule references (i.e.
+   * select() keys). This is specially populated in {@link #populateRuleAttributeValues}.
+   *
+   * <p>This isn't technically necessary for builds: select() keys are evaluated in {@link
+   * com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction#getConfigConditions} instead of
+   * normal dependency resolution because they're needed to determine other dependencies. So there's
+   * no intrinsic reason why we need an extra attribute to store them.
+   *
+   * <p>There are three reasons why we still create this attribute:
+   *
+   * <ol>
+   *   <li>Collecting them once in {@link #populateRuleAttributeValues} instead of multiple times in
+   *       ConfiguredTargetFunction saves extra looping over the rule's attributes.
+   *   <li>Query's dependency resolution has no equivalent of {@link
+   *       com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction#getConfigConditions} and
+   *       we need to make sure its coverage remains complete.
+   *   <li>Manual configuration trimming uses the normal dependency resolution process to work
+   *       correctly and config_setting keys are subject to this trimming.
+   * </ol>
+   *
+   * <p>It should be possible to clean up these issues if we decide we don't want an artificial
+   * attribute dependency. But care has to be taken to do that safely.
    */
-  public static boolean isConstraintAttribute(String attr) {
-    return RESTRICTED_ENVIRONMENT_ATTR.equals(attr)
-        || COMPATIBLE_ENVIRONMENT_ATTR.equals(attr)
-        || DEFAULT_RESTRICTED_ENVIRONMENT_ATTR.equals(attr)
-        || DEFAULT_COMPATIBLE_ENVIRONMENT_ATTR.equals(attr);
-  }
+  public static final String CONFIG_SETTING_DEPS_ATTRIBUTE = "$config_dependencies";
 
   /**
    * A support class to make it easier to create {@code RuleClass} instances.
@@ -353,7 +419,7 @@ public final class RuleClass {
             Preconditions.checkState(presentAttribute != null,
                 "Missing mandatory '%s' attribute in test rule class.", attribute.getName());
             Preconditions.checkState(presentAttribute.getType().equals(attribute.getType()),
-                "Mandatory attribute '%s' in test rule class has incorrect type (expcected %s).",
+                "Mandatory attribute '%s' in test rule class has incorrect type (expected %s).",
                 attribute.getName(), attribute.getType());
           }
         }
@@ -398,106 +464,276 @@ public final class RuleClass {
       public abstract void checkAttributes(Map<String, Attribute> attributes);
     }
 
-    /**
-     * A predicate that filters rule classes based on their names.
-     */
-    public static class RuleClassNamePredicate implements Predicate<RuleClass> {
+    /** A predicate that filters rule classes based on their names. */
+    @AutoCodec
+    public static class RuleClassNamePredicate {
 
-      private final Set<String> ruleClasses;
+      private static final RuleClassNamePredicate UNSPECIFIED_INSTANCE =
+          new RuleClassNamePredicate(ImmutableSet.of(), PredicateType.UNSPECIFIED, null);
 
-      public RuleClassNamePredicate(Iterable<String> ruleClasses) {
-        this.ruleClasses = ImmutableSet.copyOf(ruleClasses);
+      private final ImmutableSet<String> ruleClassNames;
+
+      private final PredicateType predicateType;
+
+      private final Predicate<String> ruleClassNamePredicate;
+      private final Predicate<RuleClass> ruleClassPredicate;
+      // if non-null, used ONLY for checking overlap
+      @Nullable private final Set<?> overlappable;
+
+      @VisibleForSerialization
+      enum PredicateType {
+        ONLY,
+        All_EXCEPT,
+        UNSPECIFIED
       }
 
-      public RuleClassNamePredicate(String... ruleClasses) {
-        this.ruleClasses = ImmutableSet.copyOf(ruleClasses);
+      @VisibleForSerialization
+      RuleClassNamePredicate(
+          ImmutableSet<String> ruleClassNames, PredicateType predicateType, Set<?> overlappable) {
+        this.ruleClassNames = ruleClassNames;
+        this.predicateType = predicateType;
+        this.overlappable = overlappable;
+
+        switch (predicateType) {
+          case All_EXCEPT:
+            Predicate<String> containing = only(ruleClassNames).asPredicateOfRuleClassName();
+            ruleClassNamePredicate =
+                new DescribedPredicate<>(
+                    Predicates.not(containing), "all but " + containing.toString());
+            ruleClassPredicate =
+                new DescribedPredicate<>(
+                    Predicates.compose(ruleClassNamePredicate, RuleClass::getName),
+                    ruleClassNamePredicate.toString());
+            break;
+          case ONLY:
+            ruleClassNamePredicate =
+                new DescribedPredicate<>(
+                    Predicates.in(ruleClassNames), StringUtil.joinEnglishList(ruleClassNames));
+            ruleClassPredicate =
+                new DescribedPredicate<>(
+                    Predicates.compose(ruleClassNamePredicate, RuleClass::getName),
+                    ruleClassNamePredicate.toString());
+            break;
+          case UNSPECIFIED:
+            ruleClassNamePredicate = Predicates.alwaysTrue();
+            ruleClassPredicate = Predicates.alwaysTrue();
+            break;
+          default:
+            // This shouldn't happen normally since the constructor is private and within this file.
+            throw new IllegalArgumentException(
+                "Predicate type was not specified when constructing a RuleClassNamePredicate.");
+        }
       }
 
-      public RuleClassNamePredicate() {
-        this(ImmutableSet.<String>of());
+      public static RuleClassNamePredicate only(Iterable<String> ruleClassNamesAsIterable) {
+        ImmutableSet<String> ruleClassNames = ImmutableSet.copyOf(ruleClassNamesAsIterable);
+        return new RuleClassNamePredicate(ruleClassNames, PredicateType.ONLY, ruleClassNames);
       }
 
-      @Override
-      public boolean apply(RuleClass ruleClass) {
-        return ruleClasses.contains(ruleClass.getName());
+      public static RuleClassNamePredicate only(String... ruleClasses) {
+        return only(Arrays.asList(ruleClasses));
+      }
+
+      public static RuleClassNamePredicate allExcept(String... ruleClasses) {
+        ImmutableSet<String> ruleClassNames = ImmutableSet.copyOf(ruleClasses);
+        Preconditions.checkState(!ruleClassNames.isEmpty(), "Use unspecified() instead");
+        return new RuleClassNamePredicate(ruleClassNames, PredicateType.All_EXCEPT, null);
+      }
+
+      /**
+       * This is a special sentinel value which represents a "default" {@link
+       * RuleClassNamePredicate} which is unspecified. Note that a call to its {@link
+       * RuleClassNamePredicate#asPredicateOfRuleClass} produces {@code
+       * Predicates.<RuleClass>alwaysTrue()}, which is a sentinel value for other parts of bazel.
+       */
+      public static RuleClassNamePredicate unspecified() {
+        return UNSPECIFIED_INSTANCE;
+      }
+
+      public final Predicate<String> asPredicateOfRuleClassName() {
+        return ruleClassNamePredicate;
+      }
+
+      public final Predicate<RuleClass> asPredicateOfRuleClass() {
+        return ruleClassPredicate;
+      }
+
+      /**
+       * Determines whether two {@code RuleClassNamePredicate}s should be considered incompatible as
+       * rule class predicate and rule class warning predicate.
+       *
+       * <p>Specifically, if both list sets of explicit rule class names to permit, those two sets
+       * must be disjoint, so the restriction only applies when both predicates have been created by
+       * {@link #only}.
+       */
+      boolean consideredOverlapping(RuleClassNamePredicate that) {
+        return this.overlappable != null
+            && that.overlappable != null
+            && !Collections.disjoint(this.overlappable, that.overlappable);
       }
 
       @Override
       public int hashCode() {
-        return ruleClasses.hashCode();
+        return Objects.hash(ruleClassNames, predicateType);
       }
 
       @Override
-      public boolean equals(Object o) {
-        return (o instanceof RuleClassNamePredicate)
-            && ruleClasses.equals(((RuleClassNamePredicate) o).ruleClasses);
+      public boolean equals(Object obj) {
+        // NOTE: Specifically not checking equality of ruleClassPredicate.
+        // By construction, if the name predicates are equals, the rule class predicates are, too.
+        return obj instanceof RuleClassNamePredicate
+            && ruleClassNames.equals(((RuleClassNamePredicate) obj).ruleClassNames)
+            && predicateType.equals(((RuleClassNamePredicate) obj).predicateType);
       }
 
       @Override
       public String toString() {
-        return ruleClasses.isEmpty() ? "nothing" : StringUtil.joinEnglishList(ruleClasses);
+        return ruleClassNamePredicate.toString();
+      }
+
+      /** A pass-through predicate, except that an explicit {@link #toString()} is provided. */
+      private static class DescribedPredicate<T> implements Predicate<T> {
+        private final Predicate<T> delegate; // the actual predicate
+        private final String description;
+
+        private DescribedPredicate(Predicate<T> delegate, String description) {
+          this.delegate = delegate;
+          this.description = description;
+        }
+
+        @Override
+        public boolean apply(T input) {
+          return delegate.apply(input);
+        }
+
+        @Override
+        public int hashCode() {
+          return delegate.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+          return obj instanceof DescribedPredicate
+              && delegate.equals(((DescribedPredicate<?>) obj).delegate);
+        }
+
+        @Override
+        public String toString() {
+          return description;
+        }
       }
     }
 
     /**
-     * List of required attributes for normal rules, name and type.
+     * Name of default attribute implicitly added to all Starlark RuleClasses that are {@code
+     * build_setting}s.
      */
-    public static final List<Attribute> REQUIRED_ATTRIBUTES_FOR_NORMAL_RULES = ImmutableList.of(
-        attr("tags", Type.STRING_LIST).build()
-    );
+    public static final String STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME = "build_setting_default";
 
-    /**
-     * List of required attributes for test rules, name and type.
-     */
-    public static final List<Attribute> REQUIRED_ATTRIBUTES_FOR_TESTS = ImmutableList.of(
-        attr("tags", Type.STRING_LIST).build(),
-        attr("size", Type.STRING).build(),
-        attr("timeout", Type.STRING).build(),
-        attr("flaky", Type.BOOLEAN).build(),
-        attr("shard_count", Type.INTEGER).build(),
-        attr("local", Type.BOOLEAN).build()
-    );
+    public static final String BUILD_SETTING_DEFAULT_NONCONFIGURABLE =
+        "Build setting defaults are referenced during analysis.";
+
+    /** List of required attributes for normal rules, name and type. */
+    public static final ImmutableList<Attribute> REQUIRED_ATTRIBUTES_FOR_NORMAL_RULES =
+        ImmutableList.of(attr("tags", Type.STRING_LIST).build());
+
+    /** List of required attributes for test rules, name and type. */
+    public static final ImmutableList<Attribute> REQUIRED_ATTRIBUTES_FOR_TESTS =
+        ImmutableList.of(
+            attr("tags", Type.STRING_LIST).build(),
+            attr("size", Type.STRING).build(),
+            attr("timeout", Type.STRING).build(),
+            attr("flaky", Type.BOOLEAN).build(),
+            attr("shard_count", Type.INTEGER).build(),
+            attr("local", Type.BOOLEAN).build());
 
     private String name;
+    private ImmutableList<StarlarkThread.CallStackEntry> callstack = ImmutableList.of();
     private final RuleClassType type;
-    private final boolean skylark;
+    private final boolean starlark;
+    private boolean starlarkTestable = false;
     private boolean documented;
     private boolean publicByDefault = false;
     private boolean binaryOutput = true;
     private boolean workspaceOnly = false;
-    private boolean outputsDefaultExecutable = false;
+    private boolean isExecutableStarlark = false;
+    private boolean isAnalysisTest = false;
+    private boolean hasAnalysisTestTransition = false;
+    private boolean hasFunctionTransitionWhitelist = false;
+    private boolean hasStarlarkRuleTransition = false;
+    private boolean ignoreLicenses = false;
     private ImplicitOutputsFunction implicitOutputsFunction = ImplicitOutputsFunction.NONE;
-    private Configurator<?, ?> configurator = NO_CHANGE;
-    private ConfiguredTargetFactory<?, ?> configuredTargetFactory = null;
+    private TransitionFactory<Rule> transitionFactory;
+    private ConfiguredTargetFactory<?, ?, ?> configuredTargetFactory = null;
     private PredicateWithMessage<Rule> validityPredicate =
         PredicatesWithMessage.<Rule>alwaysTrue();
     private Predicate<String> preferredDependencyPredicate = Predicates.alwaysFalse();
-    private List<Class<?>> advertisedProviders = new ArrayList<>();
-    private BaseFunction configuredTargetFunction = null;
+    private AdvertisedProviderSet.Builder advertisedProviders = AdvertisedProviderSet.builder();
+    private StarlarkCallable configuredTargetFunction = null;
+    private BuildSetting buildSetting = null;
     private Function<? super Rule, Map<String, Label>> externalBindingsFunction =
         NO_EXTERNAL_BINDINGS;
-    private Environment ruleDefinitionEnvironment = null;
+    private Function<? super Rule, ? extends Set<String>> optionReferenceFunction =
+        NO_OPTION_REFERENCE;
+    /** This field and the next are null iff the rule is native. */
+    @Nullable private Label ruleDefinitionEnvironmentLabel;
+
+    @Nullable private byte[] ruleDefinitionEnvironmentDigest = null;
     private ConfigurationFragmentPolicy.Builder configurationFragmentPolicy =
         new ConfigurationFragmentPolicy.Builder();
 
     private boolean supportsConstraintChecking = true;
 
+    /**
+     * The policy on whether Bazel should enforce that third_party rules declare <code>licenses().
+     * </code>. This is only intended for the migration of <a
+     * href="https://github.com/bazelbuild/bazel/issues/7444">GitHub #7444</a>. Our final end state
+     * is to have no license-related logic whatsoever. But that's going to take some time.
+     */
+    public enum ThirdPartyLicenseExistencePolicy {
+      /**
+       * Always do this check, overriding whatever {@link
+       * StarlarkSemanticsOptions#incompatibleDisableThirdPartyLicenseChecking} says.
+       */
+      ALWAYS_CHECK,
+
+      /**
+       * Never do this check, overriding whatever {@link
+       * StarlarkSemanticsOptions#incompatibleDisableThirdPartyLicenseChecking} says.
+       */
+      NEVER_CHECK,
+
+      /**
+       * Do whatever {@link StarlarkSemanticsOptions#incompatibleDisableThirdPartyLicenseChecking}
+       * says.
+       */
+      USER_CONTROLLABLE
+    }
+
+    private ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy;
+
     private final Map<String, Attribute> attributes = new LinkedHashMap<>();
+    private final Set<Label> requiredToolchains = new HashSet<>();
+    private boolean useToolchainResolution = true;
+    private Set<Label> executionPlatformConstraints = new HashSet<>();
+    private OutputFile.Kind outputFileKind = OutputFile.Kind.FILE;
+    private final Map<String, ExecGroup> execGroups = new HashMap<>();
 
     /**
-     * Constructs a new {@code RuleClassBuilder} using all attributes from all
-     * parent rule classes. An attribute cannot exist in more than one parent.
+     * Constructs a new {@code RuleClassBuilder} using all attributes from all parent rule classes.
+     * An attribute cannot exist in more than one parent.
      *
-     * <p>The rule type affects the the allowed names and the required
-     * attributes (see {@link RuleClassType}).
+     * <p>The rule type affects the allowed names and the required attributes (see {@link
+     * RuleClassType}).
      *
-     * @throws IllegalArgumentException if an attribute with the same name exists
-     * in more than one parent
+     * @throws IllegalArgumentException if an attribute with the same name exists in more than one
+     *     parent
      */
-    public Builder(String name, RuleClassType type, boolean skylark, RuleClass... parents) {
+    public Builder(String name, RuleClassType type, boolean starlark, RuleClass... parents) {
       this.name = name;
-      this.skylark = skylark;
+      this.starlark = starlark;
       this.type = type;
+      Preconditions.checkState(starlark || type != RuleClassType.PLACEHOLDER, name);
       this.documented = type != RuleClassType.ABSTRACT;
       for (RuleClass parent : parents) {
         if (parent.getValidityPredicate() != PredicatesWithMessage.<Rule>alwaysTrue()) {
@@ -506,23 +742,35 @@ public final class RuleClass {
         if (parent.preferredDependencyPredicate != Predicates.<String>alwaysFalse()) {
           setPreferredDependencyPredicate(parent.preferredDependencyPredicate);
         }
-        configurationFragmentPolicy.requiresConfigurationFragments(
-            parent.getConfigurationFragmentPolicy().getRequiredConfigurationFragments());
+        configurationFragmentPolicy
+            .includeConfigurationFragmentsFrom(parent.getConfigurationFragmentPolicy());
         configurationFragmentPolicy.setMissingFragmentPolicy(
             parent.getConfigurationFragmentPolicy().getMissingFragmentPolicy());
         supportsConstraintChecking = parent.supportsConstraintChecking;
 
+        addRequiredToolchains(parent.getRequiredToolchains());
+        useToolchainResolution = parent.useToolchainResolution;
+        addExecutionPlatformConstraints(parent.getExecutionPlatformConstraints());
+        try {
+          addExecGroups(parent.getExecGroups());
+        } catch (DuplicateExecGroupError e) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "An execution group named '%s' is inherited multiple times in %s ruleclass",
+                  e.getDuplicateGroup(), name));
+        }
+
         for (Attribute attribute : parent.getAttributes()) {
           String attrName = attribute.getName();
           Preconditions.checkArgument(
-              !attributes.containsKey(attrName) || attributes.get(attrName) == attribute,
+              !attributes.containsKey(attrName) || attributes.get(attrName).equals(attribute),
               "Attribute %s is inherited multiple times in %s ruleclass",
               attrName,
               name);
           attributes.put(attrName, attribute);
         }
 
-        advertisedProviders.addAll(parent.getAdvertisedProviders());
+        advertisedProviders.addParent(parent.getAdvertisedProviders());
       }
       // TODO(bazel-team): move this testonly attribute setting to somewhere else
       // preferably to some base RuleClass implementation.
@@ -544,69 +792,215 @@ public final class RuleClass {
      * @throws IllegalStateException if any of the required attributes is missing
      */
     public RuleClass build() {
-      return build(name);
+      // For built-ins, name == key
+      return build(name, name);
     }
 
-    /**
-     * Same as {@link #build} except with setting the name parameter.
-     */
-    public RuleClass build(String name) {
+    /** Same as {@link #build} except with setting the name and key parameters. */
+    public RuleClass build(String name, String key) {
       Preconditions.checkArgument(this.name.isEmpty() || this.name.equals(name));
       type.checkName(name);
-      type.checkAttributes(attributes);
-      boolean skylarkExecutable =
-          skylark && (type == RuleClassType.NORMAL || type == RuleClassType.TEST);
+
+      checkAttributes(name, type, attributes);
+
       Preconditions.checkState(
           (type == RuleClassType.ABSTRACT)
-          == (configuredTargetFactory == null && configuredTargetFunction == null));
-      Preconditions.checkState(skylarkExecutable == (configuredTargetFunction != null));
-      Preconditions.checkState(skylarkExecutable == (ruleDefinitionEnvironment != null));
-      Preconditions.checkState(workspaceOnly || externalBindingsFunction == NO_EXTERNAL_BINDINGS);
+              == (configuredTargetFactory == null && configuredTargetFunction == null),
+          "Bad combo for %s: %s %s %s",
+          name,
+          type,
+          configuredTargetFactory,
+          configuredTargetFunction);
+      if (!workspaceOnly) {
+        if (starlark) {
+          assertStarlarkRuleClassHasImplementationFunction();
+          assertStarlarkRuleClassHasEnvironmentLabel();
+        }
+        Preconditions.checkState(externalBindingsFunction == NO_EXTERNAL_BINDINGS);
+      }
+      if (type == RuleClassType.PLACEHOLDER) {
+        Preconditions.checkNotNull(ruleDefinitionEnvironmentDigest, this.name);
+      }
 
-      return new RuleClass(name, skylark, skylarkExecutable, documented, publicByDefault,
-          binaryOutput, workspaceOnly, outputsDefaultExecutable, implicitOutputsFunction,
-          configurator, configuredTargetFactory, validityPredicate, preferredDependencyPredicate,
-          ImmutableSet.copyOf(advertisedProviders), configuredTargetFunction,
-          externalBindingsFunction, ruleDefinitionEnvironment, configurationFragmentPolicy.build(),
-          supportsConstraintChecking, attributes.values().toArray(new Attribute[0]));
+      if (buildSetting != null) {
+        Type<?> type = buildSetting.getType();
+        Attribute.Builder<?> attrBuilder =
+            attr(STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, type)
+                .nonconfigurable(BUILD_SETTING_DEFAULT_NONCONFIGURABLE)
+                .mandatory();
+        if (BuildType.isLabelType(type)) {
+          attrBuilder.allowedFileTypes(FileTypeSet.ANY_FILE);
+          attrBuilder.allowedRuleClasses(ANY_RULE);
+        }
+        this.add(attrBuilder);
+
+        // Build setting rules should opt out of toolchain resolution, since they form part of the
+        // configuration.
+        this.useToolchainResolution(false);
+      }
+
+      return new RuleClass(
+          name,
+          callstack,
+          key,
+          type,
+          starlark,
+          starlarkTestable,
+          documented,
+          publicByDefault,
+          binaryOutput,
+          workspaceOnly,
+          isExecutableStarlark,
+          isAnalysisTest,
+          hasAnalysisTestTransition,
+          hasFunctionTransitionWhitelist,
+          ignoreLicenses,
+          implicitOutputsFunction,
+          transitionFactory,
+          configuredTargetFactory,
+          validityPredicate,
+          preferredDependencyPredicate,
+          advertisedProviders.build(),
+          configuredTargetFunction,
+          externalBindingsFunction,
+          optionReferenceFunction,
+          ruleDefinitionEnvironmentLabel,
+          ruleDefinitionEnvironmentDigest,
+          configurationFragmentPolicy.build(),
+          supportsConstraintChecking,
+          thirdPartyLicenseExistencePolicy,
+          requiredToolchains,
+          useToolchainResolution,
+          executionPlatformConstraints,
+          execGroups,
+          outputFileKind,
+          attributes.values(),
+          buildSetting);
+    }
+
+    private static void checkAttributes(
+        String ruleClassName, RuleClassType ruleClassType, Map<String, Attribute> attributes) {
+      Preconditions.checkArgument(
+          attributes.size() <= MAX_ATTRIBUTES,
+          "Rule class %s declared too many attributes (%s > %s)",
+          ruleClassName,
+          attributes.size(),
+          MAX_ATTRIBUTES);
+
+      for (String attributeName : attributes.keySet()) {
+        // TODO(b/151171037): This check would make more sense at Attribute creation time, but the
+        // use of unchecked exceptions in these APIs makes it brittle.
+        Preconditions.checkArgument(
+            attributeName.length() <= MAX_ATTRIBUTE_NAME_LENGTH,
+            "Attribute %s.%s's name is too long (%s > %s)",
+            ruleClassName,
+            attributeName,
+            attributeName.length(),
+            MAX_ATTRIBUTE_NAME_LENGTH);
+      }
+
+      ruleClassType.checkAttributes(attributes);
+    }
+
+    private void assertStarlarkRuleClassHasImplementationFunction() {
+      Preconditions.checkState(
+          (type == RuleClassType.NORMAL || type == RuleClassType.TEST)
+              == (configuredTargetFunction != null),
+          "%s %s",
+          type,
+          configuredTargetFunction);
+    }
+
+    private void assertStarlarkRuleClassHasEnvironmentLabel() {
+      Preconditions.checkState(
+          (type == RuleClassType.NORMAL
+                  || type == RuleClassType.TEST
+                  || type == RuleClassType.PLACEHOLDER)
+              == (ruleDefinitionEnvironmentLabel != null),
+          "Concrete Starlark rule classes can't have null labels: %s %s",
+          ruleDefinitionEnvironmentLabel,
+          type);
     }
 
     /**
-     * Declares that the implementation of the associated rule class requires the given
-     * fragments to be present in this rule's host and target configurations.
+     * Declares that the implementation of the associated rule class requires the given fragments to
+     * be present in this rule's host and target configurations.
      *
      * <p>The value is inherited by subclasses.
      */
     public Builder requiresConfigurationFragments(Class<?>... configurationFragments) {
-      configurationFragmentPolicy.requiresConfigurationFragments(configurationFragments);
+      configurationFragmentPolicy.requiresConfigurationFragments(
+          ImmutableSet.<Class<?>>copyOf(configurationFragments));
       return this;
     }
 
     /**
      * Declares that the implementation of the associated rule class requires the given
-     * fragments to be present in the host configuration.
+     * fragments to be present in the given configuration that isn't the rule's configuration but
+     * is also readable by the rule.
+     *
+     * <p>You probably don't want to use this, because rules generally shouldn't read configurations
+     * other than their own. If you want to declare host config fragments, see
+     * {@link com.google.devtools.build.lib.analysis.config.ConfigAwareRuleClassBuilder}.
      *
      * <p>The value is inherited by subclasses.
      */
-    public Builder requiresHostConfigurationFragments(Class<?>... configurationFragments) {
-      configurationFragmentPolicy
-          .requiresConfigurationFragments(ConfigurationTransition.HOST, configurationFragments);
+    public Builder requiresConfigurationFragments(ConfigurationTransition transition,
+        Class<?>... configurationFragments) {
+      configurationFragmentPolicy.requiresConfigurationFragments(
+          transition,
+          ImmutableSet.<Class<?>>copyOf(configurationFragments));
       return this;
     }
 
     /**
-     * Declares the configuration fragments that are required by this rule for the specified
-     * configuration. Valid transition values are HOST for the host configuration and NONE for
-     * the target configuration.
+     * Declares the configuration fragments that are required by this rule for the target
+     * configuration.
      *
      * <p>In contrast to {@link #requiresConfigurationFragments(Class...)}, this method takes the
-     * names of fragments instead of their classes.
+     * Starlark module names of fragments instead of their classes.
      */
-    public Builder requiresConfigurationFragments(
-        FragmentClassNameResolver fragmentNameResolver,
-        Map<ConfigurationTransition, ImmutableSet<String>> configurationFragmentNames) {
-      configurationFragmentPolicy.requiresConfigurationFragments(
-          fragmentNameResolver, configurationFragmentNames);
+    public Builder requiresConfigurationFragmentsByStarlarkModuleName(
+        Collection<String> configurationFragmentNames) {
+      configurationFragmentPolicy.requiresConfigurationFragmentsByStarlarkBuiltinName(
+          configurationFragmentNames);
+      return this;
+    }
+
+    /**
+     * Declares the configuration fragments that are required by this rule for the host
+     * configuration.
+     */
+    /**
+     * Declares that the implementation of the associated rule class requires the given fragments to
+     * be present in the given configuration that isn't the rule's configuration but is also
+     * readable by the rule.
+     *
+     * <p>In contrast to {@link #requiresConfigurationFragments(ConfigurationTransition, Class...)},
+     * this method takes Starlark module names of fragments instead of their classes. *
+     *
+     * <p>You probably don't want to use this, because rules generally shouldn't read configurations
+     * other than their own. If you want to declare host config fragments, see {@link
+     * com.google.devtools.build.lib.analysis.config.ConfigAwareRuleClassBuilder}.
+     *
+     * <p>The value is inherited by subclasses.
+     */
+    public Builder requiresConfigurationFragmentsByStarlarkModuleName(
+        ConfigurationTransition transition, Collection<String> configurationFragmentNames) {
+      configurationFragmentPolicy.requiresConfigurationFragmentsByStarlarkBuiltinName(
+          transition, configurationFragmentNames);
+      return this;
+    }
+
+    /** Sets the Starlark call stack associated with this rule class's creation. */
+    public Builder setCallStack(ImmutableList<StarlarkThread.CallStackEntry> callstack) {
+      this.callstack = callstack;
+      return this;
+    }
+
+    public Builder setStarlarkTestable() {
+      Preconditions.checkState(starlark, "Cannot set starlarkTestable on a non-Starlark rule");
+      starlarkTestable = true;
       return this;
     }
 
@@ -669,15 +1063,52 @@ public final class RuleClass {
       return this;
     }
 
-    public Builder cfg(Configurator<?, ?> configurator) {
+    /**
+     * Applies the given transition to all incoming edges for this rule class.
+     *
+     * <p>This cannot be a {@link SplitTransition} because that requires coordination with the
+     * rule's parent: use {@link Attribute.Builder#cfg(TransitionFactory)} on the parent to declare
+     * splits.
+     *
+     * <p>If you need the transition to depend on the rule it's being applied to, use {@link
+     * #cfg(TransitionFactory)}.
+     */
+    public Builder cfg(PatchTransition transition) {
+      return cfg((TransitionFactory<Rule>) (unused) -> (transition));
+    }
+
+    /**
+     * Applies the given transition factory to all incoming edges for this rule class.
+     *
+     * <p>Unlike {@link #cfg(PatchTransition)}, the factory can examine the rule when deciding what
+     * transition to use.
+     */
+    public Builder cfg(TransitionFactory<Rule> transitionFactory) {
       Preconditions.checkState(type != RuleClassType.ABSTRACT,
           "Setting not inherited property (cfg) of abstract rule class '%s'", name);
-      this.configurator = configurator;
+      Preconditions.checkState(this.transitionFactory == null,
+          "Property cfg has already been set");
+      Preconditions.checkNotNull(transitionFactory);
+      Preconditions.checkArgument(!transitionFactory.isSplit());
+      this.transitionFactory = transitionFactory;
       return this;
     }
 
-    public Builder factory(ConfiguredTargetFactory<?, ?> factory) {
+    public void setHasStarlarkRuleTransition() {
+      hasStarlarkRuleTransition = true;
+    }
+
+    public boolean hasStarlarkRuleTransition() {
+      return hasStarlarkRuleTransition;
+    }
+
+    public Builder factory(ConfiguredTargetFactory<?, ?, ?> factory) {
       this.configuredTargetFactory = factory;
+      return this;
+    }
+
+    public Builder setThirdPartyLicenseExistencePolicy(ThirdPartyLicenseExistencePolicy policy) {
+      this.thirdPartyLicenseExistencePolicy = policy;
       return this;
     }
 
@@ -708,14 +1139,44 @@ public final class RuleClass {
      * not be evaluated for the rule.
      */
     public Builder advertiseProvider(Class<?>... providers) {
-      Collections.addAll(advertisedProviders, providers);
+      for (Class<?> provider : providers) {
+        advertisedProviders.addNative(provider);
+      }
       return this;
     }
 
-    private void addAttribute(Attribute attribute) {
-      Preconditions.checkState(!attributes.containsKey(attribute.getName()),
-          "An attribute with the name '%s' already exists.", attribute.getName());
-      attributes.put(attribute.getName(), attribute);
+    public Builder advertiseStarlarkProvider(StarlarkProviderIdentifier... starlarkProviders) {
+      for (StarlarkProviderIdentifier starlarkProviderIdentifier : starlarkProviders) {
+        advertisedProviders.addSkylark(starlarkProviderIdentifier);
+      }
+      return this;
+    }
+
+    /**
+     * Set if the rule can have any provider. This is true for "alias" rules like
+     * <code>bind</code> .
+     */
+    public Builder canHaveAnyProvider() {
+      advertisedProviders.canHaveAnyProvider();
+      return this;
+    }
+
+    /**
+     * Adds an attribute to the builder.
+     *
+     * <p>Throws an IllegalStateException if an attribute of that name already exists.
+     *
+     * <p>TODO(bazel-team): stop using unchecked exceptions in this way.
+     */
+    public Builder addAttribute(Attribute attribute) {
+      Attribute prevVal = attributes.putIfAbsent(attribute.getName(), attribute);
+      if (prevVal != null) {
+        throw new IllegalStateException(
+            String.format(
+                "There is already a built-in attribute '%s' which cannot be overridden.",
+                attribute.getName()));
+      }
+      return this;
     }
 
     private void overrideAttribute(Attribute attribute) {
@@ -731,10 +1192,13 @@ public final class RuleClass {
     }
 
     /**
-     * Builds attribute from the attribute builder and adds it to this rule
-     * class.
+     * Builds provided attribute and attaches it to this rule class.
      *
-     * @param attr attribute builder
+     * <p>Typically rule classes should only declare a handful of attributes - this expectation is
+     * enforced when the instance is built.
+     *
+     * <p>Attribute names should be meaningful but short; overly long names are rejected at
+     * instantiation.
      */
     public <TYPE> Builder add(Attribute.Builder<TYPE> attr) {
       addAttribute(attr.build());
@@ -753,10 +1217,10 @@ public final class RuleClass {
     }
 
     /**
-     * Adds or overrides the attribute in the rule class. Meant for Skylark usage.
+     * Adds or overrides the attribute in the rule class. Meant for Starlark usage.
      *
      * @throws IllegalArgumentException if the attribute overrides an existing attribute (will be
-     * legal in the future).
+     *     legal in the future).
      */
     public void addOrOverrideAttribute(Attribute attribute) {
       String name = attribute.getName();
@@ -771,11 +1235,14 @@ public final class RuleClass {
       return attributes.containsKey(name);
     }
 
-    /**
-     * Sets the rule implementation function. Meant for Skylark usage.
-     */
-    public Builder setConfiguredTargetFunction(BaseFunction func) {
+    /** Sets the rule implementation function. Meant for Starlark usage. */
+    public Builder setConfiguredTargetFunction(StarlarkCallable func) {
       this.configuredTargetFunction = func;
+      return this;
+    }
+
+    public Builder setBuildSetting(BuildSetting buildSetting) {
+      this.buildSetting = buildSetting;
       return this;
     }
 
@@ -785,11 +1252,16 @@ public final class RuleClass {
     }
 
     /**
-     *  Sets the rule definition environment. Meant for Skylark usage.
+     * Sets the rule definition environment label and transitive digest. Meant for Starlark usage.
      */
-    public Builder setRuleDefinitionEnvironment(Environment env) {
-      this.ruleDefinitionEnvironment = env;
+    public Builder setRuleDefinitionEnvironmentLabelAndDigest(Label label, byte[] digest) {
+      this.ruleDefinitionEnvironmentLabel = Preconditions.checkNotNull(label, this.name);
+      this.ruleDefinitionEnvironmentDigest = Preconditions.checkNotNull(digest, this.name);
       return this;
+    }
+
+    public Label getRuleDefinitionEnvironmentLabel() {
+      return this.ruleDefinitionEnvironmentLabel;
     }
 
     /**
@@ -806,13 +1278,67 @@ public final class RuleClass {
     }
 
     /**
-     * This rule class outputs a default executable for every rule with the same name as
-     * the rules's. Only works for Skylark.
+     * This rule class outputs a default executable for every rule with the same name as the
+     * rules's. Only works for Starlark.
      */
-    public <TYPE> Builder setOutputsDefaultExecutable() {
-      this.outputsDefaultExecutable = true;
+    public <TYPE> Builder setExecutableStarlark() {
+      this.isExecutableStarlark = true;
       return this;
     }
+
+    /** This rule class is marked as an analysis test. */
+    public Builder setIsAnalysisTest() {
+      this.isAnalysisTest = true;
+      return this;
+    }
+
+    public boolean isAnalysisTest() {
+      return this.isAnalysisTest;
+    }
+
+    /**
+     * This rule class has at least one attribute with an analysis test transition. (A
+     * starlark-defined transition using analysis_test_transition()).
+     */
+    public Builder setHasAnalysisTestTransition() {
+      this.hasAnalysisTestTransition = true;
+      return this;
+    }
+
+    /**
+     * This rule class has the _whitelist_function_transition attribute. Intended only for Starlark
+     * rules.
+     */
+    public <TYPE> Builder setHasFunctionTransitionWhitelist() {
+      this.hasFunctionTransitionWhitelist = true;
+      return this;
+    }
+
+    /**
+     * This rule class never declares a license regardless of what the rule's or package's <code>
+     * licenses</code> attribute says.
+     */
+    // TODO(b/130286108): remove the licenses attribute completely from such rules.
+    public Builder setIgnoreLicenses() {
+      this.ignoreLicenses = true;
+      return this;
+    }
+
+    public RuleClassType getType() {
+      return this.type;
+    }
+
+    /**
+     * Sets the kind of output files this rule creates.
+     * DO NOT USE! This only exists to support the non-open-sourced {@code fileset} rule.
+     * {@see OutputFile.Kind}.
+     */
+    public Builder setOutputFileKind(OutputFile.Kind outputFileKind) {
+      this.outputFileKind = Preconditions.checkNotNull(outputFileKind);
+      return this;
+    }
+
+
 
     /**
      * Declares that instances of this rule are compatible with the specified environments,
@@ -821,8 +1347,9 @@ public final class RuleClass {
      * {@link com.google.devtools.build.lib.analysis.constraints.ConstraintSemantics} for details.
      */
     public <TYPE> Builder compatibleWith(Label... environments) {
-      add(attr(DEFAULT_COMPATIBLE_ENVIRONMENT_ATTR, LABEL_LIST).cfg(HOST)
-          .value(ImmutableList.copyOf(environments)));
+      add(
+          attr(DEFAULT_COMPATIBLE_ENVIRONMENT_ATTR, LABEL_LIST)
+              .value(ImmutableList.copyOf(environments)));
       return this;
     }
 
@@ -837,9 +1364,10 @@ public final class RuleClass {
     public <TYPE> Builder restrictedTo(Label firstEnvironment, Label... otherEnvironments) {
       ImmutableList<Label> environments = ImmutableList.<Label>builder().add(firstEnvironment)
           .add(otherEnvironments).build();
-      add(attr(DEFAULT_RESTRICTED_ENVIRONMENT_ATTR, LABEL_LIST).cfg(HOST).value(environments));
+      add(
+          attr(DEFAULT_RESTRICTED_ENVIRONMENT_ATTR, LABEL_LIST)
+              .value(environments));
       return this;
-
     }
 
     /**
@@ -858,6 +1386,93 @@ public final class RuleClass {
     }
 
     /**
+     * Causes rules of this type to implicitly reference the configuration fragments associated with
+     * the options its attributes reference.
+     *
+     * <p>This is only intended for use by {@code config_setting} - other rules should not use this!
+     */
+    public Builder setOptionReferenceFunctionForConfigSettingOnly(
+        Function<? super Rule, ? extends Set<String>> optionReferenceFunction) {
+      this.optionReferenceFunction = Preconditions.checkNotNull(optionReferenceFunction);
+      return this;
+    }
+
+    /**
+     * Causes rules of this type to require the specified toolchains be available via toolchain
+     * resolution when a target is configured.
+     */
+    public Builder addRequiredToolchains(Iterable<Label> toolchainLabels) {
+      Iterables.addAll(this.requiredToolchains, toolchainLabels);
+      return this;
+    }
+
+    /**
+     * Causes rules of this type to require the specified toolchains be available via toolchain
+     * resolution when a target is configured.
+     */
+    public Builder addRequiredToolchains(Label... toolchainLabels) {
+      return this.addRequiredToolchains(Lists.newArrayList(toolchainLabels));
+    }
+
+    /**
+     * Adds execution groups to this rule class. Errors out if multiple groups with the same name
+     * are added.
+     */
+    public Builder addExecGroups(Map<String, ExecGroup> execGroups) throws DuplicateExecGroupError {
+      for (Map.Entry<String, ExecGroup> group : execGroups.entrySet()) {
+        String name = group.getKey();
+        if (this.execGroups.put(name, group.getValue()) != null) {
+          throw new DuplicateExecGroupError(name);
+        }
+      }
+      return this;
+    }
+
+    /** An error to help report {@link ExecGroup}s with the same name */
+    static class DuplicateExecGroupError extends EvalException {
+      private final String duplicateGroup;
+
+      DuplicateExecGroupError(String duplicateGroup) {
+        super(
+            null,
+            String.format("Multiple execution groups with the same name: '%s'.", duplicateGroup));
+        this.duplicateGroup = duplicateGroup;
+      }
+
+      String getDuplicateGroup() {
+        return duplicateGroup;
+      }
+    }
+
+    /**
+     * Causes rules to use toolchain resolution to determine the execution platform and toolchains.
+     * Rules that are part of configuring toolchains and platforms should set this to {@code false}.
+     */
+    public Builder useToolchainResolution(boolean flag) {
+      this.useToolchainResolution = flag;
+      return this;
+    }
+
+    /**
+     * Adds additional execution platform constraints that apply for all targets from this rule.
+     *
+     * <p>Please note that this value is inherited by child rules.
+     */
+    public Builder addExecutionPlatformConstraints(Label... constraints) {
+      return this.addExecutionPlatformConstraints(Lists.newArrayList(constraints));
+    }
+
+    /**
+     * Adds additional execution platform constraints that apply for all targets from this rule.
+     *
+     * <p>Please note that this value is inherited by child rules.
+     */
+    public Builder addExecutionPlatformConstraints(Iterable<Label> constraints) {
+      Iterables.addAll(this.executionPlatformConstraints, constraints);
+      return this;
+    }
+
+    /**
      * Returns an Attribute.Builder object which contains a replica of the
      * same attribute in the parent rule if exists.
      *
@@ -870,21 +1485,10 @@ public final class RuleClass {
     }
   }
 
-  public static Builder createPlaceholderBuilder(final String name, final Location ruleLocation,
-      ImmutableList<RuleClass> parents) {
-    return new Builder(name, RuleClassType.PLACEHOLDER, /*skylark=*/true,
-        parents.toArray(new RuleClass[parents.size()])).factory(
-        new ConfiguredTargetFactory<Object, Object>() {
-          @Override
-          public Object create(Object ruleContext) throws InterruptedException {
-            throw new IllegalStateException(
-                "Cannot create configured targets from rule with placeholder class named \"" + name
-                    + "\" at " + ruleLocation);
-          }
-        });
-  }
-
   private final String name; // e.g. "cc_library"
+  private final ImmutableList<StarlarkThread.CallStackEntry> callstack; // of call to 'rule'
+
+  private final String key; // Just the name for native, label + name for Starlark
 
   /**
    * The kind of target represented by this RuleClass (e.g. "cc_library rule").
@@ -894,13 +1498,19 @@ public final class RuleClass {
    */
   private final String targetKind;
 
-  private final boolean isSkylark;
-  private final boolean skylarkExecutable;
+  private final RuleClassType type;
+  private final boolean isStarlark;
+  private final boolean starlarkTestable;
   private final boolean documented;
   private final boolean publicByDefault;
   private final boolean binaryOutput;
   private final boolean workspaceOnly;
-  private final boolean outputsDefaultExecutable;
+  private final boolean isExecutableStarlark;
+  private final boolean isAnalysisTest;
+  private final boolean hasAnalysisTestTransition;
+  private final boolean hasFunctionTransitionWhitelist;
+  private final boolean ignoreLicenses;
+  private final boolean hasAspects;
 
   /**
    * A (unordered) mapping from attribute names to small integers indexing into
@@ -914,6 +1524,9 @@ public final class RuleClass {
    */
   private final ImmutableList<Attribute> attributes;
 
+  /** Names of the non-configurable attributes of this rule class. */
+  private final ImmutableList<String> nonConfigurableAttributes;
+
   /**
    * The set of implicit outputs generated by a rule, expressed as a function
    * of that rule.
@@ -921,15 +1534,13 @@ public final class RuleClass {
   private final ImplicitOutputsFunction implicitOutputsFunction;
 
   /**
-   * The set of implicit outputs generated by a rule, expressed as a function
-   * of that rule.
+   * A factory which will produce a configuration transition that should be applied on any edge of
+   * the configured target graph that leads into a target of this rule class.
    */
-  private final Configurator<?, ?> configurator;
+  private final TransitionFactory<Rule> transitionFactory;
 
-  /**
-   * The factory that creates configured targets from this rule.
-   */
-  private final ConfiguredTargetFactory<?, ?> configuredTargetFactory;
+  /** The factory that creates configured targets from this rule. */
+  private final ConfiguredTargetFactory<?, ?, ?> configuredTargetFactory;
 
   /**
    * The constraint the package name of the rule instance must fulfill
@@ -944,12 +1555,19 @@ public final class RuleClass {
   /**
    * The list of transitive info providers this class advertises to aspects.
    */
-  private final ImmutableSet<Class<?>> advertisedProviders;
+  private final AdvertisedProviderSet advertisedProviders;
 
   /**
-   * The Skylark rule implementation of this RuleClass. Null for non Skylark executable RuleClasses.
+   * The Starlark rule implementation of this RuleClass. Null for non Starlark executable
+   * RuleClasses.
    */
-  @Nullable private final BaseFunction configuredTargetFunction;
+  @Nullable private final StarlarkCallable configuredTargetFunction;
+
+  /**
+   * The BuildSetting associated with this rule. Null for all RuleClasses except Starlark-defined
+   * rules that pass {@code build_setting} to their {@code rule()} declaration.
+   */
+  @Nullable private final BuildSetting buildSetting;
 
   /**
    * Returns the extra bindings a workspace function adds to the WORKSPACE file.
@@ -957,10 +1575,18 @@ public final class RuleClass {
   private final Function<? super Rule, Map<String, Label>> externalBindingsFunction;
 
   /**
-   * The Skylark rule definition environment of this RuleClass.
-   * Null for non Skylark executable RuleClasses.
+   * Returns the options referenced by this rule's attributes.
    */
-  @Nullable private final Environment ruleDefinitionEnvironment;
+  private final Function<? super Rule, ? extends Set<String>> optionReferenceFunction;
+
+  /**
+   * The Starlark rule definition environment's label and hash code of this RuleClass. Null for non
+   * Starlark executable RuleClasses.
+   */
+  @Nullable private final Label ruleDefinitionEnvironmentLabel;
+
+  @Nullable private final byte[] ruleDefinitionEnvironmentDigest;
+  private final OutputFile.Kind outputFileKind;
 
   /**
    * The set of configuration fragments which are legal for this rule's implementation to access.
@@ -974,146 +1600,170 @@ public final class RuleClass {
    */
   private final boolean supportsConstraintChecking;
 
+  private final ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy;
+
+  private final ImmutableSet<Label> requiredToolchains;
+  private final boolean useToolchainResolution;
+  private final ImmutableSet<Label> executionPlatformConstraints;
+  private final ImmutableMap<String, ExecGroup> execGroups;
+
   /**
-   * Helper constructor that skips allowedConfigurationFragmentNames and fragmentNameResolver.
+   * Constructs an instance of RuleClass whose name is 'name', attributes are 'attributes'. The
+   * {@code srcsAllowedFiles} determines which types of files are allowed as parameters to the
+   * "srcs" attribute; rules are always allowed. For the "deps" attribute, there are four cases:
+   *
+   * <ul>
+   *   <li>if the parameter is a file, it is allowed if its file type is given in {@code
+   *       depsAllowedFiles},
+   *   <li>if the parameter is a rule and the rule class is accepted by {@code depsAllowedRules},
+   *       then it is allowed,
+   *   <li>if the parameter is a rule and the rule class is not accepted by {@code
+   *       depsAllowedRules}, but accepted by {@code depsAllowedRulesWithWarning}, then it is
+   *       allowed, but triggers a warning;
+   *   <li>all other parameters trigger an error.
+   * </ul>
+   *
+   * <p>The {@code depsAllowedRules} predicate should have a {@code toString} method which returns a
+   * plain English enumeration of the allowed rule class names, if it does not allow all rule
+   * classes.
    */
   @VisibleForTesting
-  RuleClass(String name,
-      boolean skylarkExecutable,
+  RuleClass(
+      String name,
+      ImmutableList<StarlarkThread.CallStackEntry> callstack,
+      String key,
+      RuleClassType type,
+      boolean isStarlark,
+      boolean starlarkTestable,
       boolean documented,
       boolean publicByDefault,
       boolean binaryOutput,
       boolean workspaceOnly,
-      boolean outputsDefaultExecutable,
+      boolean isExecutableStarlark,
+      boolean isAnalysisTest,
+      boolean hasAnalysisTestTransition,
+      boolean hasFunctionTransitionWhitelist,
+      boolean ignoreLicenses,
       ImplicitOutputsFunction implicitOutputsFunction,
-      Configurator<?, ?> configurator,
-      ConfiguredTargetFactory<?, ?> configuredTargetFactory,
+      TransitionFactory<Rule> transitionFactory,
+      ConfiguredTargetFactory<?, ?, ?> configuredTargetFactory,
       PredicateWithMessage<Rule> validityPredicate,
       Predicate<String> preferredDependencyPredicate,
-      ImmutableSet<Class<?>> advertisedProviders,
-      @Nullable BaseFunction configuredTargetFunction,
+      AdvertisedProviderSet advertisedProviders,
+      @Nullable StarlarkCallable configuredTargetFunction,
       Function<? super Rule, Map<String, Label>> externalBindingsFunction,
-      @Nullable Environment ruleDefinitionEnvironment,
-      Set<Class<?>> allowedConfigurationFragments,
-      MissingFragmentPolicy missingFragmentPolicy,
-      boolean supportsConstraintChecking,
-      Attribute... attributes) {
-    this(name,
-        /*isSkylark=*/ skylarkExecutable,
-        skylarkExecutable,
-        documented,
-        publicByDefault,
-        binaryOutput,
-        workspaceOnly,
-        outputsDefaultExecutable,
-        implicitOutputsFunction,
-        configurator,
-        configuredTargetFactory,
-        validityPredicate,
-        preferredDependencyPredicate,
-        advertisedProviders,
-        configuredTargetFunction,
-        externalBindingsFunction,
-        ruleDefinitionEnvironment,
-        new ConfigurationFragmentPolicy.Builder()
-            .requiresConfigurationFragments(allowedConfigurationFragments)
-            .setMissingFragmentPolicy(missingFragmentPolicy)
-            .build(),
-        supportsConstraintChecking,
-        attributes);
-  }
-
-  /**
-   * Constructs an instance of RuleClass whose name is 'name', attributes
-   * are 'attributes'. The {@code srcsAllowedFiles} determines which types of
-   * files are allowed as parameters to the "srcs" attribute; rules are always
-   * allowed. For the "deps" attribute, there are four cases:
-   * <ul>
-   *   <li>if the parameter is a file, it is allowed if its file type is given
-   *       in {@code depsAllowedFiles},
-   *   <li>if the parameter is a rule and the rule class is accepted by
-   *       {@code depsAllowedRules}, then it is allowed,
-   *   <li>if the parameter is a rule and the rule class is not accepted by
-   *       {@code depsAllowedRules}, but accepted by
-   *       {@code depsAllowedRulesWithWarning}, then it is allowed, but
-   *       triggers a warning;
-   *   <li>all other parameters trigger an error.
-   * </ul>
-   *
-   * <p>The {@code depsAllowedRules} predicate should have a {@code toString}
-   * method which returns a plain English enumeration of the allowed rule class
-   * names, if it does not allow all rule classes.
-   * @param workspaceOnly
-   */
-  @VisibleForTesting
-  RuleClass(String name,
-      boolean isSkylark, boolean skylarkExecutable, boolean documented, boolean publicByDefault,
-      boolean binaryOutput, boolean workspaceOnly, boolean outputsDefaultExecutable,
-      ImplicitOutputsFunction implicitOutputsFunction,
-      Configurator<?, ?> configurator,
-      ConfiguredTargetFactory<?, ?> configuredTargetFactory,
-      PredicateWithMessage<Rule> validityPredicate, Predicate<String> preferredDependencyPredicate,
-      ImmutableSet<Class<?>> advertisedProviders,
-      @Nullable BaseFunction configuredTargetFunction,
-      Function<? super Rule, Map<String, Label>> externalBindingsFunction,
-      @Nullable Environment ruleDefinitionEnvironment,
+      Function<? super Rule, ? extends Set<String>> optionReferenceFunction,
+      @Nullable Label ruleDefinitionEnvironmentLabel,
+      @Nullable byte[] ruleDefinitionEnvironmentDigest,
       ConfigurationFragmentPolicy configurationFragmentPolicy,
       boolean supportsConstraintChecking,
-      Attribute... attributes) {
+      ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy,
+      Set<Label> requiredToolchains,
+      boolean useToolchainResolution,
+      Set<Label> executionPlatformConstraints,
+      Map<String, ExecGroup> execGroups,
+      OutputFile.Kind outputFileKind,
+      Collection<Attribute> attributes,
+      @Nullable BuildSetting buildSetting) {
     this.name = name;
-    this.isSkylark = isSkylark;
-    this.targetKind = name + " rule";
-    this.skylarkExecutable = skylarkExecutable;
+    this.callstack = callstack;
+    this.key = key;
+    this.type = type;
+    this.isStarlark = isStarlark;
+    this.targetKind = name + Rule.targetKindSuffix();
+    this.starlarkTestable = starlarkTestable;
     this.documented = documented;
     this.publicByDefault = publicByDefault;
     this.binaryOutput = binaryOutput;
     this.implicitOutputsFunction = implicitOutputsFunction;
-    this.configurator = Preconditions.checkNotNull(configurator);
+    this.transitionFactory = transitionFactory;
     this.configuredTargetFactory = configuredTargetFactory;
     this.validityPredicate = validityPredicate;
     this.preferredDependencyPredicate = preferredDependencyPredicate;
     this.advertisedProviders = advertisedProviders;
     this.configuredTargetFunction = configuredTargetFunction;
     this.externalBindingsFunction = externalBindingsFunction;
-    this.ruleDefinitionEnvironment = ruleDefinitionEnvironment;
+    this.optionReferenceFunction = optionReferenceFunction;
+    this.ruleDefinitionEnvironmentLabel = ruleDefinitionEnvironmentLabel;
+    this.ruleDefinitionEnvironmentDigest = ruleDefinitionEnvironmentDigest;
+    this.outputFileKind = outputFileKind;
+    validateNoClashInPublicNames(attributes);
     this.attributes = ImmutableList.copyOf(attributes);
     this.workspaceOnly = workspaceOnly;
-    this.outputsDefaultExecutable = outputsDefaultExecutable;
+    this.isExecutableStarlark = isExecutableStarlark;
+    this.isAnalysisTest = isAnalysisTest;
+    this.hasAnalysisTestTransition = hasAnalysisTestTransition;
+    this.hasFunctionTransitionWhitelist = hasFunctionTransitionWhitelist;
+    this.ignoreLicenses = ignoreLicenses;
     this.configurationFragmentPolicy = configurationFragmentPolicy;
     this.supportsConstraintChecking = supportsConstraintChecking;
+    this.thirdPartyLicenseExistencePolicy = thirdPartyLicenseExistencePolicy;
+    this.requiredToolchains = ImmutableSet.copyOf(requiredToolchains);
+    this.useToolchainResolution = useToolchainResolution;
+    this.executionPlatformConstraints = ImmutableSet.copyOf(executionPlatformConstraints);
+    this.execGroups = ImmutableMap.copyOf(execGroups);
+    this.buildSetting = buildSetting;
 
-    // create the index:
+    // Create the index and collect non-configurable attributes.
     int index = 0;
-    attributeIndex = new HashMap<>(attributes.length);
+    attributeIndex = Maps.newHashMapWithExpectedSize(attributes.size());
+    boolean computedHasAspects = false;
+    ImmutableList.Builder<String> nonConfigurableAttributesBuilder = ImmutableList.builder();
     for (Attribute attribute : attributes) {
+      computedHasAspects |= attribute.hasAspects();
       attributeIndex.put(attribute.getName(), index++);
+      if (!attribute.isConfigurable()) {
+        nonConfigurableAttributesBuilder.add(attribute.getName());
+      }
+    }
+    this.hasAspects = computedHasAspects;
+    this.nonConfigurableAttributes = nonConfigurableAttributesBuilder.build();
+  }
+
+  private void validateNoClashInPublicNames(Iterable<Attribute> attributes) {
+    Map<String, Attribute> publicToPrivateNames = new HashMap<>();
+    for (Attribute attribute : attributes) {
+      String publicName = attribute.getPublicName();
+      if (publicToPrivateNames.containsKey(publicName)) {
+        throw new IllegalStateException(
+            String.format(
+                "Rule %s: Attributes %s and %s have an identical public name: %s",
+                name,
+                attribute.getName(),
+                publicToPrivateNames.get(publicName).getName(),
+                publicName));
+      }
+      publicToPrivateNames.put(publicName, attribute);
     }
   }
 
   /**
-   * Returns the function which determines the set of implicit outputs
-   * generated by a given rule.
+   * Returns the default function for determining the set of implicit outputs generated by a given
+   * rule. If not otherwise specified, this will be the implementation used by {@link Rule}s
+   * created with this {@link RuleClass}.
    *
-   * <p>An implicit output is an OutputFile that automatically comes into
-   * existence when a rule of this class is declared, and whose name is derived
-   * from the name of the rule.
+   * <p>Do not use this value to calculate implicit outputs for a rule, instead use
+   * {@link Rule#getImplicitOutputsFunction()}.
    *
-   * <p>Implicit outputs are a widely-relied upon.  All ".so",
-   * and "_deploy.jar" targets referenced in BUILD files are examples.
+   * <p>An implicit output is an OutputFile that automatically comes into existence when a rule of
+   * this class is declared, and whose name is derived from the name of the rule.
+   *
+   * <p>Implicit outputs are a widely-relied upon. All ".so", and "_deploy.jar" targets referenced
+   * in BUILD files are examples.
    */
   @VisibleForTesting
-  public ImplicitOutputsFunction getImplicitOutputsFunction() {
+  public ImplicitOutputsFunction getDefaultImplicitOutputsFunction() {
     return implicitOutputsFunction;
   }
 
-  @SuppressWarnings("unchecked")
-  public <C, R> Configurator<C, R> getConfigurator() {
-    return (Configurator<C, R>) configurator;
+  public TransitionFactory<Rule> getTransitionFactory() {
+    return transitionFactory;
   }
 
   @SuppressWarnings("unchecked")
-  public <CT, RC> ConfiguredTargetFactory<CT, RC> getConfiguredTargetFactory() {
-    return (ConfiguredTargetFactory<CT, RC>) configuredTargetFactory;
+  public <CT, RC, ACE extends Throwable>
+      ConfiguredTargetFactory<CT, RC, ACE> getConfiguredTargetFactory() {
+    return (ConfiguredTargetFactory<CT, RC, ACE>) configuredTargetFactory;
   }
 
   /**
@@ -1121,6 +1771,25 @@ public final class RuleClass {
    */
   public String getName() {
     return name;
+  }
+
+  /**
+   * Returns the stack of Starlark active function calls at the moment this rule class was created.
+   * Entries appear outermost first, and exclude the built-in itself ('rule' or 'repository_rule').
+   * Empty for non-Starlark rules.
+   */
+  public ImmutableList<StarlarkThread.CallStackEntry> getCallStack() {
+    return callstack;
+  }
+
+  /** Returns the type of rule that this RuleClass represents. Only for use during serialization. */
+  public RuleClassType getRuleClassType() {
+    return type;
+  }
+
+  /** Returns a unique key. Used for profiling purposes. */
+  public String getKey() {
+    return key;
   }
 
   /**
@@ -1196,6 +1865,11 @@ public final class RuleClass {
     return attributes;
   }
 
+  /** Returns set of non-configurable attribute names defined for this class of rule. */
+  public List<String> getNonConfigurableAttributes() {
+    return nonConfigurableAttributes;
+  }
+
   public PredicateWithMessage<Rule> getValidityPredicate() {
     return validityPredicate;
   }
@@ -1210,15 +1884,10 @@ public final class RuleClass {
    *
    * <p>This is here so that we can do the loading phase overestimation required for "blaze query",
    * which does not have the configured targets available.
-   *
-   * <p>This should in theory only contain subclasses of
-   * {@link com.google.devtools.build.lib.analysis.TransitiveInfoProvider}, but
-   * our current dependency structure does not allow a reference to that class here.
-   */
-  public ImmutableSet<Class<?>> getAdvertisedProviders() {
+   **/
+  public AdvertisedProviderSet getAdvertisedProviders() {
     return advertisedProviders;
   }
-
   /**
    * For --compile_one_dependency: if multiple rules consume the specified target,
    * should we choose this one over the "unpreferred" options?
@@ -1241,105 +1910,255 @@ public final class RuleClass {
     return supportsConstraintChecking;
   }
 
+  public boolean hasAspects() {
+    return hasAspects;
+  }
+
   /**
-   * Helper function for {@link RuleFactory#createAndAddRule}.
+   * Creates a new {@link Rule} {@code r} where {@code r.getPackage()} is the {@link Package}
+   * associated with {@code pkgBuilder}.
+   *
+   * <p>The created {@link Rule} will be populated with attribute values from {@code
+   * attributeValues} or the default attribute values associated with this {@link RuleClass} and
+   * {@code pkgBuilder}.
+   *
+   * <p>The created {@link Rule} will also be populated with output files. These output files will
+   * have been collected from the explicitly provided values of type {@link BuildType#OUTPUT} and
+   * {@link BuildType#OUTPUT_LIST} as well as from the implicit outputs determined by this {@link
+   * RuleClass} and the values in {@code attributeValues}.
+   *
+   * <p>This performs several validity checks. Invalid output file labels result in a thrown {@link
+   * LabelSyntaxException}. Computed default attributes that fail during precomputation result in a
+   * {@link CannotPrecomputeDefaultsException}. All other errors are reported on {@code
+   * eventHandler}.
    */
-  Rule createRuleWithLabel(Package.Builder pkgBuilder, Label ruleLabel,
-      Map<String, Object> attributeValues, EventHandler eventHandler, FuncallExpression ast,
-      Location location) throws LabelSyntaxException, InterruptedException {
-    Rule rule = pkgBuilder.newRuleWithLabel(ruleLabel, this, location);
-    createRuleCommon(rule, pkgBuilder, attributeValues, eventHandler, ast);
+  <T> Rule createRule(
+      Package.Builder pkgBuilder,
+      Label ruleLabel,
+      AttributeValues<T> attributeValues,
+      EventHandler eventHandler,
+      Location location,
+      List<StarlarkThread.CallStackEntry> callstack,
+      AttributeContainer attributeContainer,
+      boolean checkThirdPartyRulesHaveLicenses)
+      throws LabelSyntaxException, InterruptedException, CannotPrecomputeDefaultsException {
+    Rule rule = pkgBuilder.createRule(ruleLabel, this, location, callstack, attributeContainer);
+    populateRuleAttributeValues(rule, pkgBuilder, attributeValues, eventHandler);
+    checkAspectAllowedValues(rule, eventHandler);
+    rule.populateOutputFiles(eventHandler, pkgBuilder);
+    checkForDuplicateLabels(rule, eventHandler);
+
+    boolean actuallyCheckLicense;
+    if (thirdPartyLicenseExistencePolicy == ThirdPartyLicenseExistencePolicy.ALWAYS_CHECK) {
+      actuallyCheckLicense = true;
+    } else if (thirdPartyLicenseExistencePolicy == ThirdPartyLicenseExistencePolicy.NEVER_CHECK) {
+      actuallyCheckLicense = false;
+    } else {
+      actuallyCheckLicense = checkThirdPartyRulesHaveLicenses;
+    }
+
+    if (actuallyCheckLicense) {
+      checkThirdPartyRuleHasLicense(rule, pkgBuilder, eventHandler);
+    }
+    checkForValidSizeAndTimeoutValues(rule, eventHandler);
+    rule.checkValidityPredicate(eventHandler);
+    rule.checkForNullLabels();
     return rule;
   }
 
-  private void createRuleCommon(Rule rule, Package.Builder pkgBuilder,
-      Map<String, Object> attributeValues, EventHandler eventHandler, FuncallExpression ast)
-      throws LabelSyntaxException, InterruptedException {
-    populateRuleAttributeValues(
-        rule, pkgBuilder, attributeValues, eventHandler, ast);
-    rule.populateOutputFiles(eventHandler, pkgBuilder);
-    rule.checkForNullLabels();
-    rule.checkValidityPredicate(eventHandler);
+  /**
+   * Same as {@link #createRule}, except without some internal sanity checks.
+   *
+   * <p>Don't call this function unless you know what you're doing.
+   */
+  <T> Rule createRuleUnchecked(
+      Package.Builder pkgBuilder,
+      Label ruleLabel,
+      AttributeValues<T> attributeValues,
+      Location location,
+      List<StarlarkThread.CallStackEntry> callstack,
+      AttributeContainer attributeContainer,
+      ImplicitOutputsFunction implicitOutputsFunction)
+      throws InterruptedException, CannotPrecomputeDefaultsException {
+    Rule rule =
+        pkgBuilder.createRule(
+            ruleLabel, this, location, callstack, attributeContainer, implicitOutputsFunction);
+    populateRuleAttributeValues(rule, pkgBuilder, attributeValues, NullEventHandler.INSTANCE);
+    rule.populateOutputFilesUnchecked(NullEventHandler.INSTANCE, pkgBuilder);
+    return rule;
   }
 
   /**
-   * Populates the attributes table of new rule "rule" from the
-   * "attributeValues" mapping from attribute names to values in the build
-   * language.  Errors are reported on "reporter".  "ast" is used to associate
-   * location information with each rule attribute.
+   * Populates the attributes table of the new {@link Rule} with the values in the {@code
+   * attributeValues} map and with default values provided by this {@link RuleClass} and the {@code
+   * pkgBuilder}.
+   *
+   * <p>Errors are reported on {@code eventHandler}.
    */
-  private void populateRuleAttributeValues(Rule rule,
-                                           Package.Builder pkgBuilder,
-                                           Map<String, Object> attributeValues,
-                                           EventHandler eventHandler,
-                                           FuncallExpression ast)
-                                               throws InterruptedException {
-    BitSet definedAttrs = new BitSet(); //  set of attr indices
-
-    for (Map.Entry<String, Object> entry : attributeValues.entrySet()) {
-      String attributeName = entry.getKey();
-      Object attributeValue = entry.getValue();
-      if (attributeValue == Runtime.NONE) {  // Ignore all None values.
-        continue;
-      }
-      Integer attrIndex = setRuleAttributeValue(rule, eventHandler, attributeName, attributeValue);
-      if (attrIndex != null) {
-        definedAttrs.set(attrIndex);
-        checkAttrValNonEmpty(rule, eventHandler, attributeValue, attrIndex);
-      }
-    }
-
-    // Save the location of each non-default attribute definition:
-    if (ast != null) {
-      for (Argument.Passed arg : ast.getArguments()) {
-        if (arg.isKeyword()) {
-          String name = arg.getName();
-          Integer attrIndex = getAttributeIndex(name);
-          if (attrIndex != null) {
-            rule.setAttributeLocation(attrIndex, arg.getValue().getLocation());
-          }
-        }
-      }
-    }
-
-    List<Attribute> attrsWithComputedDefaults = new ArrayList<>();
-
-    // Set defaults; ensure that every mandatory attribute has a value.  Use
-    // the default if none is specified.
-    int numAttributes = getAttributeCount();
-    for (int attrIndex = 0; attrIndex < numAttributes; ++attrIndex) {
-      if (!definedAttrs.get(attrIndex)) {
-        Attribute attr = getAttribute(attrIndex);
-        if (attr.isMandatory()) {
-          rule.reportError(rule.getLabel() + ": missing value for mandatory "
-                           + "attribute '" + attr.getName() + "' in '"
-                           + name + "' rule", eventHandler);
-        }
-
-        if (attr.hasComputedDefault()) {
-          attrsWithComputedDefaults.add(attr);
-        } else {
-          Object defaultValue = getAttributeNoncomputedDefaultValue(attr, pkgBuilder);
-          checkAttrValNonEmpty(rule, eventHandler, defaultValue, attrIndex);
-          rule.setAttributeValue(attr, defaultValue, /*explicit=*/false);
-          checkAllowedValues(rule, attr, eventHandler);
-        }
-      }
-    }
-
-    // Evaluate and set any computed defaults now that all non-computed
-    // TODO(bazel-team): remove this special casing. Thanks to configurable attributes refactoring,
-    // computed defaults don't get bound to their final values at this point, so we no longer
-    // have to wait until regular attributes have been initialized.
-    for (Attribute attr : attrsWithComputedDefaults) {
-      rule.setAttributeValue(attr, attr.getDefaultValue(rule), /*explicit=*/false);
-    }
-
+  private <T> void populateRuleAttributeValues(
+      Rule rule,
+      Package.Builder pkgBuilder,
+      AttributeValues<T> attributeValues,
+      EventHandler eventHandler)
+      throws InterruptedException, CannotPrecomputeDefaultsException {
+    BitSet definedAttrIndices =
+        populateDefinedRuleAttributeValues(
+            rule,
+            pkgBuilder.getRepositoryMapping(),
+            attributeValues,
+            pkgBuilder.getListInterner(),
+            eventHandler);
+    populateDefaultRuleAttributeValues(rule, pkgBuilder, definedAttrIndices, eventHandler);
     // Now that all attributes are bound to values, collect and store configurable attribute keys.
     populateConfigDependenciesAttribute(rule);
-    checkForDuplicateLabels(rule, eventHandler);
-    checkThirdPartyRuleHasLicense(rule, pkgBuilder, eventHandler);
-    checkForValidSizeAndTimeoutValues(rule, eventHandler);
+  }
+
+  /**
+   * Populates the attributes table of the new {@link Rule} with the values in the {@code
+   * attributeValues} map.
+   *
+   * <p>Handles the special cases of the attribute named {@code "name"} and attributes with value
+   * {@link Starlark#NONE}.
+   *
+   * <p>Returns a bitset {@code b} where {@code b.get(i)} is {@code true} if this method set a value
+   * for the attribute with index {@code i} in this {@link RuleClass}. Errors are reported on {@code
+   * eventHandler}.
+   */
+  private <T> BitSet populateDefinedRuleAttributeValues(
+      Rule rule,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping,
+      AttributeValues<T> attributeValues,
+      Interner<ImmutableList<?>> listInterner,
+      EventHandler eventHandler) {
+    BitSet definedAttrIndices = new BitSet();
+    for (T attributeAccessor : attributeValues.getAttributeAccessors()) {
+      String attributeName = attributeValues.getName(attributeAccessor);
+      Object attributeValue = attributeValues.getValue(attributeAccessor);
+      // Ignore all None values.
+      if (attributeValue == Starlark.NONE) {
+        continue;
+      }
+
+      // Check that the attribute's name belongs to a valid attribute for this rule class.
+      Integer attrIndex = getAttributeIndex(attributeName);
+      if (attrIndex == null) {
+        rule.reportError(
+            String.format(
+                "%s: no such attribute '%s' in '%s' rule", rule.getLabel(), attributeName, name),
+            eventHandler);
+        continue;
+      }
+      Attribute attr = getAttribute(attrIndex);
+
+      if (attributeName.equals("licenses") && ignoreLicenses) {
+        setRuleAttributeValue(rule, eventHandler, attr, License.NO_LICENSE, /*explicit=*/ false);
+        definedAttrIndices.set(attrIndex);
+        continue;
+      }
+
+      // Convert the build-lang value to a native value, if necessary.
+      Object nativeAttributeValue;
+      if (attributeValues.valuesAreBuildLanguageTyped()) {
+        try {
+          nativeAttributeValue =
+              convertFromBuildLangType(rule, attr, attributeValue, repositoryMapping, listInterner);
+        } catch (ConversionException e) {
+          rule.reportError(String.format("%s: %s", rule.getLabel(), e.getMessage()), eventHandler);
+          continue;
+        }
+      } else {
+        nativeAttributeValue = attributeValue;
+      }
+
+      boolean explicit = attributeValues.isExplicitlySpecified(attributeAccessor);
+      setRuleAttributeValue(rule, eventHandler, attr, nativeAttributeValue, explicit);
+      definedAttrIndices.set(attrIndex);
+    }
+    return definedAttrIndices;
+  }
+
+  /**
+   * Populates the attributes table of the new {@link Rule} with default values provided by this
+   * {@link RuleClass} and the {@code pkgBuilder}. This will only provide values for attributes that
+   * haven't already been populated, using {@code definedAttrIndices} to determine whether an
+   * attribute was populated.
+   *
+   * <p>Errors are reported on {@code eventHandler}.
+   */
+  private void populateDefaultRuleAttributeValues(
+      Rule rule, Package.Builder pkgBuilder, BitSet definedAttrIndices, EventHandler eventHandler)
+      throws InterruptedException, CannotPrecomputeDefaultsException {
+    // Set defaults; ensure that every mandatory attribute has a value. Use the default if none
+    // is specified.
+    List<Attribute> attrsWithComputedDefaults = new ArrayList<>();
+    int numAttributes = getAttributeCount();
+    for (int attrIndex = 0; attrIndex < numAttributes; ++attrIndex) {
+      if (definedAttrIndices.get(attrIndex)) {
+        continue;
+      }
+      Attribute attr = getAttribute(attrIndex);
+      if (attr.isMandatory()) {
+        rule.reportError(
+            String.format(
+                "%s: missing value for mandatory attribute '%s' in '%s' rule",
+                rule.getLabel(),
+                attr.getName(),
+                name),
+            eventHandler);
+      }
+
+      if (attr.getName().equals("licenses") && ignoreLicenses) {
+        rule.setAttributeValue(attr, License.NO_LICENSE, /*explicit=*/ false);
+      } else if (attr.hasComputedDefault()) {
+        // Note that it is necessary to set all non-computed default values before calling
+        // Attribute#getDefaultValue for computed default attributes. Computed default attributes
+        // may have a condition predicate (i.e. the predicate returned by Attribute#getCondition)
+        // that depends on non-computed default attribute values, and that condition predicate is
+        // evaluated by the call to Attribute#getDefaultValue.
+        attrsWithComputedDefaults.add(attr);
+      } else if (attr.isLateBound()) {
+        rule.setAttributeValue(attr, attr.getLateBoundDefault(), /*explicit=*/ false);
+      } else {
+        Object defaultValue = getAttributeNoncomputedDefaultValue(attr, pkgBuilder);
+        rule.setAttributeValue(attr, defaultValue, /*explicit=*/ false);
+        checkAllowedValues(rule, attr, eventHandler);
+      }
+    }
+
+    // Set computed default attribute values now that all other (i.e. non-computed) default values
+    // have been set.
+    for (Attribute attr : attrsWithComputedDefaults) {
+      // If Attribute#hasComputedDefault was true above, Attribute#getDefaultValue returns the
+      // computed default function object or a Starlark computed default template. Note that we
+      // cannot determine the exact value of the computed default function here because it may
+      // depend on other attribute values that are configurable (i.e. they came from select({..})
+      // expressions in the build language, and they require configuration data from the analysis
+      // phase to be resolved). Instead, we're setting the attribute value to a reference to the
+      // computed default function, or if #getDefaultValue is a Starlark computed default
+      // template, setting the attribute value to a reference to the SkylarkComputedDefault
+      // returned from SkylarkComputedDefaultTemplate#computePossibleValues.
+      //
+      // SkylarkComputedDefaultTemplate#computePossibleValues pre-computes all possible values the
+      // function may evaluate to, and records them in a lookup table. By calling it here, with an
+      // EventHandler, any errors that might occur during the function's evaluation can
+      // be discovered and propagated here.
+      Object valueToSet;
+      Object defaultValue = attr.getDefaultValue(rule);
+      if (defaultValue instanceof SkylarkComputedDefaultTemplate) {
+        SkylarkComputedDefaultTemplate template = (SkylarkComputedDefaultTemplate) defaultValue;
+        valueToSet = template.computePossibleValues(attr, rule, eventHandler);
+      } else if (defaultValue instanceof ComputedDefault) {
+        // Compute all possible values to verify that the ComputedDefault is well-defined. This was
+        // previously done implicitly as part of visiting all labels to check for null-ness in
+        // Rule.checkForNullLabels, but that was changed to skip non-label attributes to improve
+        // performance.
+        ((ComputedDefault) defaultValue).getPossibleValues(attr.getType(), rule);
+        valueToSet = defaultValue;
+      } else {
+        valueToSet = defaultValue;
+      }
+      rule.setAttributeValue(attr, valueToSet, /*explicit=*/ false);
+    }
   }
 
   /**
@@ -1348,17 +2167,17 @@ public final class RuleClass {
    */
   private static void populateConfigDependenciesAttribute(Rule rule) {
     RawAttributeMapper attributes = RawAttributeMapper.of(rule);
-    Attribute configDepsAttribute = attributes.getAttributeDefinition("$config_dependencies");
+    Attribute configDepsAttribute =
+        attributes.getAttributeDefinition(CONFIG_SETTING_DEPS_ATTRIBUTE);
     if (configDepsAttribute == null) {
-      // Not currently compatible with Skylark rules.
       return;
     }
 
-    Set<Label> configLabels = new LinkedHashSet<>();
+    LinkedHashSet<Label> configLabels = new LinkedHashSet<>();
     for (Attribute attr : rule.getAttributes()) {
-      SelectorList<?> selectors = attributes.getSelectorList(attr.getName(), attr.getType());
-      if (selectors != null) {
-        configLabels.addAll(selectors.getKeyLabels());
+      SelectorList<?> selectorList = attributes.getSelectorList(attr.getName(), attr.getType());
+      if (selectorList != null) {
+        configLabels.addAll(selectorList.getKeyLabels());
       }
     }
 
@@ -1366,28 +2185,27 @@ public final class RuleClass {
         /*explicit=*/false);
   }
 
-  private void checkAttrValNonEmpty(
-      Rule rule, EventHandler eventHandler, Object attributeValue, Integer attrIndex) {
+  public void checkAttributesNonEmpty(
+      RuleErrorConsumer ruleErrorConsumer, AttributeMap attributes) {
+    for (String attributeName : attributes.getAttributeNames()) {
+      Attribute attr = attributes.getAttributeDefinition(attributeName);
+      if (!attr.isNonEmpty()) {
+        continue;
+      }
+      Object attributeValue = attributes.get(attributeName, attr.getType());
 
-    Attribute attr = getAttribute(attrIndex);
-    if (!attr.isNonEmpty()) {
-      return;
-    }
+      boolean isEmpty = false;
+      if (attributeValue instanceof Sequence) {
+        isEmpty = ((Sequence<?>) attributeValue).isEmpty();
+      } else if (attributeValue instanceof List<?>) {
+        isEmpty = ((List<?>) attributeValue).isEmpty();
+      } else if (attributeValue instanceof Map<?, ?>) {
+        isEmpty = ((Map<?, ?>) attributeValue).isEmpty();
+      }
 
-    boolean isEmpty = false;
-
-    if (attributeValue instanceof SkylarkList) {
-      isEmpty = ((SkylarkList) attributeValue).isEmpty();
-    } else if (attributeValue instanceof List<?>) {
-      isEmpty = ((List<?>) attributeValue).isEmpty();
-    } else if (attributeValue instanceof Map<?, ?>) {
-      isEmpty = ((Map<?, ?>) attributeValue).isEmpty();
-    }
-
-    if (isEmpty) {
-      rule.reportError(rule.getLabel() + ": non empty attribute '" + attr.getName()
-          + "' in '" + name + "' rule '" + rule.getLabel() + "' has to have at least one value",
-          eventHandler);
+      if (isEmpty) {
+        ruleErrorConsumer.attributeError(attr.getName(), "attribute must be non empty");
+      }
     }
   }
 
@@ -1412,12 +2230,16 @@ public final class RuleClass {
    */
   private static void checkThirdPartyRuleHasLicense(Rule rule,
       Package.Builder pkgBuilder, EventHandler eventHandler) {
-    if (rule.getLabel().getPackageName().startsWith("third_party/")) {
+    if (rule.getRuleClassObject().ignoreLicenses()) {
+      // A package license is sufficient; ignore rules that don't include it.
+      return;
+    }
+    if (isThirdPartyPackage(rule.getLabel().getPackageIdentifier())) {
       License license = rule.getLicense();
       if (license == null) {
         license = pkgBuilder.getDefaultLicense();
       }
-      if (license == License.NO_LICENSE) {
+      if (!license.isSpecified()) {
         rule.reportError("third-party rule '" + rule.getLabel() + "' lacks a license declaration "
                          + "with one of the following types: notice, reciprocal, permissive, "
                          + "restricted, unencumbered, by_exception_only",
@@ -1484,7 +2306,14 @@ public final class RuleClass {
    */
   private static Object getAttributeNoncomputedDefaultValue(Attribute attr,
       Package.Builder pkgBuilder) {
-    if (attr.getName().equals("licenses")) {
+    // TODO(b/149505729): Determine the right semantics for someone trying to define their own
+    // attribute named applicable_licenses.
+    if (attr.getName().equals("applicable_licenses")) {
+      return pkgBuilder.getDefaultApplicableLicenses();
+    }
+    // Starlark rules may define their own "licenses" attributes with different types -
+    // we shouldn't trigger the special "licenses" on those cases.
+    if (attr.getName().equals("licenses") && attr.getType() == BuildType.LICENSE) {
       return pkgBuilder.getDefaultLicense();
     }
     if (attr.getName().equals("distribs")) {
@@ -1494,66 +2323,103 @@ public final class RuleClass {
   }
 
   /**
-   * Sets the value of attribute "attrName" in rule "rule", by converting the
-   * build-language value "attrVal" to the appropriate type for the attribute.
-   * Returns the attribute index iff successful, null otherwise.
+   * Sets the value of attribute {@code attr} in {@code rule} to the native value {@code
+   * nativeAttrVal}, and sets the value's explicitness to {@code explicit}.
    *
-   * <p>In case of failure, error messages are reported on "handler", and "rule"
-   * is marked as containing errors.
+   * <p>Handles the special case of the "visibility" attribute by also setting the rule's
+   * visibility with {@link Rule#setVisibility}.
+   *
+   * <p>Checks that {@code nativeAttrVal} is an allowed value via {@link #checkAllowedValues}.
    */
-  @SuppressWarnings("unchecked")
-  private Integer setRuleAttributeValue(Rule rule,
-                                        EventHandler eventHandler,
-                                        String attrName,
-                                        Object attrVal) {
-    if (attrName.equals("name")) {
-      return null; // "name" is handled specially
-    }
-
-    Integer attrIndex = getAttributeIndex(attrName);
-    if (attrIndex == null) {
-      rule.reportError(rule.getLabel() + ": no such attribute '" + attrName
-          + "' in '" + name + "' rule", eventHandler);
-      return null;
-    }
-
-    Attribute attr = getAttribute(attrIndex);
-    Object converted;
-    try {
-      String what = "attribute '" + attrName + "' in '" + name + "' rule";
-      converted = BuildType.selectableConvert(attr.getType(), attrVal, what, rule.getLabel());
-
-      if ((converted instanceof SelectorList<?>) && !attr.isConfigurable()) {
-        rule.reportError(rule.getLabel() + ": attribute \"" + attr.getName()
-            + "\" is not configurable", eventHandler);
-        return null;
-      }
-
-      if ((converted instanceof List<?>) && !(converted instanceof GlobList<?>)) {
-        if (attr.isOrderIndependent()) {
-          converted = Ordering.natural().sortedCopy((List<? extends Comparable<?>>) converted);
-        }
-        converted = ImmutableList.copyOf((List<?>) converted);
-      }
-    } catch (Type.ConversionException e) {
-      rule.reportError(rule.getLabel() + ": " + e.getMessage(), eventHandler);
-      return null;
-    }
-
-    if (attrName.equals("visibility")) {
-      List<Label> attrList = (List<Label>) converted;
+  private static void setRuleAttributeValue(
+      Rule rule,
+      EventHandler eventHandler,
+      Attribute attr,
+      Object nativeAttrVal,
+      boolean explicit) {
+    if (attr.getName().equals("visibility")) {
+      @SuppressWarnings("unchecked")
+      List<Label> attrList = (List<Label>) nativeAttrVal;
       if (!attrList.isEmpty()
           && ConstantRuleVisibility.LEGACY_PUBLIC_LABEL.equals(attrList.get(0))) {
-        rule.reportError(rule.getLabel() + ": //visibility:legacy_public only allowed in package "
-            + "declaration", eventHandler);
+        rule.reportError(
+            rule.getLabel() + ": //visibility:legacy_public only allowed in package declaration",
+            eventHandler);
       }
-      rule.setVisibility(PackageFactory.getVisibility(attrList));
+      try {
+        rule.setVisibility(PackageUtils.getVisibility(rule.getLabel(), attrList));
+      } catch (EvalException e) {
+         rule.reportError(rule.getLabel() + " " + e.getMessage(), eventHandler);
+      }
+    }
+    rule.setAttributeValue(attr, nativeAttrVal, explicit);
+    checkAllowedValues(rule, attr, eventHandler);
+  }
+
+  /**
+   * Converts the build-language-typed {@code buildLangValue} to a native value via {@link
+   * BuildType#selectableConvert}. Canonicalizes the value's order if it is a {@link List} type and
+   * {@code attr.isOrderIndependent()} returns {@code true}.
+   *
+   * <p>Throws {@link ConversionException} if the conversion fails, or if {@code buildLangValue} is
+   * a selector expression but {@code attr.isConfigurable()} is {@code false}.
+   */
+  private static Object convertFromBuildLangType(
+      Rule rule,
+      Attribute attr,
+      Object buildLangValue,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping,
+      Interner<ImmutableList<?>> listInterner)
+      throws ConversionException {
+    LabelConversionContext context = new LabelConversionContext(rule.getLabel(), repositoryMapping);
+    Object converted =
+        BuildType.selectableConvert(
+            attr.getType(),
+            buildLangValue,
+            new AttributeConversionContext(attr.getName(), rule.getRuleClass()),
+            context);
+
+    if ((converted instanceof SelectorList<?>) && !attr.isConfigurable()) {
+      throw new ConversionException(
+          String.format("attribute \"%s\" is not configurable", attr.getName()));
     }
 
-    rule.setAttributeValue(attr, converted, /*explicit=*/true);
-    checkAllowedValues(rule, attr, eventHandler);
-    return attrIndex;
+    if (converted instanceof List<?>) {
+      if (attr.isOrderIndependent()) {
+        @SuppressWarnings("unchecked")
+        List<? extends Comparable<?>> list = (List<? extends Comparable<?>>) converted;
+        converted = Ordering.natural().sortedCopy(list);
+      }
+      // It's common for multiple rule instances in the same package to have the same value for some
+      // attributes. As a concrete example, consider a package having several 'java_test' instances,
+      // each with the same exact 'tags' attribute value.
+      converted = listInterner.intern(ImmutableList.copyOf((List<?>) converted));
+    }
+
+    return converted;
   }
+
+  /**
+   * Provides a {@link #toString()} description of the attribute being converted for
+   * {@link BuildType#selectableConvert}. This is preferred over a raw string to avoid uselessly
+   * constructing strings which are never used. A separate class instead of inline to avoid
+   * accidental memory leaks.
+   */
+  private static class AttributeConversionContext {
+    private final String attrName;
+    private final String ruleClass;
+
+    AttributeConversionContext(String attrName, String ruleClass) {
+      this.attrName = attrName;
+      this.ruleClass = ruleClass;
+    }
+
+    @Override
+    public String toString() {
+      return "attribute '" + attrName + "' in '" + ruleClass + "' rule";
+    }
+  }
+
 
   /**
    * Verifies that the rule has a valid value for the attribute according to its allowed values.
@@ -1564,7 +2430,8 @@ public final class RuleClass {
    * <p>If the rule is configurable, all of its potential values are evaluated, and errors for each
    * of the invalid values are reported.
    */
-  void checkAllowedValues(Rule rule, Attribute attribute, EventHandler eventHandler) {
+  private static void checkAllowedValues(
+      Rule rule, Attribute attribute, EventHandler eventHandler) {
     if (attribute.checkAllowedValues()) {
       PredicateWithMessage<Object> allowedValues = attribute.getAllowedValues();
       Iterable<?> values =
@@ -1572,9 +2439,51 @@ public final class RuleClass {
               attribute.getName(), attribute.getType());
       for (Object value : values) {
         if (!allowedValues.apply(value)) {
-          rule.reportError(String.format(rule.getLabel() + ": invalid value in '%s' attribute: %s",
-              attribute.getName(),
-              allowedValues.getErrorReason(value)), eventHandler);
+          rule.reportError(
+              String.format(
+                  "%s: invalid value in '%s' attribute: %s",
+                  rule.getLabel(),
+                  attribute.getName(),
+                  allowedValues.getErrorReason(value)),
+              eventHandler);
+        }
+      }
+    }
+  }
+
+  private static void checkAspectAllowedValues(
+      Rule rule, EventHandler eventHandler) {
+    if (rule.hasAspects()) {
+      for (Attribute attrOfRule : rule.getAttributes()) {
+        for (Aspect aspect : attrOfRule.getAspects(rule)) {
+          for (Attribute attrOfAspect : aspect.getDefinition().getAttributes().values()) {
+            // By this point the AspectDefinition has been created and values assigned.
+            if (attrOfAspect.checkAllowedValues()) {
+              PredicateWithMessage<Object> allowedValues = attrOfAspect.getAllowedValues();
+              Object value = attrOfAspect.getDefaultValue(rule);
+              if (!allowedValues.apply(value)) {
+                if (RawAttributeMapper.of(rule).isConfigurable(attrOfAspect.getName())) {
+                  rule.reportError(
+                      String.format(
+                          "%s: attribute '%s' has a select() and aspect %s also declares "
+                              + "'%s'. Aspect attributes don't currently support select().",
+                          rule.getLabel(),
+                          attrOfAspect.getName(),
+                          aspect.getDefinition().getName(),
+                          rule.getLabel()),
+                      eventHandler);
+                } else {
+                  rule.reportError(
+                      String.format(
+                          "%s: invalid value in '%s' attribute: %s",
+                          rule.getLabel(),
+                          attrOfAspect.getName(),
+                          allowedValues.getErrorReason(value)),
+                      eventHandler);
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -1605,11 +2514,15 @@ public final class RuleClass {
     return binaryOutput;
   }
 
-  /**
-   * Returns this RuleClass's custom Skylark rule implementation.
-   */
-  @Nullable public BaseFunction getConfiguredTargetFunction() {
+  /** Returns this RuleClass's custom Starlark rule implementation. */
+  @Nullable
+  public StarlarkCallable getConfiguredTargetFunction() {
     return configuredTargetFunction;
+  }
+
+  @Nullable
+  public BuildSetting getBuildSetting() {
+    return buildSetting;
   }
 
   /**
@@ -1621,29 +2534,109 @@ public final class RuleClass {
   }
 
   /**
-   * Returns this RuleClass's rule definition environment.
+   * Returns a function that computes the options referenced by a rule.
    */
-  @Nullable public Environment getRuleDefinitionEnvironment() {
-    return ruleDefinitionEnvironment;
-  }
-
-  /** Returns true if this RuleClass is a skylark-defined RuleClass. */
-  public boolean isSkylark() {
-    return isSkylark;
+  public Function<? super Rule, ? extends Set<String>> getOptionReferenceFunction() {
+    return optionReferenceFunction;
   }
 
   /**
-   * Returns true if this RuleClass is an executable Skylark RuleClass (i.e. it is
-   * Skylark and Normal or Test RuleClass).
+   * For Starlark rule classes, returns this RuleClass's rule definition environment's label, which
+   * is never null. Is null for native rules' RuleClass objects.
    */
-  public boolean isSkylarkExecutable() {
-    return skylarkExecutable;
+  @Nullable
+  public Label getRuleDefinitionEnvironmentLabel() {
+    return ruleDefinitionEnvironmentLabel;
   }
 
   /**
-   * Returns true if this rule class outputs a default executable for every rule.
+   * Returns the digest for the RuleClass's rule definition environment, a hash of the .bzl file
+   * defining the rule class and all the .bzl files it transitively loads. Null for native rules'
+   * RuleClass objects.
    */
-  public boolean outputsDefaultExecutable() {
-    return outputsDefaultExecutable;
+  @Nullable
+  public byte[] getRuleDefinitionEnvironmentDigest() {
+    return ruleDefinitionEnvironmentDigest;
+  }
+
+  /** Returns true if this RuleClass is a Starlark-defined RuleClass. */
+  public boolean isStarlark() {
+    return isStarlark;
+  }
+
+  /** Returns true if this RuleClass is Starlark-defined and is subject to analysis-time tests. */
+  public boolean isStarlarkTestable() {
+    return starlarkTestable;
+  }
+
+  /** Returns true if this rule class outputs a default executable for every rule. */
+  public boolean isExecutableStarlark() {
+    return isExecutableStarlark;
+  }
+
+  /** Returns true if this rule class is an analysis test (set by analysis_test = true). */
+  public boolean isAnalysisTest() {
+    return isAnalysisTest;
+  }
+
+  /**
+   * Returns true if this rule class has at least one attribute with an analysis test transition. (A
+   * starlark-defined transition using analysis_test_transition()).
+   */
+  public boolean hasAnalysisTestTransition() {
+    return hasAnalysisTestTransition;
+  }
+
+  /**
+   * Returns true if this rule class has the _whitelist_function_transition attribute.
+   */
+  public boolean hasFunctionTransitionWhitelist() {
+    return hasFunctionTransitionWhitelist;
+  }
+
+  /**
+   * If true, no rule of this class ever declares a license regardless of what the rule's or
+   * package's <code>licenses</code> attribute says.
+   *
+   * <p>This is useful for rule types that don't make sense for license checking.
+   */
+  public boolean ignoreLicenses() {
+    return ignoreLicenses;
+  }
+
+  public ImmutableSet<Label> getRequiredToolchains() {
+    return requiredToolchains;
+  }
+
+  public boolean useToolchainResolution() {
+    return useToolchainResolution;
+  }
+
+  public ImmutableSet<Label> getExecutionPlatformConstraints() {
+    return executionPlatformConstraints;
+  }
+
+  public ImmutableMap<String, ExecGroup> getExecGroups() {
+    return execGroups;
+  }
+
+  public OutputFile.Kind  getOutputFileKind() {
+    return outputFileKind;
+  }
+
+  public static boolean isThirdPartyPackage(PackageIdentifier packageIdentifier) {
+    if (!packageIdentifier.getRepository().isMain()) {
+      return false;
+    }
+
+    if (!packageIdentifier.getPackageFragment().startsWith(THIRD_PARTY_PREFIX)) {
+      return false;
+    }
+
+    if (packageIdentifier.getPackageFragment().segmentCount() <= 1) {
+      return false;
+    }
+
+    return true;
   }
 }

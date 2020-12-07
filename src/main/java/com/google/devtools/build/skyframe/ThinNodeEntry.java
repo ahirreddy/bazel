@@ -15,12 +15,12 @@ package com.google.devtools.build.skyframe;
 
 import com.google.common.base.Preconditions;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-
+import com.google.devtools.build.skyframe.NodeEntry.DirtyState;
 import javax.annotation.Nullable;
 
 /**
  * A node in the graph without the means to access its value. All operations on this class are
- * thread-safe. Note, however, the warning on the return value of {@link #markDirty}.
+ * thread-safe (note, however, the warning on the return value of {@link #markDirty}).
  *
  * <p>This interface is public only for the benefit of alternative graph implementations outside of
  * the package.
@@ -32,42 +32,8 @@ public interface ThinNodeEntry {
   boolean isDone();
 
   /**
-   * Returns an immutable iterable of the direct deps of this node. This method may only be called
-   * after the evaluation of this node is complete.
-   *
-   * <p>This method is not very efficient, but is only be called in limited circumstances --
-   * when the node is about to be deleted, or when the node is expected to have no direct deps (in
-   * which case the overhead is not so bad). It should not be called repeatedly for the same node,
-   * since each call takes time proportional to the number of direct deps of the node.
-   */
-  @ThreadSafe
-  Iterable<SkyKey> getDirectDeps();
-
-  /**
-   * Removes a reverse dependency.
-   */
-  @ThreadSafe
-  void removeReverseDep(SkyKey reverseDep);
-
-  /**
-   * Removes a reverse dependency.
-   *
-   * <p>May only be called if this entry is not done (i.e. {@link #isDone} is false) and
-   * {@param reverseDep} is present in {@link #getReverseDeps}
-   */
-  @ThreadSafe
-  void removeInProgressReverseDep(SkyKey reverseDep);
-
-  /**
-   * Returns a copy of the set of reverse dependencies. Note that this introduces a potential
-   * check-then-act race; {@link #removeReverseDep} may fail for a key that is returned here.
-   */
-  @ThreadSafe
-  Iterable<SkyKey> getReverseDeps();
-
-  /**
-   * Returns true if the entry is marked dirty, meaning that at least one of its transitive
-   * dependencies is marked changed.
+   * Returns true if the entry is new or marked as dirty. This includes the case where its deps are
+   * still being checked for up-to-dateness.
    */
   @ThreadSafe
   boolean isDirty();
@@ -79,36 +45,67 @@ public interface ThinNodeEntry {
   @ThreadSafe
   boolean isChanged();
 
+  /** Ways that a node may be dirtied. */
+  enum DirtyType {
+    /**
+     * A node P dirtied with DIRTY is re-evaluated during the evaluation phase if it's requested and
+     * directly depends on some node C whose value changed since the last evaluation of P. If it's
+     * requested and there is no such node C, P is marked clean.
+     */
+    DIRTY(DirtyState.CHECK_DEPENDENCIES),
+
+    /**
+     * A node dirtied with CHANGE is re-evaluated during the evaluation phase if it's requested
+     * (regardless of the state of its dependencies). Such a node is expected to evaluate to the
+     * same value if evaluated at the same graph version.
+     */
+    CHANGE(DirtyState.NEEDS_REBUILDING),
+
+    /**
+     * A node dirtied with FORCE_REBUILD behaves like a {@link #CHANGE}d node, except that it may
+     * evaluate to a different value even if evaluated at the same graph version.
+     */
+    FORCE_REBUILD(DirtyState.NEEDS_FORCED_REBUILDING);
+
+    private final DirtyState initialDirtyState;
+
+    DirtyType(DirtyState initialDirtyState) {
+      this.initialDirtyState = initialDirtyState;
+    }
+
+    DirtyState getInitialDirtyState() {
+      return initialDirtyState;
+    }
+  }
+
   /**
-   * Marks this node dirty, or changed if {@code isChanged} is true. The node is put in the
-   * just-created state. It will be re-evaluated if necessary during the evaluation phase,
-   * but if it has not changed, it will not force a re-evaluation of its parents.
+   * Marks this node dirty as specified by the provided {@link DirtyType}.
    *
-   * <p>{@code markDirty(b)} must not be called on an undone node if {@code isChanged() == b}.
-   * It is the caller's responsibility to ensure that this does not happen.  Calling
-   * {@code markDirty(false)} when {@code isChanged() == true} has no effect. The idea here is that
-   * the caller will only ever want to call {@code markDirty()} a second time if a transition from a
-   * dirty-unchanged state to a dirty-changed state is required.
+   * <p>{@code markDirty(DirtyType.DIRTY)} may only be called on a node P for which {@code
+   * P.isDone() || P.isChanged()} (the latter is permitted but has no effect). Similarly, {@code
+   * markDirty(DirtyType.CHANGE)} may only be called on a node P for which {@code P.isDone() ||
+   * !P.isChanged()}. Otherwise, this will throw {@link IllegalStateException}.
    *
-   * @return A {@link ThinNodeEntry.MarkedDirtyResult} if the node was previously clean, and
-   * {@code null} if it was already dirty. If it was already dirty, the caller should abort its
-   * handling of this node, since another thread is already dealing with it. Note the warning on
-   * {@link ThinNodeEntry.MarkedDirtyResult} regarding the collection it provides.
+   * <p>{@code markDirty(DirtyType.FORCE_REBUILD)} may be called multiple times; only the first has
+   * any effect.
+   *
+   * @return if the node was done, a {@link MarkedDirtyResult} which may include the node's reverse
+   *     deps; otherwise {@code null}
    */
   @Nullable
   @ThreadSafe
-  MarkedDirtyResult markDirty(boolean isChanged);
+  MarkedDirtyResult markDirty(DirtyType dirtyType) throws InterruptedException;
 
   /**
-   * Returned by {@link #markDirty} if that call changed the node from clean to dirty. Contains an
-   * iterable of the node's reverse deps for efficiency, because the single use case for {@link
-   * #markDirty} is during invalidation, and if such an invalidation call wins, the invalidator
-   * must immediately afterwards schedule the invalidation of the node's reverse deps.
+   * Returned by {@link #markDirty} if that call changed the node from done to dirty. Contains an
+   * iterable of the node's reverse deps for efficiency, because an important use case for {@link
+   * #markDirty} is during invalidation, and the invalidator must immediately afterwards schedule
+   * the invalidation of a node's reverse deps if the invalidator successfully dirties that node.
    *
    * <p>Warning: {@link #getReverseDepsUnsafe()} may return a live view of the reverse deps
-   * collection of the marked-dirty node. The consumer of this data must be careful only to
-   * iterate over and consume its values while that collection is guaranteed not to change. This
-   * is true during invalidation, because reverse deps don't change during invalidation.
+   * collection of the marked-dirty node. The consumer of this data must be careful only to iterate
+   * over and consume its values while that collection is guaranteed not to change. This is true
+   * during invalidation, because reverse deps don't change during invalidation.
    */
   class MarkedDirtyResult {
     private final Iterable<SkyKey> reverseDepsUnsafe;

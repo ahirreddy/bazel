@@ -1,17 +1,41 @@
-# bind(name = "android/proguard_whitelister", actual = "//tools/android:proguard_whitelister")
-# bind(name = "android/merge_manifests", actual = "//tools/android:merge_manifests")
-# bind(name = "android/build_incremental_dexmanifest", actual = "//tools/android:build_incremental_dexmanifest")
-# bind(name = "android/stubify_manifest", actual = "//tools/android:stubify_manifest")
-# bind(name = "android/incremental_install", actual = "//tools/android:incremental_install")
-# bind(name = "android/build_split_manifest", actual = "//tools/android:build_split_manifest")
-# bind(name = "android/strip_resources", actual = "//tools/android:strip_resources")
-# bind(name = "android/incremental_stub_application", actual = "//tools/android:incremental_stub_application")
-# bind(name = "android/incremental_split_stub_application", actual = "//tools/android:incremental_split_stub_application")
-# bind(name = "android/resources_processor", actual = "//tools/android:resources_processor")
-# bind(name = "android/aar_generator", actual = "//tools/android:aar_generator")
-# bind(name = "android/shuffle_jars", actual = "//tools/android:shuffle_jars")
-# bind(name = "android/merge_dexzips", actual = "//tools/android:merge_dexzips")
-bind(name = "android/sdk")
-bind(name = "android/crosstool", actual = "@bazel_tools//tools/cpp:toolchain")
-bind(name = "android/appcompat_v4")
-bind(name = "android/appcompat_v7")
+bind(
+    name = "android/sdk",
+    actual = "@bazel_tools//tools/android:poison_pill_android_sdk",
+)
+
+bind(
+    name = "android/dx_jar_import",
+    actual = "@bazel_tools//tools/android:no_android_sdk_repository_error",
+)
+
+bind(
+    name = "android/d8_jar_import",
+    actual = "@bazel_tools//tools/android:no_android_sdk_repository_error",
+)
+
+bind(
+    name = "android/crosstool",
+    actual = "@bazel_tools//tools/cpp:toolchain",
+)
+
+bind(
+    name = "android_sdk_for_testing",
+    actual = "//:dummy",
+)
+
+bind(
+    name = "android_ndk_for_testing",
+    actual = "//:dummy",
+)
+
+bind(
+    name = "databinding_annotation_processor",
+    actual = "@bazel_tools//tools/android:empty",
+)
+
+# This value is overridden by android_sdk_repository function to allow targets
+# to select on whether or not android_sdk_repository has run.
+bind(
+    name = "has_androidsdk",
+    actual = "@bazel_tools//tools/android:always_false",
+)

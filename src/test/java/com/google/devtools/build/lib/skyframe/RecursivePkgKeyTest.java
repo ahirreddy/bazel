@@ -13,78 +13,73 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier.RepositoryName;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyKey;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 /** Tests for {@link RecursivePkgKey}. */
 @RunWith(JUnit4.class)
-public class RecursivePkgKeyTest extends BuildViewTestCaseForJunit4 {
+public class RecursivePkgKeyTest extends BuildViewTestCase {
 
   private SkyKey buildRecursivePkgKey(
       RepositoryName repository,
       PathFragment rootRelativePath,
       ImmutableSet<PathFragment> excludedPaths) {
-    RootedPath rootedPath = RootedPath.toRootedPath(rootDirectory, rootRelativePath);
+    RootedPath rootedPath = RootedPath.toRootedPath(Root.fromPath(rootDirectory), rootRelativePath);
     return RecursivePkgValue.key(repository, rootedPath, excludedPaths);
   }
 
   private void invalidHelper(
       PathFragment rootRelativePath, ImmutableSet<PathFragment> excludedPaths) {
-    try {
-      buildRecursivePkgKey(
-          PackageIdentifier.DEFAULT_REPOSITORY_NAME, rootRelativePath, excludedPaths);
-      fail();
-    } catch (IllegalArgumentException expected) {
-    }
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> buildRecursivePkgKey(RepositoryName.MAIN, rootRelativePath, excludedPaths));
   }
 
   @Test
   public void testValidRecursivePkgKeys() throws Exception {
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment(""),
+        RepositoryName.MAIN,
+        PathFragment.create(""),
         ImmutableSet.<PathFragment>of());
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment(""),
-        ImmutableSet.of(new PathFragment("a")));
+        RepositoryName.MAIN,
+        PathFragment.create(""),
+        ImmutableSet.of(PathFragment.create("a")));
 
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment("a"),
+        RepositoryName.MAIN,
+        PathFragment.create("a"),
         ImmutableSet.<PathFragment>of());
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment("a"),
-        ImmutableSet.of(new PathFragment("a/b")));
+        RepositoryName.MAIN,
+        PathFragment.create("a"),
+        ImmutableSet.of(PathFragment.create("a/b")));
 
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment("a/b"),
+        RepositoryName.MAIN,
+        PathFragment.create("a/b"),
         ImmutableSet.<PathFragment>of());
     buildRecursivePkgKey(
-        PackageIdentifier.DEFAULT_REPOSITORY_NAME,
-        new PathFragment("a/b"),
-        ImmutableSet.of(new PathFragment("a/b/c")));
+        RepositoryName.MAIN,
+        PathFragment.create("a/b"),
+        ImmutableSet.of(PathFragment.create("a/b/c")));
   }
 
   @Test
   public void testInvalidRecursivePkgKeys() throws Exception {
-    invalidHelper(new PathFragment(""), ImmutableSet.of(new PathFragment("")));
-    invalidHelper(new PathFragment("a"), ImmutableSet.of(new PathFragment("a")));
-    invalidHelper(new PathFragment("a"), ImmutableSet.of(new PathFragment("b")));
-    invalidHelper(new PathFragment("a/b"), ImmutableSet.of(new PathFragment("a")));
+    invalidHelper(PathFragment.create(""), ImmutableSet.of(PathFragment.create("")));
+    invalidHelper(PathFragment.create("a"), ImmutableSet.of(PathFragment.create("a")));
+    invalidHelper(PathFragment.create("a"), ImmutableSet.of(PathFragment.create("b")));
+    invalidHelper(PathFragment.create("a/b"), ImmutableSet.of(PathFragment.create("a")));
   }
 }

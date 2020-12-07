@@ -14,18 +14,65 @@
 
 package com.google.devtools.build.lib.bazel.repository;
 
-import com.google.common.base.Preconditions;
+import com.google.common.base.Optional;
+import com.google.devtools.build.lib.rules.repository.RepositoryFunction.RepositoryFunctionException;
+import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.skyframe.SkyFunctionName;
-import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import java.io.IOException;
+import java.util.Set;
 
 /**
  * The contents of decompressed archive.
  */
 public class DecompressorValue implements SkyValue {
+
+  /** Implementation of a decompression algorithm. */
+  public interface Decompressor {
+
+    /** Exception reporting about absence of an expected prefix in an archive. */
+    class CouldNotFindPrefixException extends IOException {
+
+      CouldNotFindPrefixException(String prefix, Set<String> availablePrefixes) {
+
+        super(CouldNotFindPrefixException.prepareErrorMessage(prefix, availablePrefixes));
+      }
+
+      private static String prepareErrorMessage(String prefix, Set<String> availablePrefixes) {
+        String error = "Prefix \"" + prefix + "\" was given, but not found in the archive. ";
+        String suggestion = "Here are possible prefixes for this archive: ";
+        String suggestionBody = "";
+
+        if (availablePrefixes.isEmpty()) {
+          suggestion =
+              "We could not find any directory in this archive"
+                  + " (maybe there is no need for `strip_prefix`?)";
+        } else {
+          // Add a list of possible suggestion wrapped with `"` and separated by `, `.
+          suggestionBody = "\"" + String.join("\", \"", availablePrefixes) + "\".";
+        }
+
+        return error + suggestion + suggestionBody;
+      }
+
+      private static boolean isValidPrefixSuggestion(PathFragment pathFragment) {
+        return pathFragment.segmentCount() > 1;
+      }
+
+      public static Optional<String> maybeMakePrefixSuggestion(PathFragment pathFragment) {
+        if (isValidPrefixSuggestion(pathFragment)) {
+          return Optional.of(pathFragment.getSegment(0));
+        } else {
+          return Optional.absent();
+        }
+      }
+    }
+
+    Path decompress(DecompressorDescriptor descriptor)
+        throws IOException, RepositoryFunctionException, InterruptedException;
+  }
 
   private final Path directory;
 
@@ -39,15 +86,8 @@ public class DecompressorValue implements SkyValue {
 
   @Override
   public boolean equals(Object other) {
-    if (this == other) {
-      return true;
-    }
-
-    if (!(other instanceof DecompressorValue)) {
-      return false;
-    }
-
-    return directory.equals(((DecompressorValue) other).directory);
+    return this == other || (other instanceof DecompressorValue
+        && directory.equals(((DecompressorValue) other).directory));
   }
 
   @Override
@@ -55,27 +95,43 @@ public class DecompressorValue implements SkyValue {
     return directory.hashCode();
   }
 
-  public static SkyKey key(SkyFunctionName skyFunctionName, DecompressorDescriptor descriptor) {
-    Preconditions.checkNotNull(descriptor.archivePath());
-    return new SkyKey(skyFunctionName, descriptor);
-  }
-
-  public static SkyKey key(DecompressorDescriptor descriptor) throws IOException {
-    Preconditions.checkNotNull(descriptor.archivePath());
-    return key(getSkyFunctionName(descriptor.archivePath()), descriptor);
-  }
-
-  private static SkyFunctionName getSkyFunctionName(Path archivePath) throws IOException {
+  static Decompressor getDecompressor(Path archivePath)
+      throws RepositoryFunctionException {
     String baseName = archivePath.getBaseName();
     if (baseName.endsWith(".zip") || baseName.endsWith(".jar") || baseName.endsWith(".war")) {
-      return ZipFunction.NAME;
+      return ZipDecompressor.INSTANCE;
+    } else if (baseName.endsWith(".tar")) {
+      return TarFunction.INSTANCE;
     } else if (baseName.endsWith(".tar.gz") || baseName.endsWith(".tgz")) {
-      return TarGzFunction.NAME;
+      return TarGzFunction.INSTANCE;
+    } else if (baseName.endsWith(".tar.xz") || baseName.endsWith(".txz")) {
+      return TarXzFunction.INSTANCE;
+    } else if (baseName.endsWith(".tar.bz2")) {
+      return TarBz2Function.INSTANCE;
     } else {
-      throw new IOException(String.format(
-          "Expected a file with a .zip, .jar, .war, .tar.gz, or .tgz suffix (got %s)",
-          archivePath));
+      throw new RepositoryFunctionException(
+          new EvalException(
+              null,
+              String.format(
+                  "Expected a file with a .zip, .jar, .war, .tar, .tar.gz, .tgz, .tar.xz, .txz, or "
+                      + ".tar.bz2 suffix (got %s)",
+                  archivePath)),
+          Transience.PERSISTENT);
     }
   }
 
+  public static Path decompress(DecompressorDescriptor descriptor)
+      throws RepositoryFunctionException, InterruptedException {
+    try {
+      return descriptor.getDecompressor().decompress(descriptor);
+    } catch (IOException e) {
+      Path destinationDirectory = descriptor.archivePath().getParentDirectory();
+      throw new RepositoryFunctionException(
+          new IOException(
+              String.format(
+                  "Error extracting %s to %s: %s",
+                  descriptor.archivePath(), destinationDirectory, e.getMessage())),
+          Transience.TRANSIENT);
+    }
+  }
 }

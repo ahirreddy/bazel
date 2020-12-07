@@ -16,20 +16,23 @@ package com.google.devtools.build.skyframe;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Interner;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.events.ExtendedEventHandler.Postable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
-
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-
 import javax.annotation.Nullable;
 
 /**
@@ -47,11 +50,15 @@ import javax.annotation.Nullable;
 public class GraphTester {
 
   public static final SkyFunctionName NODE_TYPE = SkyFunctionName.FOR_TESTING;
-  private final ImmutableMap<SkyFunctionName, ? extends SkyFunction> functionMap =
-      ImmutableMap.of(GraphTester.NODE_TYPE, new DelegatingFunction());
+  private final Map<SkyFunctionName, SkyFunction> functionMap = new HashMap<>();
 
   private final Map<SkyKey, TestFunction> values = new HashMap<>();
   private final Set<SkyKey> modifiedValues = new LinkedHashSet<>();
+
+  public GraphTester() {
+    functionMap.put(NODE_TYPE, new DelegatingFunction());
+    functionMap.put(FOR_TESTING_NONHERMETIC, new DelegatingFunction());
+  }
 
   public TestFunction getOrCreate(String name) {
     return getOrCreate(skyKey(name));
@@ -104,6 +111,9 @@ public class GraphTester {
         if (builder.progress != null) {
           env.getListener().handle(Event.progress(builder.progress));
         }
+        if (builder.postable != null) {
+          env.getListener().post(builder.postable);
+        }
         Map<SkyKey, SkyValue> deps = new LinkedHashMap<>();
         boolean oneMissing = false;
         for (Pair<SkyKey, SkyValue> dep : builder.deps) {
@@ -122,7 +132,8 @@ public class GraphTester {
           } else {
             deps.put(dep.first, value);
           }
-          Preconditions.checkState(oneMissing == env.valuesMissing());
+          Preconditions.checkState(
+              oneMissing == env.valuesMissing(), "%s %s %s", dep, value, env.valuesMissing());
         }
         if (env.valuesMissing()) {
           return null;
@@ -157,13 +168,15 @@ public class GraphTester {
   }
 
   public static SkyKey skyKey(String key) {
-    return new SkyKey(NODE_TYPE, key);
+    return Key.create(key);
   }
 
-  /**
-   * A value in the testing graph that is constructed in the tester.
-   */
-  public class TestFunction {
+  public static NonHermeticKey nonHermeticKey(String key) {
+    return NonHermeticKey.create(key);
+  }
+
+  /** A value in the testing graph that is constructed in the tester. */
+  public static class TestFunction {
     // TODO(bazel-team): We could use a multiset here to simulate multi-pass dependency discovery.
     private final Set<Pair<SkyKey, SkyValue>> deps = new LinkedHashSet<>();
     private SkyValue value;
@@ -175,6 +188,7 @@ public class GraphTester {
 
     private String warning;
     private String progress;
+    private Postable postable;
 
     private String tag;
 
@@ -211,9 +225,19 @@ public class GraphTester {
       return this;
     }
 
+    public TestFunction unsetConstantValue() {
+      this.value = null;
+      return this;
+    }
+
     public TestFunction setComputedValue(ValueComputer computer) {
       Preconditions.checkState(this.value == null);
       this.computer = computer;
+      return this;
+    }
+
+    public TestFunction unsetComputedValue() {
+      this.computer = null;
       return this;
     }
 
@@ -225,6 +249,11 @@ public class GraphTester {
       Preconditions.checkState(!hasError);
       Preconditions.checkState(warning == null);
       Preconditions.checkState(progress == null);
+      this.builder = builder;
+      return this;
+    }
+
+    public TestFunction setBuilderUnconditionally(SkyFunction builder) {
       this.builder = builder;
       return this;
     }
@@ -255,18 +284,22 @@ public class GraphTester {
       return this;
     }
 
+    public TestFunction setPostable(Postable postable) {
+      this.postable = postable;
+      return this;
+    }
   }
 
-  public static SkyKey[] toSkyKeys(String... names) {
-    SkyKey[] result = new SkyKey[names.length];
-    for (int i = 0; i < names.length; i++) {
-      result[i] = new SkyKey(GraphTester.NODE_TYPE, names[i]);
+  public static ImmutableList<SkyKey> toSkyKeys(String... names) {
+    ImmutableList.Builder<SkyKey> result = ImmutableList.builder();
+    for (String element : names) {
+      result.add(Key.create(element));
     }
-    return result;
+    return result.build();
   }
 
   public static SkyKey toSkyKey(String name) {
-    return toSkyKeys(name)[0];
+    return toSkyKeys(name).get(0);
   }
 
   private class DelegatingFunction implements SkyFunction {
@@ -284,7 +317,11 @@ public class GraphTester {
   }
 
   public ImmutableMap<SkyFunctionName, ? extends SkyFunction> getSkyFunctionMap() {
-    return functionMap;
+    return ImmutableMap.copyOf(functionMap);
+  }
+
+  public void putSkyFunction(SkyFunctionName functionName, SkyFunction function) {
+    functionMap.put(functionName, function);
   }
 
   /**
@@ -347,6 +384,18 @@ public class GraphTester {
     }
   }
 
+  /** An unshareable version of {@link StringValue}. */
+  public static final class UnshareableStringValue extends StringValue {
+    public UnshareableStringValue(String value) {
+      super(value);
+    }
+
+    @Override
+    public boolean dataIsShareable() {
+      return false;
+    }
+  }
+
   /**
    * A callback interface to provide the value computation.
    */
@@ -383,4 +432,49 @@ public class GraphTester {
       }
     };
   }
+
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class Key extends AbstractSkyKey<String> {
+    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+
+    private Key(String arg) {
+      super(arg);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static Key create(String arg) {
+      return interner.intern(new Key(arg));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctionName.FOR_TESTING;
+    }
+  }
+
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class NonHermeticKey extends AbstractSkyKey<String> {
+    private static final Interner<NonHermeticKey> interner = BlazeInterners.newWeakInterner();
+
+    private NonHermeticKey(String arg) {
+      super(arg);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static NonHermeticKey create(String arg) {
+      return interner.intern(new NonHermeticKey(arg));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return FOR_TESTING_NONHERMETIC;
+    }
+  }
+
+  private static final SkyFunctionName FOR_TESTING_NONHERMETIC =
+      SkyFunctionName.createNonHermetic("FOR_TESTING_NONHERMETIC");
 }

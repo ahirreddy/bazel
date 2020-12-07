@@ -15,8 +15,6 @@ package com.google.devtools.build.lib.testutil;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
-import static com.google.common.truth.Truth.assert_;
-import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Function;
@@ -25,14 +23,12 @@ import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventCollector;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.util.Pair;
-
 import java.lang.ref.Reference;
 import java.lang.reflect.Field;
 import java.util.ArrayDeque;
@@ -55,21 +51,6 @@ public class MoreAsserts {
     assertThat(comp.compare(expected, actual)).isEqualTo(0);
   }
 
-  public static <T> void assertContentsAnyOrder(
-      Iterable<? extends T> expected, Iterable<? extends T> actual,
-      Comparator<? super T> comp) {
-    assertThat(actual).hasSize(Iterables.size(expected));
-    int i = 0;
-    for (T e : expected) {
-      for (T a : actual) {
-        if (comp.compare(e, a) == 0) {
-          i++;
-        }
-      }
-    }
-    assertThat(actual).hasSize(i);
-  }
-
   /**
    * Scans if an instance of given class is strongly reachable from a given
    * object.
@@ -84,15 +65,9 @@ public class MoreAsserts {
    */
   public static void assertInstanceOfNotReachable(
       Object start, final Class<?> clazz) {
-    Predicate<Object> p = new Predicate<Object>() {
-      @Override
-      public boolean apply(Object obj) {
-        return clazz.isAssignableFrom(obj.getClass());
-      }
-    };
+    Predicate<Object> p = obj -> clazz.isAssignableFrom(obj.getClass());
     if (isRetained(p, start)) {
-      assert_().fail(
-          "Found an instance of " + clazz.getCanonicalName() + " reachable from " + start);
+      fail("Found an instance of " + clazz.getCanonicalName() + " reachable from " + start);
     }
   }
 
@@ -140,7 +115,15 @@ public class MoreAsserts {
               continue;
             }
 
-            f.setAccessible(true);
+            try {
+              f.setAccessible(true);
+            } catch (RuntimeException e) {
+              // JDK9 can throw InaccessibleObjectException when internal modules are accessed.
+              // This isn't available in JDK8, so catch RuntimeException
+              // We can use a JVM arg --add_opens to suppress that, but that involves every
+              // test adding every JVM module to the target.
+              continue;
+            }
             try {
               Object ref = f.get(current);
               if (ref != null) {
@@ -186,8 +169,9 @@ public class MoreAsserts {
   public static void assertContainsWordsWithQuotes(String message,
       String... strings) {
     for (String string : strings) {
-      assertTrue(message + " should contain '" + string + "' (with quotes)",
-          message.contains("'" + string + "'"));
+      assertWithMessage(message + " should contain '" + string + "' (with quotes)")
+          .that(message.contains("'" + string + "'"))
+          .isTrue();
     }
   }
 
@@ -267,12 +251,20 @@ public class MoreAsserts {
   }
 
   /**
-   * If the specified EventCollector does not contain an event which has
-   * 'expectedEvent' as a substring, an informative assertion fails. Otherwise
-   * the matching event is returned.
+   * If the specified EventCollector contains an unexpected number of events, an informative
+   * assertion fails in the context of the specified TestCase.
    */
-  public static Event assertContainsEvent(Iterable<Event> eventCollector,
-      String expectedEvent) {
+  public static void assertEventCountAtLeast(int minCount, EventCollector eventCollector) {
+    assertWithMessage(eventsToString(eventCollector))
+        .that(eventCollector.count())
+        .isAtLeast(minCount);
+  }
+
+  /**
+   * If the specified EventCollector does not contain an event which has 'expectedEvent' as a
+   * substring, an informative assertion fails. Otherwise the matching event is returned.
+   */
+  public static Event assertContainsEvent(Iterable<Event> eventCollector, String expectedEvent) {
     return assertContainsEvent(eventCollector, expectedEvent, EventKind.ALL_EVENTS);
   }
 
@@ -306,6 +298,32 @@ public class MoreAsserts {
         + (eventsString.length() == 0 ? "" : ("; found these though:" + eventsString)))
         .that(false).isTrue();
     return null; // unreachable
+  }
+
+  /**
+   * If {@code eventCollector} does not contain an event which matches {@code expectedEventRegex},
+   * fails with an informative assertion.
+   */
+  public static void assertContainsEventRegex(
+      Iterable<Event> eventCollector, String expectedEventRegex) {
+    for (Event event : eventCollector) {
+      if (event.toString().matches(expectedEventRegex)) {
+        return;
+      }
+    }
+    String eventsString = eventsToString(eventCollector);
+    String failureMessage = "Event matching '" + expectedEventRegex + "' not found";
+    if (!eventsString.isEmpty()) {
+      failureMessage += "; found these though: " + eventsString;
+    }
+    fail(failureMessage);
+  }
+
+  public static void assertNotContainsEventRegex(
+      Iterable<Event> eventCollector, String unexpectedEventRegex) {
+    for (Event event : eventCollector) {
+      assertThat(event.toString()).doesNotMatch(unexpectedEventRegex);
+    }
   }
 
   /**
@@ -398,20 +416,17 @@ public class MoreAsserts {
   }
 
   /**
-   * Check to see if each element of expectedMessages is the beginning of a message
-   * in eventCollector, in order, as in {@link #containsSublistWithGapsAndEqualityChecker}.
-   * If not, an informative assertion is failed
+   * Check to see if each element of expectedMessages is the beginning of a message in
+   * eventCollector, in order, as in {@link #containsSublistWithGapsAndEqualityChecker}. If not, an
+   * informative assertion is failed
    */
-  protected static void assertContainsEventsInOrder(Iterable<Event> eventCollector,
-      String... expectedMessages) {
-    String failure = containsSublistWithGapsAndEqualityChecker(
-        ImmutableList.copyOf(eventCollector),
-        new Function<Pair<Event, String>, Boolean> () {
-      @Override
-      public Boolean apply(Pair<Event, String> pair) {
-        return pair.first.getMessage().contains(pair.second);
-      }
-    }, expectedMessages);
+  public static void assertContainsEventsInOrder(
+      Iterable<Event> eventCollector, String... expectedMessages) {
+    String failure =
+        containsSublistWithGapsAndEqualityChecker(
+            ImmutableList.copyOf(eventCollector),
+            pair -> pair.first.getMessage().contains(pair.second),
+            expectedMessages);
 
     String eventsString = eventsToString(eventCollector);
     assertWithMessage("Event '" + failure + "' not found in proper order"

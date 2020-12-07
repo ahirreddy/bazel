@@ -13,16 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.config;
 
-import static org.junit.Assert.assertEquals;
+import static com.google.common.truth.Truth.assertThat;
 
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleFactory;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.packages.TriState;
-import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -31,17 +29,18 @@ import org.junit.runners.JUnit4;
  * Tests for link stamping.
  */
 @RunWith(JUnit4.class)
-public class StampTest extends BuildViewTestCaseForJunit4 {
+public class StampTest extends BuildViewTestCase {
   /**
    * Tests that link stamping is disabled for all tests that support it.
    */
   @Test
   public void testNoStampingForTests() throws Exception {
-    RuleFactory ruleFactory = new RuleFactory(TestRuleClassProvider.getRuleClassProvider());
+    RuleFactory ruleFactory = new RuleFactory(analysisMock.createRuleClassProvider());
     for (String name : ruleFactory.getRuleClassNames()) {
       RuleClass ruleClass = ruleFactory.getRuleClass(name);
       if (TargetUtils.isTestRuleName(name) && ruleClass.hasAttr("stamp", BuildType.TRISTATE)) {
-        assertEquals(TriState.NO, ruleClass.getAttributeByName("stamp").getDefaultValue(null));
+        assertThat(ruleClass.getAttributeByName("stamp").getDefaultValue(null))
+            .isEqualTo(TriState.NO);
       }
     }
   }

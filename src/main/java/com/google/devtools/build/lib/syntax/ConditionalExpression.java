@@ -13,96 +13,50 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import static com.google.devtools.build.lib.syntax.compiler.ByteCodeUtils.append;
-
-import com.google.devtools.build.lib.syntax.compiler.ByteCodeUtils;
-import com.google.devtools.build.lib.syntax.compiler.DebugInfo;
-import com.google.devtools.build.lib.syntax.compiler.Jump;
-import com.google.devtools.build.lib.syntax.compiler.Jump.PrimitiveComparison;
-import com.google.devtools.build.lib.syntax.compiler.LabelAdder;
-import com.google.devtools.build.lib.syntax.compiler.VariableScope;
-
-import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-
-import java.util.ArrayList;
-import java.util.List;
-
-/**
- * Syntax node for an if/else expression.
- */
+/** Syntax node for an expression of the form {@code t if cond else f}. */
 public final class ConditionalExpression extends Expression {
 
-  // Python conditional expressions: $thenCase if $condition else $elseCase
-  // https://docs.python.org/3.5/reference/expressions.html#conditional-expressions
-  private final Expression thenCase;
-  private final Expression condition;
-  private final Expression elseCase;
+  private final Expression t;
+  private final Expression cond;
+  private final Expression f;
 
-  public Expression getThenCase() { return thenCase; }
-  public Expression getCondition() { return condition; }
-  public Expression getElseCase() { return elseCase; }
-
-  /**
-   * Constructor for a conditional expression
-   */
-  public ConditionalExpression(
-      Expression thenCase, Expression condition, Expression elseCase) {
-    this.thenCase = thenCase;
-    this.condition = condition;
-    this.elseCase = elseCase;
+  public Expression getThenCase() {
+    return t;
   }
 
-  /**
-   * Constructs a string representation of the if expression
-   */
-  @Override
-  public String toString() {
-    return thenCase + " if " + condition + " else " + elseCase;
+  public Expression getCondition() {
+    return cond;
+  }
+
+  public Expression getElseCase() {
+    return f;
+  }
+
+  /** Constructor for a conditional expression */
+  ConditionalExpression(FileLocations locs, Expression t, Expression cond, Expression f) {
+    super(locs);
+    this.t = t;
+    this.cond = cond;
+    this.f = f;
   }
 
   @Override
-  Object doEval(Environment env) throws EvalException, InterruptedException {
-    if (EvalUtils.toBoolean(condition.eval(env))) {
-      return thenCase.eval(env);
-    } else {
-      return elseCase.eval(env);
-    }
+  public int getStartOffset() {
+    return t.getStartOffset();
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getEndOffset() {
+    return f.getEndOffset();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
-  void validate(ValidationEnvironment env) throws EvalException {
-    condition.validate(env);
-    thenCase.validate(env);
-    elseCase.validate(env);
-  }
-
-  @Override
-  ByteCodeAppender compile(VariableScope scope, DebugInfo debugInfo) throws EvalException {
-    List<ByteCodeAppender> code = new ArrayList<>();
-    LabelAdder afterLabel = new LabelAdder();
-    LabelAdder elseLabel = new LabelAdder();
-    // compile condition and convert to boolean
-    code.add(condition.compile(scope, debugInfo));
-    append(
-        code,
-        EvalUtils.toBoolean,
-        // jump to else block if false
-        Jump.ifIntOperandToZero(PrimitiveComparison.EQUAL).to(elseLabel));
-    // otherwise evaluate the expression for "then" and jump to end
-    code.add(thenCase.compile(scope, debugInfo));
-    append(
-        code,
-        Jump.to(afterLabel),
-        // add label for "else" and evaluate the expression
-        elseLabel);
-    code.add(elseCase.compile(scope, debugInfo));
-    append(code, afterLabel);
-
-    return ByteCodeUtils.compoundAppender(code);
+  public Kind kind() {
+    return Kind.CONDITIONAL;
   }
 }

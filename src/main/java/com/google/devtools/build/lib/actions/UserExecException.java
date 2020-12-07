@@ -28,26 +28,15 @@ public class UserExecException extends ExecException {
     super(cause);
   }
 
-  public UserExecException(String message, boolean timedOut) {
-    super(message, false, timedOut);
-  }
-
   public UserExecException(String message, Throwable cause) {
     super(message, cause);
-  }
-
-  public UserExecException(String message, Throwable cause, boolean timedOut) {
-    super(message, cause, false, timedOut);
   }
 
   @Override
   public ActionExecutionException toActionExecutionException(String messagePrefix,
         boolean verboseFailures, Action action) {
-    String message = messagePrefix + " failed: " + getMessage();
-    if (verboseFailures) {
-      return new ActionExecutionException(message, this, action, isCatastrophic());
-    } else {
-      return new ActionExecutionException(message, action, isCatastrophic());
-    }
+    String message = messagePrefix + " failed";
+    return new ActionExecutionException(
+        message + ": " + getMessage(), this, action, isCatastrophic());
   }
 }

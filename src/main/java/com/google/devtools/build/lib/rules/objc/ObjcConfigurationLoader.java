@@ -15,13 +15,13 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Options;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationEnvironment;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.rules.cpp.CppOptions;
 
 /**
  * A loader that creates ObjcConfiguration instances based on Objective-C configurations and
@@ -29,21 +29,21 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
  */
 public class ObjcConfigurationLoader implements ConfigurationFragmentFactory {
   @Override
-  public ObjcConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions)
-      throws InvalidConfigurationException {
-    Options options = buildOptions.get(BuildConfiguration.Options.class);
+  public ObjcConfiguration create(BuildOptions buildOptions) throws InvalidConfigurationException {
+    CoreOptions options = buildOptions.get(CoreOptions.class);
+    CppOptions cppOptions = buildOptions.get(CppOptions.class);
     ObjcCommandLineOptions objcOptions = buildOptions.get(ObjcCommandLineOptions.class);
-
-    return new ObjcConfiguration(objcOptions, options, env.getBlazeDirectories());
+    return new ObjcConfiguration(cppOptions, objcOptions, options);
   }
 
   @Override
-  public Class<? extends BuildConfiguration.Fragment> creates() {
+  public Class<? extends Fragment> creates() {
     return ObjcConfiguration.class;
   }
 
   @Override
   public ImmutableSet<Class<? extends FragmentOptions>> requiredOptions() {
-    return ImmutableSet.<Class<? extends FragmentOptions>>of(ObjcCommandLineOptions.class);
+    return ImmutableSet.<Class<? extends FragmentOptions>>of(
+        CppOptions.class, ObjcCommandLineOptions.class);
   }
 }

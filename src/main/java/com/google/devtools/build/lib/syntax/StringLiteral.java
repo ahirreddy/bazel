@@ -13,50 +13,90 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import com.google.devtools.build.lib.syntax.compiler.DebugInfo;
-import com.google.devtools.build.lib.syntax.compiler.VariableScope;
+import com.google.devtools.build.lib.skyframe.serialization.DeserializationContext;
+import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
+import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
+import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import java.io.IOException;
 
-import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-import net.bytebuddy.implementation.bytecode.constant.TextConstant;
+/** Syntax node for a string literal. */
+public final class StringLiteral extends Expression {
 
-/**
- * Syntax node for a string literal.
- */
-public final class StringLiteral extends Literal<String> {
+  private final int startOffset;
+  private final String value;
+  private final int endOffset;
 
-  private final char quoteChar;
+  StringLiteral(FileLocations locs, int startOffset, String value, int endOffset) {
+    super(locs);
+    this.startOffset = startOffset;
+    this.value = value;
+    this.endOffset = endOffset;
+  }
 
-  public StringLiteral(String value, char quoteChar) {
-    super(value);
-    this.quoteChar = quoteChar;
+  /** Returns the value denoted by the string literal */
+  public String getValue() {
+    return value;
+  }
+
+  public Location getLocation() {
+    return locs.getLocation(startOffset);
   }
 
   @Override
-  public String toString() {
-    return quoteChar + value.replace(Character.toString(quoteChar), "\\" + quoteChar) + quoteChar;
+  public int getStartOffset() {
+    return startOffset;
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getEndOffset() {
+    // TODO(adonovan): when we switch to compilation,
+    // making syntax trees ephemeral, we can afford to
+    // record the raw literal. This becomes:
+    //   return startOffset + raw.length().
+    return endOffset;
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
-  /**
-   * Gets the quote character that was used for this string.  For example, if
-   * the string was 'hello, world!', then this method returns '\''.
-   *
-   * @return the character used to quote the string.
-   */
-  public char getQuoteChar() {
-    return quoteChar;
+  @Override
+  public Kind kind() {
+    return Kind.STRING_LITERAL;
   }
 
-  @Override
-  void validate(ValidationEnvironment env) throws EvalException {
-  }
+  static final class StringLiteralCodec implements ObjectCodec<StringLiteral> {
+    @Override
+    public Class<? extends StringLiteral> getEncodedClass() {
+      return StringLiteral.class;
+    }
 
-  @Override
-  ByteCodeAppender compile(VariableScope scope, DebugInfo debugInfo) {
-    return new ByteCodeAppender.Simple(new TextConstant(value));
+    @Override
+    public void serialize(SerializationContext context, StringLiteral lit, CodedOutputStream out)
+        throws SerializationException, IOException {
+      // The String instances referred to by StringLiterals are deduped by Parser, so therefore
+      // memoization is guaranteed to be profitable.
+      context.serializeWithAdHocMemoizationStrategy(
+          lit.getValue(), MemoizationStrategy.MEMOIZE_AFTER, out);
+      out.writeInt32NoTag(lit.startOffset);
+      out.writeInt32NoTag(lit.endOffset);
+      context.serializeWithAdHocMemoizationStrategy(
+          lit.locs, MemoizationStrategy.MEMOIZE_AFTER, out);
+    }
+
+    @Override
+    public StringLiteral deserialize(DeserializationContext context, CodedInputStream in)
+        throws SerializationException, IOException {
+      String value =
+          context.deserializeWithAdHocMemoizationStrategy(in, MemoizationStrategy.MEMOIZE_AFTER);
+      int startOffset = in.readInt32();
+      int endOffset = in.readInt32();
+      FileLocations locs =
+          context.deserializeWithAdHocMemoizationStrategy(in, MemoizationStrategy.MEMOIZE_AFTER);
+      return new StringLiteral(locs, startOffset, value, endOffset);
+    }
   }
 }

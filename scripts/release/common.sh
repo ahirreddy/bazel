@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/bin/bash
 
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -eu
+
 # Some common method for release scripts
 
 # A release candidate is created from a branch named "release-%name%"
@@ -27,9 +29,24 @@
 # To follow tracks and to support how CI systems fetch the refs, we
 # store two commit notes: the release name and the candidate number.
 
+# Get the short hash of a commit
+function __git_commit_hash() {
+  git rev-parse "${1}"
+}
+
+# Get the subject (first line of the commit message) of a commit
+function __git_commit_subject() {
+  git show -s --pretty=format:%s "$@"
+}
+
 # Returns the branch name of the current git repository
 function git_get_branch() {
   git symbolic-ref --short HEAD
+}
+
+# Returns the tag name of the current git repository
+function git_get_tag() {
+  git describe --tag
 }
 
 # Show the commit message of the ref specified in argument
@@ -37,14 +54,36 @@ function git_commit_msg() {
   git show -s --pretty=format:%B "$@"
 }
 
-# Extract the release candidate number from the git notes
+# Extract the release candidate number from the git branch name
 function get_release_candidate() {
-  git notes --ref=release-candidate show "$@" 2>/dev/null | xargs echo || true
+  # Match rcX and return X
+  git_get_branch 2>/dev/null | grep -Po "(?<=rc)([0-9]|\.)*$" || true
 }
 
-# Extract the release name from the git notes
+# Extract the release name from the git branch name
 function get_release_name() {
-  git notes --ref=release show "$@" 2>/dev/null | xargs echo || true
+  # Match branch name release-X.X.X-rcY and return X.X.X
+  # or match tag name X.X.X and return X.X.X
+  git_get_branch 2>/dev/null | grep -Po "(?<=release-)([0-9]|\.)*(?=rc)" || git_get_tag | grep -Po "^([0-9]|\.)*$" || true
+}
+
+# Get the list of commit hashes between two revisions
+function git_log_hash() {
+  local baseline="$1"
+  local head="$2"
+  shift 2
+  git log --pretty=format:%H "${baseline}".."${head}" "$@"
+}
+
+# Extract the full release name from the branch name or tag name
+function get_full_release_name() {
+  local name="$(get_release_name "$@")"
+  local rc="$(get_release_candidate "$@")"
+  if [ -n "${rc}" ]; then
+    echo "${name}rc${rc}"
+  else
+    echo "${name}"
+  fi
 }
 
 # Returns the info from the branch of the release. It is the current branch
@@ -53,9 +92,15 @@ function get_release_name() {
 # candidate in this release.
 function get_release_branch() {
   local branch_name=$(git_get_branch)
-  if [ -z "$(get_release_name)" -o -z "$(get_release_candidate)" ]; then
+  if [ -z "$(get_release_name)" ] || [ -z "$(get_release_candidate)" ]; then
     echo "Not a release branch: ${branch_name}." >&2
     exit 1
   fi
   echo "${branch_name}"
 }
+
+# fmt behaves differently on *BSD and on GNU/Linux, use fold.
+function wrap_text() {
+  fold -s -w $1 | sed 's/ *$//'
+}
+

@@ -1,4 +1,9 @@
-<h1>Bazel Test Encyclopedia</h1>
+---
+layout: documentation
+title: Test encyclopedia
+---
+<h1>Writing tests</h1>
+
 <p class="lead">An Exhaustive Specification of the Test Execution Environment</p>
 
 <h2>Background</h2>
@@ -6,7 +11,7 @@
 <p>The Bazel BUILD language includes rules which can be used to define
 automated test programs in many languages.</p>
 
-<p>Tests are run using <code><a href="bazel-user-manual.html#test">bazel test</a></code>.
+<p>Tests are run using <code><a href="user-manual.html#test">bazel test</a></code>.
 
 Users may also execute test binaries directly. This is allowed but not endorsed, as such
 an invocation will not adhere to the mandates described below.</p>
@@ -36,7 +41,7 @@ this specification and the implemented behavior of test runner disagree, the
 specification takes precedence.</p>
 
 
-<h3>Purpose of Tests</h3>
+<h2>Purpose of tests</h2>
 
 <p>The purpose of Bazel tests is to confirm some property of the source files
 checked into the repository.  (In this document, "source files" includes test data,
@@ -57,7 +62,7 @@ their changes are at fault when the test stops passing.</p>
 <p>Currently, such behavior is not enforced. However, test runners reserve the
 right to add such enforcement in the future.</p>
 
-<h3>Role of the Build System</h3>
+<h2>Role of the build system</h2>
 
 <p>Test rules are analogous to binary rules in that each must yield an
 executable program.  For some languages, this is a stub program which combines
@@ -74,7 +79,7 @@ should ensure that the generated executable loads these files via the runfiles
 image provided by the test runner, rather than hardcoded references to absolute
 locations in the source or output tree.</p>
 
-<h3>Role of the Test Runner</h3>
+<h2>Role of the test runner</h2>
 
 <p>From the point of view of the test runner, each test is a program which can
 be invoked with <code>execve()</code>.  There may be other ways to execute
@@ -125,6 +130,11 @@ test's <code>size</code> as follows:</p>
 900 seconds to run. A "medium" test with a timeout of "short" will be allotted
 60 seconds.</p>
 
+<p>Unlike <code>timeout</code>, the <code>size</code> also determines the
+limits for other resources like RAM, as described in
+<a href="be/common-definitions.html?cl=head#common-attributes-tests">Common
+definitions</a>.</p>
+
 <p>All combinations of <code>size</code> and <code>timeout</code> labels are
 legal, so an "enormous" test may be declared to have a timeout of "short".
 Presumably it would do some really horrible things very quickly.</p>
@@ -137,7 +147,7 @@ flakiness.</p>
 
 <table class="table table-bordered table-striped table-condensed">
   <thead>
-    <tr><th>size</th><th>Time minimum (sec.)</th></tr>
+    <tr><th>timeout</th><th>Time minimum (sec.)</th></tr>
   </thead>
   <tbody>
     <tr><td><code>short</code></td><td>0</td></tr>
@@ -148,7 +158,7 @@ flakiness.</p>
 </table>
 
 <p>For example, if a "moderate" test completes in 5.5s, consider setting
-<code>timeout</code>="short" or <code>size</code>="small". Using the bazel
+<code>timeout = "short"</code> or <code>size = "small"</code>. Using the bazel
 <code>--test_verbose_timeout_warnings</code> command line option will show the
 tests whose specified size is too big.</p>
 
@@ -157,16 +167,33 @@ tests whose specified size is too big.</p>
 Any test that does not specify a recognized size will default to being a medium
 test.</p>
 
+<p>Tests can be parallelized via test sharding. See
+<a href="user-manual.html#sharding-strategy"><code>--test_sharding_strategy</code></a>
+and
+<a href="be/common-definitions.html#common-attributes-tests"><code>shard_count</code></a>
+to enable test sharding. When sharding is enabled, the test runner is launched
+once per shard. The environment variable
+<a href="#initial-conditions"><code>TEST_TOTAL_SHARDS</code></a> is the number
+of shards, and
+<a href="#initial-conditions"><code>TEST_SHARD_INDEX</code></a> is the shard
+index, beginning at 0. Runners use this information to select which tests to
+run - for example, using a round-robin strategy. Not all test runners support sharding.
+If a runner supports sharding, it must create or update the last modified date
+of the file specified by
+<a href="#initial-conditions"><code>TEST_SHARD_STATUS_FILE</code></a>.
+Otherwise, Bazel assumes it does not support sharding and will not launch
+additional runners.</p>
+
 <p>If the main process of a test exits, but some of its children are still
 running, the test runner should consider the run complete and count it as a
 success or failure based on the exit code observed from the main process.  The
 test runner may kill any stray processes.  Tests should not leak processes in
 this fashion.</p>
 
+<h2 id="initial-conditions">Initial conditions</h2>
+
 <p>When executing a test, the test runner must establish certain initial
 conditions.</p>
-
-<h3>Initial Conditions</h3>
 
 <p>The test runner must invoke each test with the path to the test
 executable in <code>argv[0]</code>.  This path must be relative and
@@ -184,7 +211,6 @@ test unless the user explicitly requests it.</p>
   <tbody>
 
     <tr><td><code>HOME</code></td><td>value of <code>$TEST_TMPDIR</code></td><td>recommended</td></tr>
-    <tr><td><code>JAVA_RUNFILES</code></td><td>value of <code>$TEST_SRCDIR</code></td><td>required</td></tr>
     <tr><td><code>LANG</code></td><td><i>unset</i></td><td>required</td></tr>
     <tr><td><code>LANGUAGE</code></td><td><i>unset</i></td><td>required</td></tr>
     <tr><td><code>LC_ALL</code></td><td><i>unset</i></td><td>required</td></tr>
@@ -195,36 +221,59 @@ test unless the user explicitly requests it.</p>
     <tr><td><code>LC_NUMERIC</code></td><td><i>unset</i></td><td>required</td></tr>
     <tr><td><code>LC_TIME</code></td><td><i>unset</i></td><td>required</td></tr>
     <tr><td><code>LD_LIBRARY_PATH</code></td><td>colon-separated list of directories containing shared libraries</td><td>optional</td></tr>
+    <tr><td><code>JAVA_RUNFILES</code></td><td>value of <code>$TEST_SRCDIR</code></td><td>deprecated</td></tr>
 
     <tr><td><code>LOGNAME</code></td><td>value of <code>$USER</code></td><td>required</td></tr>
 
     <tr><td><code>PATH</code></td><td><code>/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.</code></td><td>recommended</td></tr>
-    <tr><td><code>PWD</code></td><td><code>$TEST_SRCDIR</code></td><td>recommended</td></tr>
+    <tr><td><code>PWD</code></td><td><code>$TEST_SRCDIR/<i>workspace-name</i></code></td><td>recommended</td></tr>
     <tr><td><code>SHLVL</code></td><td><code>2</code></td><td>recommended</td></tr>
+    <tr><td><code>TEST_INFRASTRUCTURE_FAILURE_FILE</code></td><td>absolute path to a private file in a writable directory (This file should only be used to report failures originating from the testing infrastructure, not as a general mechanism for reporting flaky failures of tests. In this context, testing infrastructure is defined as systems or libraries that are not test-specific, but can cause test failures by malfunctioning. The first line is the name of the testing infrastructure component that caused the failure, the second one a human-readable description of the failure. Additional lines are ignored.)</td><td>optional</td></tr>
+    <tr><td><code>TEST_LOGSPLITTER_OUTPUT_FILE</code></td><td>absolute path to a private file in a writable directory (used to write Logsplitter protobuffer log)</td><td>optional</td></tr>
     <tr><td><code>TEST_PREMATURE_EXIT_FILE</code></td><td>absolute path to a private file in a writable directory (used for catching calls to exit())</td><td>optional</td></tr>
-    <tr><td><code>TEST_RANDOM_SEED</code></td><td>See <a href="bazel-user-manual.html#other_options_for_blaze_test">this table</a>.</td><td>optional</td></tr>
+    <tr>
+      <td><code>TEST_RANDOM_SEED</code></td>
+      <td>If the <code class='flag'>--runs_per_test</code> option is used, TEST_RANDOM_SEED
+      is set to the <var>run number</var> (starting with 1) for each individual test run.</td>
+      <td>optional</td>
+    </tr>
+    <tr><td><code>TEST_TARGET</code></td><td>The name of the target being tested</td><td>optional</td></tr>
     <tr><td><code>TEST_SIZE</code></td><td>The test <a href="#size"><code>size</code></a></td><td>optional</td></tr>
-    <tr><td><code>TEST_TIMEOUT</code></td><td>The test <a href="#timeout"><code>timeout</code></a></td><td>optional</td></tr>
+    <tr><td><code>TEST_TIMEOUT</code></td><td>The test <a href="#timeout"><code>timeout</code></a> in seconds</td><td>optional</td></tr>
+    <tr><td><code>TEST_SHARD_INDEX</code></td><td>shard index, if sharding is used</td><td>optional</td></tr>
+    <tr><td><code>TEST_SHARD_STATUS_FILE</code></td><td>path to file to touch to indicate support for sharding</td><td>optional</td></tr>
     <tr><td><code>TEST_SRCDIR</code></td><td>absolute path to the base of the runfiles tree</td><td>required</td></tr>
+    <tr><td><code>TEST_TOTAL_SHARDS</code></td><td>total shard count, if sharding is used</td><td>optional</td></tr>
     <tr><td><code>TEST_TMPDIR</code></td><td>absolute path to a private writable directory</td><td>required</td></tr>
-    <tr><td><code>TEST_TIMEOUT</code></td><td><code>300</code></td><td>optional</td></tr>
-    <tr><td><code>TEST_UNDECLARED_OUTPUTS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test outputs)</td><td>optional</td></tr>
-    <tr><td><code>TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test output annotation .part files).
 
+    <tr><td><code>TEST_WORKSPACE</code></td><td>the local repository's workspace name</td><td>optional</td></tr>
+    <tr><td><code>TEST_UNDECLARED_OUTPUTS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test outputs)</td><td>optional</td></tr>
+
+    <tr><td><code>TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test output annotation .part files).
     </td><td>optional</td></tr>
+
     <tr><td><code>TEST_WARNINGS_OUTPUT_FILE</code></td><td>absolute path to a private file in a writable directory (used to write test target warnings)</td><td>optional</td></tr>
+    <tr><td><code>TESTBRIDGE_TEST_ONLY</code></td><td>value of <a href="user-manual.html#flag--test_filter"><code>--test_filter</code></a>, if specified</td><td>optional</td></tr>
 
     <tr><td><code>TZ</code></td><td><code>UTC</code></td><td>required</td></tr>
-
     <tr><td><code>USER</code></td><td>value of <code>getpwuid(getuid())-&gt;pw_name</code></td><td>required</td></tr>
 
+    <tr>
+      <td><code>XML_OUTPUT_FILE</code></td>
+      <td>Location of the test result XML output file.
+        The XML schema is based on the
+        <a href="https://windyroad.com.au/dl/Open%20Source/JUnit.xsd">JUnit test result
+        schema</a>.
+      </td>
+      <td>optional</td>
+    </tr>
   </tbody>
 </table>
 <br>
 <p>The environment may contain additional entries.  Tests should not depend on the
 presence, absence, or value of any environment variable not listed above.</p>
 
-<p>The initial working directory shall be <code>$TEST_SRCDIR</code>.</p>
+<p>The initial working directory shall be <code>$TEST_SRCDIR/$TEST_WORKSPACE</code>.</p>
 <p> The current process id, process group id, session id, and parent process
 id are unspecified.  The process may or may not be a process group leader or a
 session leader.  The process may or may not have a controlling terminal.  The
@@ -276,7 +325,7 @@ utilization (as returned by <code>getrusage()</code>) are unspecified.</p>
 
 <p>The initial scheduling policy and priority are unspecified.</p>
 
-<h3>Role of the Host System</h3>
+<h2>Role of the host system</h2>
 
 <p>In addition to the aspects of user context under direct control of the
 test runner, the operating system on which tests execute must satisfy certain
@@ -289,7 +338,8 @@ The root directory observed by a test may or may not be the real root directory.
 <code>/proc</code> shall be mounted.<br>
 All build tools shall be present at the absolute paths under <code>/usr</code> used by a local installation.<br>
 Paths starting with <code>/home</code> may not be available. Tests should not access any such paths.<br>
-<code>/tmp</code> and <code>/export/hda3/tmp</code> shall be writable, but tests should avoid using these paths.<br>
+<code>/tmp</code>
+shall be writable, but tests should avoid using these paths.<br>
 
 Tests must not assume that any constant path is available for their exclusive use.<br>
 Tests must not assume that atimes are enabled for any mounted filesystem.<br>
@@ -322,13 +372,19 @@ resolve.</p>
 <h4>Other resources</h4>
 
 <p>Tests are granted at least one CPU core. Others may be available but this
-is not guaranteed. Other performance aspects of this core are not specified.</p>
+is not guaranteed. Other performance aspects of this core are not specified.
+You can increase the reservation to a higher number of CPU cores by adding the
+tag "cpu:n" (where n is a positive number) to a test rule. If a machine has
+less total CPU cores than requested, Bazel will still run the test. If a test
+uses sharding, each individual shard will reserve the number of CPU cores
+specified here.</p>
 
 <p>Tests may create subprocesses, but not process groups or sessions.</p>
 
-<p>There is a limit on both the number of input files a test may consume, and
-their aggregate size. Such limits are subject to change, but are currently in
-the range of tens of thousands of inputs and several GB of aggregate size.</p>
+<p>There is a limit on the number of input files a test may consume. This limit
+is subject to change, but is currently in the range of tens of thousands of inputs.
+
+</p>
 
 <h4>Time and date</h4>
 
@@ -339,7 +395,7 @@ the range of tens of thousands of inputs and several GB of aggregate size.</p>
 <p>X Windows may or may not be available. Tests that need an X server should
 start Xvfb.</p>
 
-<h3>Test interaction with the filesystem</h3>
+<h2>Test interaction with the filesystem</h2>
 <p>All file paths specified in test environment variables point to
 somewhere on the local filesystem, unless otherwise specified.</p>
 
@@ -367,7 +423,7 @@ Tests should avoid using paths containing <code>..</code> components within the
 runfiles tree.</p>
 
 <p>No directory, file, or symlink within the runfiles tree (including paths
-which traverse symlinks) should be writable. (It follow that the initial
+which traverse symlinks) should be writable. (It follows that the initial
 working directory should not be writable.) Tests must not assume that any part
 of the runfiles is writable, or owned by the current user (i.e. chmod and chgrp
 may fail).</p>
@@ -382,11 +438,12 @@ tree.</p>
 Bazel sees the file when the test finishes, it will assume that the test exited
 prematurely and mark it as having failed.</p>
 
-<h3>Tag conventions</h3>
+<h2 id="tag-conventions">Tag conventions</h2>
 
 <p>
-  Some <a href="bazel-user-manual.html#tags_keywords">tags</a> in the test rules have a special
-  meaning.
+  Some tags in the test rules have a special
+  meaning. See also the <a href="be/common-definitions.html#common.tags">Bazel
+  Build Encyclopedia on the <code>tags</code> attribute</a>.
 </p>
 
 <table class="table table-bordered table-striped table-condensed">
@@ -405,31 +462,27 @@ prematurely and mark it as having failed.</p>
     </tr>
     <tr>
       <th><code>large</code></th>
-      <td><code>test_suite</code> convention; suite of large tests<br/>
-
-      </td>
+      <td><code>test_suite</code> convention; suite of large tests</td>
     </tr>
 
     <tr>
-      <th><code>manual</code></th>
+      <th><code>manual</code>*</th>
 
       <td>don't include test target in wildcard target patterns like <code>:...</code>, <code>:*</code>, or <code>:all</code>)</td>
     </tr>
     <tr>
       <th><code>medium</code></th>
 
-      <td><code>test_suite</code> convention; suite of medium tests
+      <td><code>test_suite</code> convention; suite of medium tests</td>
     </tr>
 
     <tr>
       <th><code>small</code></th>
-
       <td><code>test_suite</code> convention; suite of small tests</td>
     </tr>
 
     <tr>
       <th><code>smoke</code></th>
-
       <td>
         <code>test_suite</code> convention; means it should be run before committing code changes
         into the version control system
@@ -438,4 +491,39 @@ prematurely and mark it as having failed.</p>
 
   </tbody>
 </table>
+
+*Note: bazel <code>query</code> does not respect the manual tag.
+<h2>Runfiles</h2>
+
+<p>In the following, assume there is a *_binary() rule labeled <code>//foo/bar:unittest</code>,
+with a run-time dependency on the rule labeled <code>//deps/server:server</code>.</p>
+
+<h4>Location</h4>
+<p>The runfiles directory for a target <code>//foo/bar:unittest</code> is the directory
+<code>$(WORKSPACE)/$(BINDIR)/foo/bar/unittest.runfiles</code>. This path is referred to as the
+<code>runfiles_dir</code>.</p>
+
+<h4>Dependencies</h4>
+<p>The runfiles directory is declared as a compile-time dependency of the *_binary() rule.
+The runfiles directory itself depends on the set of BUILD files that affect the *_binary() rule
+or any of its compile-time or run-time dependencies. Modifying source files does not affect the
+structure of the runfiles directory, and thus does not trigger any rebuilding.</p>
+
+<h4>Contents</h4>
+<p>The runfiles directory contains the following:</p>
+<ul>
+  <li><b>Symlinks to run-time dependencies</b>: each OutputFile and CommandRule that is a run-time
+dependency of the *_binary() rule is represented by one symlink in the runfiles directory.
+The name of the symlink is <code>$(WORKSPACE)/package_name/rule_name</code>. For example, the
+symlink for server would be named <code>$(WORKSPACE)/deps/server/server</code>, and the full path
+would be <code>$(WORKSPACE)/foo/bar/unittest.runfiles/$(WORKSPACE)/deps/server/server</code>.
+The destination of the symlink is the OutputFileName() of the OutputFile or CommandRule,
+expressed as an absolute path. Thus, the destination of the symlink might be
+<code>$(WORKSPACE)/linux-dbg/deps/server/42/server</code>.</li>
+  <li><b>Symlinks to sub-runfiles</b>: for every *_binary() Z that is a run-time depdendency of
+*_binary() C, there is a second link in the runfiles directory of C to the runfiles of Z.
+The name of the symlink is <code>$(WORKSPACE)/package_name/rule_name.runfiles</code>.
+The target of the symlink is the runfiles directory. I.e. all subprograms share a common
+runfiles directory.</li>
+</ul>
 

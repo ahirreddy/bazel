@@ -13,8 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.unix;
 
-import com.google.devtools.build.lib.UnixJniLoader;
-
+import com.google.devtools.build.lib.unix.jni.UnixJniLoader;
 
 /**
  * Various utilities related to UNIX processes.
@@ -24,7 +23,9 @@ public final class ProcessUtils {
   private ProcessUtils() {}
 
   static {
-    UnixJniLoader.loadJni();
+    if (!"0".equals(System.getProperty("io.bazel.EnableJni"))) {
+      UnixJniLoader.loadJni();
+    }
   }
 
   /**

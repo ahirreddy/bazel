@@ -21,7 +21,6 @@ import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.util.ArrayMap;
 import android.util.Log;
-
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -38,8 +37,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -75,6 +75,8 @@ public class StubApplication extends Application {
 
   private String externalResourceFile;
   private Application realApplication;
+
+  private Object stashedContentProviders;
 
   public StubApplication() {
     String[] stubApplicationData = getResourceAsString("stub_application_data.txt").split("\n");
@@ -244,6 +246,7 @@ public class StubApplication extends Application {
     }
   }
 
+  @SuppressWarnings("unchecked")
   private void monkeyPatchExistingResources() {
     if (externalResourceFile == null) {
       return;
@@ -259,11 +262,15 @@ public class StubApplication extends Application {
         throw new IllegalStateException("Could not create new AssetManager");
       }
 
-      // Kitkat needs this method call, Lollipop doesn't. However, it doesn't seem to cause any harm
-      // in L, so we do it unconditionally.
-      Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks");
-      mEnsureStringBlocks.setAccessible(true);
-      mEnsureStringBlocks.invoke(newAssetManager);
+      if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.KITKAT) {
+        // Kitkat needs this method call, Lollipop doesn't.
+        //
+        // This method call was removed from Pie:
+        // https://android.googlesource.com/platform/frameworks/base/+/bebfcc46a249a70af04bc18490a897888a142fb8%5E%21/#F7
+        Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks");
+        mEnsureStringBlocks.setAccessible(true);
+        mEnsureStringBlocks.invoke(newAssetManager);
+      }
 
       // Find the singleton instance of ResourcesManager
       Class<?> clazz = Class.forName("android.app.ResourcesManager");
@@ -271,19 +278,41 @@ public class StubApplication extends Application {
       mGetInstance.setAccessible(true);
       Object resourcesManager = mGetInstance.invoke(null);
 
-      Field mAssets = Resources.class.getDeclaredField("mAssets");
-      mAssets.setAccessible(true);
+      // Get all known Resources objects
+      Collection<WeakReference<Resources>> references;
+      try {
+        // Pre-N
+        Field fMActiveResources = clazz.getDeclaredField("mActiveResources");
+        fMActiveResources.setAccessible(true);
+        ArrayMap<?, WeakReference<Resources>> arrayMap =
+            (ArrayMap<?, WeakReference<Resources>>) fMActiveResources.get(resourcesManager);
+        references = arrayMap.values();
+      } catch (NoSuchFieldException e) {
+        // N moved the resources to mResourceReferences
+        Field mResourceReferences = clazz.getDeclaredField("mResourceReferences");
+        mResourceReferences.setAccessible(true);
+        references =
+            (Collection<WeakReference<Resources>>) mResourceReferences.get(resourcesManager);
+      }
 
       // Iterate over all known Resources objects
-      Field fMActiveResources = clazz.getDeclaredField("mActiveResources");
-      fMActiveResources.setAccessible(true);
-      @SuppressWarnings("unchecked")
-      ArrayMap<?, WeakReference<Resources>> arrayMap =
-          (ArrayMap<?, WeakReference<Resources>>) fMActiveResources.get(resourcesManager);
-      for (WeakReference<Resources> wr : arrayMap.values()) {
+      for (WeakReference<Resources> wr : references) {
         Resources resources = wr.get();
         // Set the AssetManager of the Resources instance to our brand new one
-        mAssets.set(resources, newAssetManager);
+        try {
+          // Pre-N
+          Field mAssets = Resources.class.getDeclaredField("mAssets");
+          mAssets.setAccessible(true);
+          mAssets.set(resources, newAssetManager);
+        } catch (NoSuchFieldException e) {
+          // N moved the mAssets inside an mResourcesImpl field
+          Field mResourcesImplField = Resources.class.getDeclaredField("mResourcesImpl");
+          mResourcesImplField.setAccessible(true);
+          Object mResourceImpl = mResourcesImplField.get(resources);
+          Field implAssets = mResourceImpl.getClass().getDeclaredField("mAssets");
+          implAssets.setAccessible(true);
+          implAssets.set(mResourceImpl, newAssetManager);
+        }
         resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
       }
     } catch (IllegalAccessException | NoSuchFieldException | NoSuchMethodException |
@@ -337,9 +366,9 @@ public class StubApplication extends Application {
     }
 
     Map<String, String> newManifest = parseManifest(newManifestFile);
-    Map<String, String> installedManifest = new HashMap<String, String>();
-    Set<String> libsToDelete = new HashSet<String>();
-    Set<String> libsToUpdate = new HashSet<String>();
+    Map<String, String> installedManifest = new LinkedHashMap<String, String>();
+    Set<String> libsToDelete = new LinkedHashSet<String>();
+    Set<String> libsToUpdate = new LinkedHashSet<String>();
 
     String realNativeLibDir = newManifest.isEmpty()
         ? defaultNativeLibDir : incrementalDir.toString();
@@ -408,9 +437,8 @@ public class StubApplication extends Application {
   }
 
   private static Map<String, String> parseManifest(File file) throws IOException {
-    Map<String, String> result = new HashMap<>();
-    BufferedReader reader = new BufferedReader(new FileReader(file));
-    try {
+    Map<String, String> result = new LinkedHashMap<>();
+    try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
       while (true) {
         String line = reader.readLine();
         if (line == null) {
@@ -420,8 +448,6 @@ public class StubApplication extends Application {
         String[] items = line.split(" ");
         result.put(items[0], items[1]);
       }
-    } finally {
-      reader.close();
     }
 
     return result;
@@ -453,6 +479,68 @@ public class StubApplication extends Application {
     }
   }
 
+  private static Field getField(Object instance, String fieldName)
+      throws ClassNotFoundException {
+    for (Class<?> clazz = instance.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+      try {
+        Field field = clazz.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field;
+      } catch (NoSuchFieldException e) {
+        // IllegalStateException will be thrown below
+      }
+    }
+
+    throw new IllegalStateException("Field '" + fieldName + "' not found");
+  }
+
+  private void enableContentProviders() {
+    Log.v("INCREMENTAL", "enableContentProviders");
+    try {
+      Class<?> activityThread = Class.forName("android.app.ActivityThread");
+      Method mCurrentActivityThread = activityThread.getMethod("currentActivityThread");
+      mCurrentActivityThread.setAccessible(true);
+      Object currentActivityThread = mCurrentActivityThread.invoke(null);
+      Object boundApplication = getField(
+          currentActivityThread, "mBoundApplication").get(currentActivityThread);
+      getField(boundApplication, "providers").set(boundApplication, stashedContentProviders);
+      if (stashedContentProviders != null) {
+        Method mInstallContentProviders = activityThread.getDeclaredMethod(
+            "installContentProviders", Context.class, List.class);
+        mInstallContentProviders.setAccessible(true);
+        mInstallContentProviders.invoke(
+            currentActivityThread, realApplication, stashedContentProviders);
+        stashedContentProviders = null;
+      }
+    } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+        | InvocationTargetException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  // ActivityThread instantiates all the content providers between attachBaseContext() and
+  // onCreate(). Since we replace the Application instance in onCreate(), this may fail if
+  // they depend on the correct Application being present, so we postpone instantiating the
+  // content providers until we have the real Application instance.
+  private void disableContentProviders() {
+    Log.v("INCREMENTAL", "disableContentProviders");
+    try {
+      Class<?> activityThread = Class.forName("android.app.ActivityThread");
+      Method mCurrentActivityThread = activityThread.getMethod("currentActivityThread");
+      mCurrentActivityThread.setAccessible(true);
+      Object currentActivityThread = mCurrentActivityThread.invoke(null);
+      Object boundApplication = getField(
+          currentActivityThread, "mBoundApplication").get(currentActivityThread);
+      Field fProviders = getField(boundApplication, "providers");
+
+      stashedContentProviders = fProviders.get(boundApplication);
+      fProviders.set(boundApplication, null);
+    } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+        | InvocationTargetException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
   @Override
   protected void attachBaseContext(Context context) {
     instantiateRealApplication(
@@ -469,7 +557,7 @@ public class StubApplication extends Application {
           ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
       attachBaseContext.setAccessible(true);
       attachBaseContext.invoke(realApplication, context);
-
+      disableContentProviders();
     } catch (Exception e) {
       throw new IllegalStateException(e);
     }
@@ -479,6 +567,7 @@ public class StubApplication extends Application {
   public void onCreate() {
     monkeyPatchApplication();
     monkeyPatchExistingResources();
+    enableContentProviders();
     super.onCreate();
     realApplication.onCreate();
   }

@@ -15,9 +15,7 @@ package com.google.devtools.build.lib.concurrent;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -31,30 +29,51 @@ public class ExecutorUtil {
   }
 
   /**
-   * Shutdown the executor. If an interrupt occurs, invoke shutdownNow(), but
+   * Shutdown the executor via shutdownNow(). If an interrupt occurs, ignore it (since the tasks
+   * were already interrupted by the initial shutdownNow) and still block on the eventual
+   * termination of the pool.
+   *
+   * @param executor the executor service.
+   * @return true iff interrupted.
+   */
+  public static boolean uninterruptibleShutdownNow(ExecutorService executor) {
+    return shutdownImpl(executor, /*shutdownNowInitially=*/true, /*shutdownNowOnInterrupt=*/false);
+  }
+
+  /**
+   * Shutdown the executor via shutdown(). If an interrupt occurs, invoke shutdownNow(), but
    * still block on the eventual termination of the pool.
    *
    * @param executor the executor service.
    * @return true iff interrupted.
    */
   public static boolean interruptibleShutdown(ExecutorService executor) {
-    return shutdownImpl(executor, /*interruptible=*/true);
+    return shutdownImpl(
+        executor,
+        /*shutdownNowInitially=*/false,
+        /*shutdownNowOnInterrupt=*/true);
   }
 
   /**
-   * Shutdown the executor. If an interrupt occurs, ignore it and still block on the eventual
-   * termination of the pool. This way, all tasks are guaranteed to have completed normally.
+   * Shutdown the executor via shutdown(). If an interrupt occurs, ignore it and still block on the
+   * eventual termination of the pool. This way, all tasks are guaranteed to have completed
+   * normally.
    *
    * @param executor the executor service.
    * @return true iff interrupted.
    */
   public static boolean uninterruptibleShutdown(ExecutorService executor) {
-    return shutdownImpl(executor, /*interruptible=*/false);
+    return shutdownImpl(executor, /*shutdownNowInitially=*/false, /*shutdownNowOnInterrupt=*/false);
   }
 
-  private static boolean shutdownImpl(ExecutorService executor, boolean interruptible) {
+  private static boolean shutdownImpl(
+      ExecutorService executor, boolean shutdownNowInitially, boolean shutdownNowOnInterrupt) {
     Preconditions.checkState(!executor.isShutdown());
-    executor.shutdown();
+    if (shutdownNowInitially) {
+      executor.shutdownNow();
+    } else {
+      executor.shutdown();
+    }
 
     // Common pattern: check for interrupt, but don't return until all threads
     // are finished.
@@ -64,7 +83,7 @@ public class ExecutorUtil {
         executor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
         break;
       } catch (InterruptedException e) {
-        if (interruptible) {
+        if (shutdownNowOnInterrupt) {
           executor.shutdownNow();
         }
         interrupted = true;
@@ -86,17 +105,16 @@ public class ExecutorUtil {
     // Using a synchronous queue with a bounded thread pool means we'll reject
     // tasks after the pool size. The CallerRunsPolicy, however, implies that
     // saturation is handled in the calling thread.
-    ThreadPoolExecutor pool = new ThreadPoolExecutor(threads, threads, 3L, TimeUnit.SECONDS,
-        new SynchronousQueue<Runnable>());
+    ThreadPoolExecutor pool = new ThreadPoolExecutor(
+        threads,
+        threads,
+        3L,
+        TimeUnit.SECONDS,
+        new SynchronousQueue<Runnable>(),
+        new ThreadFactoryBuilder().setNameFormat(name + " %d").build(),
+        (r, e) -> r.run());
     // Do not consume threads when not in use.
     pool.allowCoreThreadTimeOut(true);
-    pool.setThreadFactory(new ThreadFactoryBuilder().setNameFormat(name + " %d").build());
-    pool.setRejectedExecutionHandler(new RejectedExecutionHandler() {
-      @Override
-      public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-        r.run();
-      }
-    });
     return pool;
   }
 }

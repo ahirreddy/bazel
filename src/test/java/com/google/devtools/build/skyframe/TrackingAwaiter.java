@@ -16,10 +16,12 @@ package com.google.devtools.build.skyframe;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.build.lib.util.Pair;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -80,7 +82,14 @@ public class TrackingAwaiter {
     }
   }
 
+  /** Allow arbitrary errors to be recorded here for later throwing. */
+  public void injectExceptionAndMessage(Throwable throwable, String message) {
+    exceptionsThrown.add(Pair.of(message, throwable));
+  }
+
   public void assertNoErrors() {
-    assertThat(exceptionsThrown).isEmpty();
+    List<Pair<String, Throwable>> thisEvalExceptionsThrown = ImmutableList.copyOf(exceptionsThrown);
+    exceptionsThrown.clear();
+    assertThat(thisEvalExceptionsThrown).isEmpty();
   }
 }

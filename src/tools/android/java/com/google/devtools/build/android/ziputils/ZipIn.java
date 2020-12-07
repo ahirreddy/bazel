@@ -20,11 +20,12 @@ import static com.google.devtools.build.android.ziputils.DirectoryEntry.CENOFF;
 import static com.google.devtools.build.android.ziputils.DirectoryEntry.CENSIZ;
 import static com.google.devtools.build.android.ziputils.EndOfCentralDirectory.ENDOFF;
 import static com.google.devtools.build.android.ziputils.EndOfCentralDirectory.ENDSUB;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
-import java.util.Map.Entry;
+import java.util.Map;
 
 /**
  * API for reading a zip file. This does not perform decompression of entry data, but provides
@@ -248,7 +249,7 @@ public class ZipIn {
    */
   public ZipEntry nextFrom(DirectoryEntry entry) throws IOException {
     int offset = entry == null ? -1 : entry.get(CENOFF);
-    Entry<Integer, DirectoryEntry> mapEntry = cdir.mapByOffset().higherEntry(offset);
+    Map.Entry<Integer, DirectoryEntry> mapEntry = cdir.mapByOffset().higherEntry(offset);
     if (mapEntry == null) {
       return entryWith(null);
     }

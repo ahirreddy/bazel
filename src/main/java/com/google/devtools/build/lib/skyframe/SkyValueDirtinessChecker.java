@@ -17,7 +17,6 @@ import com.google.common.base.Preconditions;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import javax.annotation.Nullable;
 
 /**
@@ -25,8 +24,10 @@ import javax.annotation.Nullable;
  * up to date.
  */
 public abstract class SkyValueDirtinessChecker {
-
-  /** Returns {@code true} iff the checker can handle {@code key}. */
+  /**
+   * Returns {@code true} iff the checker can handle {@code key}. Can only be true if {@code
+   * key.functionName().getHermeticity() == FunctionHermeticity.NONHERMETIC}.
+   */
   public abstract boolean applies(SkyKey key);
 
   /**
@@ -57,7 +58,7 @@ public abstract class SkyValueDirtinessChecker {
      * graph.
      */
     public static DirtyResult notDirty(SkyValue oldValue) {
-      return new DirtyResult(/*dirty=*/false, oldValue,  /*newValue=*/null);
+      return new DirtyResult(/*isDirty=*/false, oldValue,  /*newValue=*/null);
     }
 
     /**
@@ -65,7 +66,7 @@ public abstract class SkyValueDirtinessChecker {
      * graph, but this new value is not known.
      */
     public static DirtyResult dirty(@Nullable SkyValue oldValue) {
-      return new DirtyResult(/*dirty=*/true, oldValue, /*newValue=*/null);
+      return new DirtyResult(/*isDirty=*/true, oldValue, /*newValue=*/null);
     }
 
     /**
@@ -73,7 +74,7 @@ public abstract class SkyValueDirtinessChecker {
      * different from the value in the graph,
      */
     public static DirtyResult dirtyWithNewValue(@Nullable SkyValue oldValue, SkyValue newValue) {
-      return new DirtyResult(/*dirty=*/true, oldValue, newValue);
+      return new DirtyResult(/*isDirty=*/true, oldValue, newValue);
     }
 
     private final boolean isDirty;
@@ -87,7 +88,7 @@ public abstract class SkyValueDirtinessChecker {
       this.newValue = newValue;
     }
 
-    boolean isDirty() {
+    public boolean isDirty() {
       return isDirty;
     }
 

@@ -15,21 +15,34 @@
 package com.google.devtools.build.lib.packages;
 
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.syntax.Location;
 
 /**
  * A generated file that is the output of a rule.
  */
 public final class OutputFile extends FileTarget {
 
+  /**
+   * A kind of output file.
+   *
+   * The FILESET kind is only supported for a non-open-sourced {@code fileset} rule.
+   */
+  public enum Kind {
+    FILE,
+    FILESET
+  }
+
   private final Rule generatingRule;
+  private final Kind kind;
 
   /**
    * Constructs an output file with the given label, which must be in the given
    * package.
    */
-  OutputFile(Package pkg, Label label, Rule generatingRule) {
+  OutputFile(Package pkg, Label label,
+      Kind kind, Rule generatingRule) {
     super(pkg, label);
+    this.kind = kind;
     this.generatingRule = generatingRule;
   }
 
@@ -50,9 +63,16 @@ public final class OutputFile extends FileTarget {
     return generatingRule;
   }
 
+  /**
+   * Returns the kind of this output file.
+   */
+  public Kind getKind() {
+    return kind;
+  }
+
   @Override
   public String getTargetKind() {
-    return "generated file";
+    return targetKind();
   }
 
   @Override
@@ -63,5 +83,10 @@ public final class OutputFile extends FileTarget {
   @Override
   public Location getLocation() {
     return generatingRule.getLocation();
+  }
+
+  /** Returns the target kind for all output files. */
+  public static String targetKind() {
+    return "generated file";
   }
 }

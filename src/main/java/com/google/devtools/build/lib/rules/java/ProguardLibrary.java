@@ -16,18 +16,19 @@ package com.google.devtools.build.lib.rules.java;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.Multimap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TransitionMode;
+import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.BuildType;
-
 import java.util.Collection;
-import java.util.Map.Entry;
+import java.util.Map;
 
 /**
  * Helpers for implementing rules which export Proguard specs.
@@ -38,28 +39,32 @@ import java.util.Map.Entry;
 public final class ProguardLibrary {
 
   private static final String LOCAL_SPEC_ATTRIBUTE = "proguard_specs";
-  private static final ImmutableMultimap<Mode, String> DEPENDENCY_ATTRIBUTES =
-      ImmutableMultimap.<Mode, String>builder()
-          .putAll(Mode.TARGET, "deps", "exports", "runtime_deps")
-          .putAll(Mode.HOST, "plugins", "exported_plugins")
+  private static final ImmutableMultimap<TransitionMode, String> DEPENDENCY_ATTRIBUTES =
+      ImmutableMultimap.<TransitionMode, String>builder()
+          .putAll(TransitionMode.TARGET, "deps", "exports", "runtime_deps")
+          .putAll(TransitionMode.HOST, "plugins", "exported_plugins")
           .build();
 
   private final RuleContext ruleContext;
 
-  /**
-   * Creates a new ProguardLibrary wrapping the given RuleContext.
-   */
+  /** Creates a new ProguardLibrary wrapping the given RuleContext. */
   public ProguardLibrary(RuleContext ruleContext) {
     this.ruleContext = ruleContext;
   }
 
-  /**
-   * Collects the validated proguard specs exported by this rule and its dependencies.
-   */
+  /** Collects the validated proguard specs exported by this rule and its dependencies. */
   public NestedSet<Artifact> collectProguardSpecs() {
+    return collectProguardSpecs(DEPENDENCY_ATTRIBUTES);
+  }
+
+  /**
+   * Collects the validated proguard specs exported by this rule and its dependencies through the
+   * given attributes.
+   */
+  public NestedSet<Artifact> collectProguardSpecs(Multimap<TransitionMode, String> attributes) {
     NestedSetBuilder<Artifact> specsBuilder = NestedSetBuilder.naiveLinkOrder();
 
-    for (Entry<Mode, String> attribute : DEPENDENCY_ATTRIBUTES.entries()) {
+    for (Map.Entry<TransitionMode, String> attribute : attributes.entries()) {
       specsBuilder.addTransitive(
           collectProguardSpecsFromAttribute(attribute.getValue(), attribute.getKey()));
     }
@@ -68,7 +73,7 @@ public final class ProguardLibrary {
     if (!localSpecs.isEmpty()) {
       // Pass our local proguard configs through the validator, which checks a whitelist.
       FilesToRunProvider proguardWhitelister =
-          ruleContext.getExecutablePrerequisite("$proguard_whitelister", Mode.HOST);
+          ruleContext.getExecutablePrerequisite("$proguard_whitelister", TransitionMode.HOST);
       for (Artifact specToValidate : localSpecs) {
         specsBuilder.add(validateProguardSpec(proguardWhitelister, specToValidate));
       }
@@ -77,26 +82,26 @@ public final class ProguardLibrary {
     return specsBuilder.build();
   }
 
-  /**
-   * Collects the unvalidated proguard specs exported by this rule.
-   */
-  private Collection<Artifact> collectLocalProguardSpecs() {
-    if (!ruleContext.getRule().isAttrDefined(LOCAL_SPEC_ATTRIBUTE, BuildType.LABEL_LIST)) {
+  /** Collects the unvalidated proguard specs exported by this rule. */
+  public ImmutableList<Artifact> collectLocalProguardSpecs() {
+    if (!ruleContext.attributes().has(LOCAL_SPEC_ATTRIBUTE, BuildType.LABEL_LIST)) {
       return ImmutableList.of();
     }
-    return ruleContext.getPrerequisiteArtifacts(LOCAL_SPEC_ATTRIBUTE, Mode.TARGET).list();
+    return ruleContext.getPrerequisiteArtifacts(LOCAL_SPEC_ATTRIBUTE, TransitionMode.TARGET).list();
   }
 
   /**
-   * Collects the proguard specs exported by dependencies on the given LABEL_LIST attribute.
+   * Collects the proguard specs exported by dependencies on the given LABEL_LIST/LABEL attribute.
    */
-  private NestedSet<Artifact> collectProguardSpecsFromAttribute(String attribute, Mode mode) {
-    if (!ruleContext.getRule().isAttrDefined(attribute, BuildType.LABEL_LIST)) {
+  private NestedSet<Artifact> collectProguardSpecsFromAttribute(
+      String attributeName, TransitionMode mode) {
+    if (!ruleContext.attributes().has(attributeName, BuildType.LABEL_LIST)
+        && !ruleContext.attributes().has(attributeName, BuildType.LABEL)) {
       return NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
     }
     NestedSetBuilder<Artifact> dependencySpecsBuilder = NestedSetBuilder.naiveLinkOrder();
     for (ProguardSpecProvider provider :
-        ruleContext.getPrerequisites(attribute, mode, ProguardSpecProvider.class)) {
+        ruleContext.getPrerequisites(attributeName, mode, ProguardSpecProvider.PROVIDER)) {
       dependencySpecsBuilder.addTransitive(provider.getTransitiveProguardSpecs());
     }
     return dependencySpecsBuilder.build();
@@ -120,14 +125,15 @@ public final class ProguardLibrary {
     ruleContext.registerAction(
         new SpawnAction.Builder()
             .addInput(specToValidate)
+            .addOutput(output)
             .setExecutable(proguardWhitelister)
             .setProgressMessage("Validating proguard configuration")
             .setMnemonic("ValidateProguard")
-            .addArgument("--path")
-            .addArgument(specToValidate.getExecPathString())
-            .addArgument("--output")
-            .addArgument(output.getExecPathString())
-            .addOutput(output)
+            .addCommandLine(
+                CustomCommandLine.builder()
+                    .addExecPath("--path", specToValidate)
+                    .addExecPath("--output", output)
+                    .build())
             .build(ruleContext));
     return output;
   }

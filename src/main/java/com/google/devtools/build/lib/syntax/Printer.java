@@ -13,180 +13,129 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
-import com.google.devtools.build.lib.syntax.SkylarkList.Tuple;
-import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.common.base.Strings;
 import java.io.IOException;
-import java.util.Formattable;
-import java.util.Formatter;
+import java.util.Arrays;
 import java.util.IllegalFormatException;
 import java.util.List;
 import java.util.Map;
 import java.util.MissingFormatWidthException;
-import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.UnknownFormatConversionException;
+import javax.annotation.Nullable;
 
-/**
- * (Pretty) Printing of Skylark values
- */
-public final class Printer {
+/** A printer of Starlark values. */
+// TODO(adonovan): merge BasePrinter into Printer and simplify.
+public abstract class Printer {
 
-  private static final char SKYLARK_QUOTATION_MARK = '"';
+  /** Append a char to the printer's buffer */
+  public abstract Printer append(char c);
 
-  /*
-   * Suggested maximum number of list elements that should be printed via printList().
-   * By default, this setting is not considered and no limitation takes place.
+  /** Append a char sequence to the printer's buffer */
+  public abstract Printer append(CharSequence s);
+
+  /**
+   * Prints a list to the printer's buffer. All list items are rendered with {@code repr}.
+   *
+   * @param list the list
+   * @param isTuple if true, uses parentheses, otherwise, uses square brackets. Also one-element
+   *     tuples are rendered with a comma after the element.
+   * @return Printer
    */
-  static final int SUGGESTED_CRITICAL_LIST_ELEMENTS_COUNT = 4;
+  public abstract Printer printList(Iterable<?> list, boolean isTuple);
 
-  /*
-   * Suggested limit for printList() to shorten the values of list elements when their combined
-   * string length reaches this value.
-   * By default, this setting is not considered and no limitation takes place.
+  /**
+   * Prints a list to the printer's buffer. All list items are rendered with {@code repr}.
+   *
+   * @param list the list of objects to repr (each as with repr)
+   * @param before a string to print before the list items, e.g. an opening bracket
+   * @param separator a separator to print between items
+   * @param after a string to print after the list items, e.g. a closing bracket
+   * @param singletonTerminator null or a string to print after the list if it is a singleton. The
+   *     singleton case is notably relied upon in python syntax to distinguish a tuple of size one
+   *     such as ("foo",) from a merely parenthesized object such as ("foo")
+   * @return Printer
    */
-  static final int SUGGESTED_CRITICAL_LIST_ELEMENTS_STRING_LENGTH = 32;
+  public abstract Printer printList(
+      Iterable<?> list,
+      String before,
+      String separator,
+      String after,
+      @Nullable String singletonTerminator);
 
-  private Printer() {
+  /** Renders an object with {@code repr} and append to the printer's buffer. */
+  public abstract Printer repr(Object o);
+
+  /** Renders an object with {@code str} and append to the printer's buffer. */
+  public abstract Printer str(Object o);
+
+  /** Renders an object in the style of {@code print} and append to the printer's buffer. */
+  public abstract Printer debugPrint(Object o);
+
+  /**
+   * Performs Python-style string formatting, as per {@code pattern % tuple}. Limitations: only
+   * {@code %d %s %r %%} are supported.
+   *
+   * @param pattern a format string
+   * @param arguments an array containing positional arguments
+   * @return Printer
+   */
+  public abstract Printer format(String pattern, Object... arguments);
+
+  /**
+   * Performs Python-style string formatting, as per {@code pattern % tuple}. Limitations: only
+   * {@code %d %s %r %%} are supported.
+   *
+   * @param pattern a format string
+   * @param arguments a list containing positional arguments
+   * @return Printer
+   */
+  public abstract Printer formatWithList(String pattern, List<?> arguments);
+
+  /**
+   * Creates an instance of {@link BasePrinter} that wraps an existing buffer.
+   *
+   * @param buffer an {@link Appendable}
+   * @return new {@link BasePrinter}
+   */
+  static BasePrinter getPrinter(Appendable buffer) {
+    return new BasePrinter(buffer);
   }
 
   /**
-   * Get an informal representation of object x.
-   * Currently only differs from repr in the behavior for strings and labels at top-level,
-   * that are returned as is rather than quoted.
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return the representation.
+   * Creates an instance of {@link BasePrinter} with an empty buffer.
+   *
+   * @return new {@link BasePrinter}
    */
-  public static String str(Object x, char quotationMark) {
-    return print(new StringBuilder(), x, quotationMark).toString();
-  }
-
-  public static String str(Object x) {
-    return str(x, SKYLARK_QUOTATION_MARK);
+  public static BasePrinter getPrinter() {
+    return new BasePrinter(new StringBuilder());
   }
 
   /**
-   * Get an official representation of object x.
-   * For regular data structures, the value should be parsable back into an equal data structure.
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return the representation.
+   * Creates an instance of {@link PrettyPrinter} with an empty buffer.
+   *
+   * @return new {@link PrettyPrinter}
    */
-  public static String repr(Object x, char quotationMark) {
-    return write(new StringBuilder(), x, quotationMark).toString();
-  }
-
-  public static String repr(Object x) {
-    return repr(x, SKYLARK_QUOTATION_MARK);
-  }
-
-  // In absence of a Python naming tradition, the write() vs print() function names
-  // follow the Lisp tradition: print() displays the informal representation (as in Python str)
-  // whereas write() displays a readable representation (as in Python repr).
-  /**
-   * Print an informal representation of object x.
-   * Currently only differs from repr in the behavior for strings and labels at top-level,
-   * that are returned as is rather than quoted.
-   * @param buffer the Appendable to which to print the representation
-   * @param o the object
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return the buffer, in fluent style
-   */
-  private static Appendable print(Appendable buffer, Object o, char quotationMark) {
-    if (o instanceof SkylarkPrintableValue) {
-      ((SkylarkPrintableValue) o).print(buffer, quotationMark);
-      return buffer;
-    }
-
-    if (o instanceof String) {
-      return append(buffer, (String) o);
-    }
-    return write(buffer, o, quotationMark);
-  }
-
-  private static Appendable print(Appendable buffer, Object o) {
-    return print(buffer, o, SKYLARK_QUOTATION_MARK);
+  public static PrettyPrinter getPrettyPrinter() {
+    return new PrettyPrinter(new StringBuilder());
   }
 
   /**
-   * Print an official representation of object x.
-   * For regular data structures, the value should be parsable back into an equal data structure.
-   * @param buffer the Appendable to write to.
-   * @param o the string a representation of which to write.
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return the Appendable, in fluent style.
+   * Creates an instance of {@link BasePrinter} with an empty buffer and whose format strings allow
+   * only %s and %%.
    */
-  public static Appendable write(Appendable buffer, Object o, char quotationMark) {
-    if (o == null) {
-      throw new NullPointerException(); // Java null is not a build language value.
-
-    } else if (o instanceof SkylarkValue) {
-      ((SkylarkValue) o).write(buffer, quotationMark);
-
-    } else if (o instanceof String) {
-      writeString(buffer, (String) o, quotationMark);
-
-    } else if (o instanceof Integer || o instanceof Double) {
-      append(buffer, o.toString());
-
-    } else if (o == Boolean.TRUE) {
-      append(buffer, "True");
-
-    } else if (o == Boolean.FALSE) {
-      append(buffer, "False");
-
-    } else if (o instanceof List<?>) {
-      List<?> seq = (List<?>) o;
-      printList(buffer, seq, EvalUtils.isTuple(seq), quotationMark);
-
-    } else if (o instanceof Map<?, ?>) {
-      Map<?, ?> dict = (Map<?, ?>) o;
-      printList(buffer, getSortedEntrySet(dict), "{", ", ", "}", null, quotationMark);
-
-    } else if (o instanceof Map.Entry<?, ?>) {
-      Map.Entry<?, ?> entry = (Map.Entry<?, ?>) o;
-      write(buffer, entry.getKey(), quotationMark);
-      append(buffer, ": ");
-      write(buffer, entry.getValue(), quotationMark);
-
-    } else if (o instanceof PathFragment) {
-      append(buffer, ((PathFragment) o).getPathString());
-
-    } else if (o instanceof Class<?>) {
-      append(buffer, EvalUtils.getDataTypeNameFromClass((Class<?>) o));
-
-    } else {
-      append(buffer, o.toString());
-    }
-
-    return buffer;
+  public static BasePrinter getSimplifiedPrinter() {
+    return new BasePrinter(new StringBuilder(), /*simplifiedFormatStrings=*/ true);
   }
+
+  private Printer() {}
 
   /**
-   * Returns the sorted entry set of the given map
+   * Append a char to a buffer. In case of {@link IOException} throw an {@link AssertionError}
+   * instead
+   *
+   * @return buffer
    */
-  private static <K, V> Set<Map.Entry<K, V>> getSortedEntrySet(Map<K, V> dict) {
-    if (!(dict instanceof SortedMap<?, ?>)) {
-      Map<K, V> tmp = new TreeMap<>(EvalUtils.SKYLARK_COMPARATOR);
-      tmp.putAll(dict);
-      dict = tmp;
-    }
-
-    return dict.entrySet();
-  }
-
-  public static Appendable write(Appendable buffer, Object o) {
-    return write(buffer, o, SKYLARK_QUOTATION_MARK);
-  }
-
-  // Throughout this file, we transform IOException into AssertionError.
-  // During normal operations, we only use in-memory Appendable-s that
-  // cannot cause an IOException.
-  public static Appendable append(Appendable buffer, char c) {
+  private static Appendable append(Appendable buffer, char c) {
     try {
       return buffer.append(c);
     } catch (IOException e) {
@@ -194,7 +143,13 @@ public final class Printer {
     }
   }
 
-  public static Appendable append(Appendable buffer, CharSequence s) {
+  /**
+   * Append a char sequence to a buffer. In case of {@link IOException} throw an {@link
+   * AssertionError} instead
+   *
+   * @return buffer
+   */
+  private static Appendable append(Appendable buffer, CharSequence s) {
     try {
       return buffer.append(s);
     } catch (IOException e) {
@@ -202,6 +157,11 @@ public final class Printer {
     }
   }
 
+  /**
+   * Append a char sequence range to a buffer. In case of {@link IOException} throw an
+   * {@link AssertionError} instead
+   * @return buffer
+   */
   private static Appendable append(Appendable buffer, CharSequence s, int start, int end) {
     try {
       return buffer.append(s, start, end);
@@ -210,481 +170,433 @@ public final class Printer {
     }
   }
 
-  private static Appendable backslashChar(Appendable buffer, char c) {
-    return append(append(buffer, '\\'), c);
-  }
+  /** Actual class that implements Printer API */
+  public static class BasePrinter extends Printer {
+    // Methods of this class should not recurse through static methods of Printer
 
-  private static Appendable escapeCharacter(Appendable buffer, char c, char quote) {
-    if (c == quote) {
-      return backslashChar(buffer, c);
-    }
-    switch (c) {
-      case '\\':
-        return backslashChar(buffer, '\\');
-      case '\r':
-        return backslashChar(buffer, 'r');
-      case '\n':
-        return backslashChar(buffer, 'n');
-      case '\t':
-        return backslashChar(buffer, 't');
-      default:
-        if (c < 32) {
-          return append(buffer, String.format("\\x%02x", (int) c));
-        }
-        return append(buffer, c); // no need to support UTF-8
-    } // endswitch
-  }
+    protected final Appendable buffer;
 
-  /**
-   * Write a properly escaped Skylark representation of a string to a buffer.
-   *
-   * @param buffer the Appendable to write to.
-   * @param s the string a representation of which to write.
-   * @param quote the quote character to use, '"' or '\''.
-   * @return the Appendable, in fluent style.
-   */
-  private static Appendable writeString(Appendable buffer, String s, char quote) {
-    append(buffer, quote);
-    int len = s.length();
-    for (int i = 0; i < len; i++) {
-      char c = s.charAt(i);
-      escapeCharacter(buffer, c, quote);
-    }
-    return append(buffer, quote);
-  }
+    /**
+     * If true, the only percent sequences allowed in format strings are %s substitutions and %%
+     * escapes.
+     */
+    protected final boolean simplifiedFormatStrings;
 
-  /**
-   * Print a list of object representations
-   * @param buffer an appendable buffer onto which to write the list.
-   * @param list the list of objects to write (each as with repr)
-   * @param before a string to print before the list
-   * @param separator a separator to print between each object
-   * @param after a string to print after the list
-   * @param singletonTerminator null or a string to print after the list if it is a singleton
-   * The singleton case is notably relied upon in python syntax to distinguish
-   * a tuple of size one such as ("foo",) from a merely parenthesized object such as ("foo").
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return the Appendable, in fluent style.
-   */
-  public static Appendable printList(
-      Appendable buffer,
-      Iterable<?> list,
-      String before,
-      String separator,
-      String after,
-      String singletonTerminator,
-      char quotationMark) {
-    return printList(
-        buffer, list, before, separator, after, singletonTerminator, quotationMark, -1, -1);
-  }
-
-  /**
-   * Print a list of object representations.
-   *
-   * <p>The length of the output will be limited when both {@code maxItemsToPrint} and {@code
-   * criticalItemsStringLength} have values greater than zero.
-   *
-   * @param buffer an appendable buffer onto which to write the list.
-   * @param list the list of objects to write (each as with repr)
-   * @param before a string to print before the list
-   * @param separator a separator to print between each object
-   * @param after a string to print after the list
-   * @param singletonTerminator null or a string to print after the list if it is a singleton
-   * The singleton case is notably relied upon in python syntax to distinguish
-   *    a tuple of size one such as ("foo",) from a merely parenthesized object such as ("foo").
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @param maxItemsToPrint the maximum number of elements to be printed.
-   * @param criticalItemsStringLength a soft limit for the total string length of all arguments.
-   *    'Soft' means that this limit may be exceeded because of formatting.
-   * @return the Appendable, in fluent style.
-   */
-  public static Appendable printList(Appendable buffer, Iterable<?> list, String before,
-      String separator, String after, String singletonTerminator, char quotationMark,
-      int maxItemsToPrint, int criticalItemsStringLength) {
-    append(buffer, before);
-    int len = 0;
-    // Limits the total length of the string representation of the elements, if specified.
-    if (maxItemsToPrint > 0 && criticalItemsStringLength > 0) {
-      len = appendListElements(LengthLimitedAppendable.create(buffer, criticalItemsStringLength),
-          list, separator, quotationMark, maxItemsToPrint);
-    } else {
-      len = appendListElements(buffer, list, separator, quotationMark);
-    }
-    if (singletonTerminator != null && len == 1) {
-      append(buffer, singletonTerminator);
-    }
-    return append(buffer, after);
-  }
-
-  public static Appendable printList(Appendable buffer, Iterable<?> list, String before,
-      String separator, String after, String singletonTerminator, int maxItemsToPrint,
-      int criticalItemsStringLength) {
-    return printList(buffer, list, before, separator, after, singletonTerminator,
-        SKYLARK_QUOTATION_MARK, maxItemsToPrint, criticalItemsStringLength);
-  }
-
-  /**
-   * Appends the given elements to the specified {@link Appendable} and returns the number of
-   * elements.
-   */
-  private static int appendListElements(
-      Appendable appendable, Iterable<?> list, String separator, char quotationMark) {
-    boolean printSeparator = false; // don't print the separator before the first element
-    int len = 0;
-    for (Object o : list) {
-      if (printSeparator) {
-        append(appendable, separator);
-      }
-      write(appendable, o, quotationMark);
-      printSeparator = true;
-      len++;
-    }
-    return len;
-  }
-
-  /**
-   * Tries to append the given elements to the specified {@link Appendable} until specific limits
-   * are reached.
-   * @return the number of appended elements.
-   */
-  private static int appendListElements(LengthLimitedAppendable appendable, Iterable<?> list,
-      String separator, char quotationMark, int maxItemsToPrint) {
-    boolean printSeparator = false; // don't print the separator before the first element
-    boolean skipArgs = false;
-    int items = Iterables.size(list);
-    int len = 0;
-    // We don't want to print "1 more arguments", hence we don't skip arguments if there is only one
-    // above the limit.
-    int itemsToPrint = (items - maxItemsToPrint == 1) ? items : maxItemsToPrint;
-    appendable.enforceLimit();
-    for (Object o : list) {
-      // We don't want to print "1 more arguments", even if we hit the string limit.
-      if (len == itemsToPrint || (appendable.hasHitLimit() && len < items - 1)) {
-        skipArgs = true;
-        break;
-      }
-      if (printSeparator) {
-        append(appendable, separator);
-      }
-      write(appendable, o, quotationMark);
-      printSeparator = true;
-      len++;
-    }
-    appendable.ignoreLimit();
-    if (skipArgs) {
-      append(appendable, separator);
-      append(appendable, String.format("<%d more arguments>", items - len));
-    }
-    return len;
-  }
-
-  public static Appendable printList(Appendable buffer, Iterable<?> list, String before,
-      String separator, String after, String singletonTerminator) {
-    return printList(
-        buffer, list, before, separator, after, singletonTerminator, SKYLARK_QUOTATION_MARK);
-  }
-
-  /**
-   * Print a Skylark list or tuple of object representations
-   * @param buffer an appendable buffer onto which to write the list.
-   * @param list the contents of the list or tuple
-   * @param isTuple is it a tuple or a list?
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @param maxItemsToPrint the maximum number of elements to be printed.
-   * @param criticalItemsStringLength a soft limit for the total string length of all arguments.
-   * 'Soft' means that this limit may be exceeded because of formatting.
-   * @return the Appendable, in fluent style.
-   */
-  public static Appendable printList(Appendable buffer, Iterable<?> list, boolean isTuple,
-      char quotationMark, int maxItemsToPrint, int criticalItemsStringLength) {
-    if (isTuple) {
-      return printList(buffer, list, "(", ", ", ")", ",", quotationMark, maxItemsToPrint,
-          criticalItemsStringLength);
-    } else {
-      return printList(buffer, list, "[", ", ", "]", null, quotationMark, maxItemsToPrint,
-          criticalItemsStringLength);
-    }
-  }
-
-  public static Appendable printList(
-      Appendable buffer, Iterable<?> list, boolean isTuple, char quotationMark) {
-    return printList(buffer, list, isTuple, quotationMark, -1, -1);
-  }
-
-  /**
-   * Print a list of object representations
-   * @param list the list of objects to write (each as with repr)
-   * @param before a string to print before the list
-   * @param separator a separator to print between each object
-   * @param after a string to print after the list
-   * @param singletonTerminator null or a string to print after the list if it is a singleton
-   * The singleton case is notably relied upon in python syntax to distinguish
-   * a tuple of size one such as ("foo",) from a merely parenthesized object such as ("foo").
-   * @param quotationMark The quotation mark to be used (' or ")
-   * @return a String, the representation.
-   */
-  public static String listString(Iterable<?> list, String before, String separator, String after,
-      String singletonTerminator, char quotationMark) {
-    return printList(new StringBuilder(), list, before, separator, after, singletonTerminator,
-               quotationMark).toString();
-  }
-
-  public static String listString(
-      Iterable<?> list, String before, String separator, String after, String singletonTerminator) {
-    return listString(list, before, separator, after, singletonTerminator, SKYLARK_QUOTATION_MARK);
-  }
-
-  /**
-   * Perform Python-style string formatting, lazily.
-   *
-   * @param pattern a format string.
-   * @param arguments positional arguments.
-   * @return the formatted string.
-   */
-  public static Formattable formattable(final String pattern, Object... arguments)
-      throws IllegalFormatException {
-    final ImmutableList<Object> args = ImmutableList.copyOf(arguments);
-    return new Formattable() {
-        @Override
-        public String toString() {
-          return formatToString(pattern, args);
-        }
-
-        @Override
-        public void formatTo(Formatter formatter, int flags, int width, int precision) {
-          Printer.formatTo(formatter.out(), pattern, args);
-        }
-      };
-  }
-
-  /**
-   * Perform Python-style string formatting.
-   *
-   * @param pattern a format string.
-   * @param arguments a tuple containing positional arguments.
-   * @return the formatted string.
-   */
-  public static String format(String pattern, Object... arguments)
-      throws IllegalFormatException {
-    return formatToString(pattern, ImmutableList.copyOf(arguments));
-  }
-
-  /**
-   * Perform Python-style string formatting.
-   *
-   * @param pattern a format string.
-   * @param arguments a tuple containing positional arguments.
-   * @return the formatted string.
-   */
-  public static String formatToString(String pattern, List<?> arguments)
-      throws IllegalFormatException {
-    return formatTo(new StringBuilder(), pattern, arguments).toString();
-  }
-
-  /**
-   * Perform Python-style string formatting, as per pattern % tuple
-   * Limitations: only %d %s %r %% are supported.
-   *
-   * @param buffer an Appendable to output to.
-   * @param pattern a format string.
-   * @param arguments a list containing positional arguments.
-   * @return the buffer, in fluent style.
-   */
-  // TODO(bazel-team): support formatting arguments, and more complex Python patterns.
-  public static Appendable formatTo(Appendable buffer, String pattern, List<?> arguments)
-      throws IllegalFormatException {
-    // N.B. MissingFormatWidthException is the only kind of IllegalFormatException
-    // whose constructor can take and display arbitrary error message, hence its use below.
-
-    int length = pattern.length();
-    int argLength = arguments.size();
-    int i = 0; // index of next character in pattern
-    int a = 0; // index of next argument in arguments
-
-    while (i < length) {
-      int p = pattern.indexOf('%', i);
-      if (p == -1) {
-        append(buffer, pattern, i, length);
-        break;
-      }
-      if (p > i) {
-        append(buffer, pattern, i, p);
-      }
-      if (p == length - 1) {
-        throw new MissingFormatWidthException(
-            "incomplete format pattern ends with %: " + repr(pattern));
-      }
-      char directive = pattern.charAt(p + 1);
-      i = p + 2;
-      switch (directive) {
-        case '%':
-          append(buffer, '%');
-          continue;
-        case 'd':
-        case 'r':
-        case 's':
-          if (a >= argLength) {
-            throw new MissingFormatWidthException("not enough arguments for format pattern "
-                + repr(pattern) + ": "
-                + repr(Tuple.copyOf(arguments)));
-          }
-          Object argument = arguments.get(a++);
-          switch (directive) {
-            case 'd':
-              if (argument instanceof Integer) {
-                append(buffer, argument.toString());
-                continue;
-              } else {
-                throw new MissingFormatWidthException(
-                    "invalid argument " + repr(argument) + " for format pattern %d");
-              }
-            case 'r':
-              write(buffer, argument);
-              continue;
-            case 's':
-              print(buffer, argument);
-              continue;
-          }
-        default:
-          throw new MissingFormatWidthException(
-              "unsupported format character " + repr(String.valueOf(directive))
-              + " at index " + (p + 1) + " in " + repr(pattern));
-      }
-    }
-    if (a < argLength) {
-      throw new MissingFormatWidthException(
-          "not all arguments converted during string formatting");
-    }
-    return buffer;
-  }
-
-  /**
-   * Helper class for {@code Appendable}s that want to limit the length of their input.
-   *
-   * <p>Instances of this class act as a proxy for one {@code Appendable} object and decide whether
-   * the given input (or parts of it) can be written to the underlying {@code Appendable}, depending
-   * on whether the specified maximum length has been met or not.
-   */
-  private static final class LengthLimitedAppendable implements Appendable {
-
-    private static final ImmutableSet<Character> SPECIAL_CHARS =
-        ImmutableSet.of(',', ' ', '"', '\'', ':', '(', ')', '[', ']', '{', '}');
-
-    private static final Pattern ARGS_PATTERN = Pattern.compile("<\\d+ more arguments>");
-
-    private final Appendable original;
-    private int limit;
-    private boolean ignoreLimit;
-    private boolean previouslyShortened;
-    
-    private LengthLimitedAppendable(Appendable original, int limit) {
-      this.original = original;
-      this.limit = limit;
-    }
-
-    public static LengthLimitedAppendable create(Appendable original, int limit) {
-      // We don't want to overwrite the limit if original is already an instance of this class.
-      return (original instanceof LengthLimitedAppendable)
-          ? (LengthLimitedAppendable) original : new LengthLimitedAppendable(original, limit);
-    }
-
-    @Override
-    public Appendable append(CharSequence csq) throws IOException {
-      if (ignoreLimit || hasOnlySpecialChars(csq)) {
-        // Don't update limit.
-        original.append(csq);
-        previouslyShortened = false;
-      } else {
-        int length = csq.length();
-        if (length <= limit) {
-          limit -= length;
-          original.append(csq);
-        } else {
-          original.append(csq, 0, limit);
-          // We don't want to append multiple ellipses.
-          if (!previouslyShortened) {
-            original.append("...");
-          }
-          appendTrailingSpecialChars(csq, limit);
-          previouslyShortened = true;
-          limit = 0;
-        }
-      }
-      return this;
+    /**
+     * Creates a printer.
+     *
+     * @param buffer the {@link Appendable} that will be written to
+     * @param simplifiedFormatStrings if true, format strings will allow only %s and %%
+     */
+    protected BasePrinter(Appendable buffer, boolean simplifiedFormatStrings) {
+      this.buffer = buffer;
+      this.simplifiedFormatStrings = simplifiedFormatStrings;
     }
 
     /**
-     * Appends any trailing "special characters" (e.g. brackets, quotation marks) in the given
-     * sequence to the output buffer, regardless of the limit.
-     *
-     * <p>For example, let's look at foo(['too long']). Without this method, the shortened result
-     * would be foo(['too...) instead of the prettier foo(['too...']).
-     *
-     * <p>If the input string was already shortened and contains "<x more arguments>", this part
-     * will also be appended.
+     * Creates a printer that writes to the given buffer and that does not use simplified format
+     * strings.
      */
-    private void appendTrailingSpecialChars(CharSequence csq, int limit) throws IOException {
-      int length = csq.length();
-      Matcher matcher = ARGS_PATTERN.matcher(csq);
-      // We assume that everything following the "x more arguments" part has to be copied, too.
-      int start = matcher.find() ? matcher.start() : length;
-      // Find the left-most non-arg char that has to be copied.
-      for (int i = start - 1; i > limit; --i) {
-        if (isSpecialChar(csq.charAt(i))) {
-          start = i;
-        } else {
-          break;
-        }
-      }
-      if (start < length) {
-        original.append(csq, start, csq.length());
-      }
+    protected BasePrinter(Appendable buffer) {
+      this(buffer, /*simplifiedFormatStrings=*/ false);
     }
 
     /**
-     * Returns whether the given sequence denotes characters that are not part of the value of an
-     * argument.
-     *
-     * <p>Examples are brackets, braces and quotation marks.
+     * Creates a printer that uses a fresh buffer and that does not use simplified format strings.
      */
-    private boolean hasOnlySpecialChars(CharSequence csq) {
-      for (int i = 0; i < csq.length(); ++i) {
-        if (!isSpecialChar(csq.charAt(i))) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    private boolean isSpecialChar(char c)    {
-      return SPECIAL_CHARS.contains(c);
-    }
-
-    @Override
-    public Appendable append(CharSequence csq, int start, int end) throws IOException {
-      return append(csq.subSequence(start, end));
-    }
-
-    @Override
-    public Appendable append(char c) throws IOException {
-      return append(String.valueOf(c));
-    }
-    
-    public boolean hasHitLimit()  {
-      return limit <= 0;
-    }
-
-    public void enforceLimit()  {
-      ignoreLimit = false;
-    }
-    
-    public void ignoreLimit() {
-      ignoreLimit = true;
+    protected BasePrinter() {
+      this(new StringBuilder());
     }
 
     @Override
     public String toString() {
-      return original.toString();
+      return buffer.toString();
+    }
+
+    /**
+     * Print an informal debug-only representation of object x.
+     *
+     * @param o the object
+     * @return the buffer, in fluent style
+     */
+    public BasePrinter debugPrint(Object o) {
+      if (o instanceof StarlarkValue) {
+        ((StarlarkValue) o).debugPrint(this);
+        return this;
+      }
+
+      return this.str(o);
+    }
+
+    /**
+     * Prints the informal representation of value {@code o}. Unlike {@code repr(x)}, it does not
+     * quote strings at top level, though strings and other values appearing as elements of other
+     * structures are quoted as if by {@code repr}.
+     *
+     * <p>Implementations of StarlarkValue may define their own behavior of {@code str}.
+     */
+    public BasePrinter str(Object o) {
+      if (o instanceof StarlarkValue) {
+        ((StarlarkValue) o).str(this);
+        return this;
+      }
+
+      if (o instanceof String) {
+        return this.append((String) o);
+      }
+      return this.repr(o);
+    }
+
+    /**
+     * Prints the quoted representation of Starlark value {@code o}. The quoted form is often a
+     * Starlark expression that evaluates to {@code o}.
+     *
+     * <p>Implementations of StarlarkValue may define their own behavior of {@code repr}.
+     *
+     * <p>In addition to Starlark values, {@code repr} also prints instances of classes Map, List,
+     * Map.Entry, Class, Node, or Location. To avoid nondeterminism, all other values are printed
+     * opaquely.
+     */
+    @Override
+    public BasePrinter repr(Object o) {
+      if (o == null) {
+        // Java null is not a valid Starlark value, but sometimes printers are used on non-Skylark
+        // values such as Locations or ASTs.
+        this.append("null");
+
+      } else if (o instanceof StarlarkValue) {
+        ((StarlarkValue) o).repr(this);
+
+      } else if (o instanceof String) {
+        writeString((String) o);
+
+      } else if (o instanceof Integer || o instanceof Double) {
+        this.append(o.toString());
+
+      } else if (Boolean.TRUE.equals(o)) {
+        this.append("True");
+
+      } else if (Boolean.FALSE.equals(o)) {
+        this.append("False");
+
+        // -- non-Starlark values --
+
+      } else if (o instanceof Map) {
+        Map<?, ?> dict = (Map<?, ?>) o;
+        this.printList(dict.entrySet(), "{", ", ", "}", null);
+
+      } else if (o instanceof List) {
+        List<?> seq = (List<?>) o;
+        this.printList(seq, false);
+
+      } else if (o instanceof Map.Entry) {
+        Map.Entry<?, ?> entry = (Map.Entry<?, ?>) o;
+        this.repr(entry.getKey());
+        this.append(": ");
+        this.repr(entry.getValue());
+
+      } else if (o instanceof Class) {
+        this.append(Starlark.classType((Class<?>) o));
+
+      } else if (o instanceof Node || o instanceof Location) {
+        // AST node objects and locations are printed in tracebacks and error messages,
+        // it's safe to print their toString representations
+        this.append(o.toString());
+
+      } else {
+        // For now, we print all unknown values opaquely.
+        // Historically this was a defense against accidental nondeterminism,
+        // but Starlark code cannot access values of o that would reach here,
+        // and native code is already trusted to be deterministic.
+        // TODO(adonovan): replace this with a default behavior of this.append(o),
+        // once we require that all @Skylark-annotated classes implement StarlarkValue.
+        // (After all, Java code can call String.format, which also calls toString.)
+        this.append("<unknown object " + o.getClass().getName() + ">");
+      }
+
+      return this;
+    }
+
+    /**
+     * Write a properly escaped Starlark representation of a string to a buffer.
+     *
+     * @param s the string a representation of which to repr.
+     * @return this printer.
+     */
+    protected BasePrinter writeString(String s) {
+      this.append('"');
+      int len = s.length();
+      for (int i = 0; i < len; i++) {
+        char c = s.charAt(i);
+        escapeCharacter(c);
+      }
+      return this.append('"');
+    }
+
+    private BasePrinter backslashChar(char c) {
+      return this.append('\\').append(c);
+    }
+
+    private BasePrinter escapeCharacter(char c) {
+      if (c == '"') {
+        return backslashChar(c);
+      }
+      switch (c) {
+        case '\\':
+          return backslashChar('\\');
+        case '\r':
+          return backslashChar('r');
+        case '\n':
+          return backslashChar('n');
+        case '\t':
+          return backslashChar('t');
+        default:
+          if (c < 32) {
+            //TODO(bazel-team): support \x escapes
+            return this.append(String.format("\\x%02x", (int) c));
+          }
+          return this.append(c); // no need to support UTF-8
+      } // endswitch
+    }
+
+    /**
+     * Print a list of object representations
+     *
+     * @param list the list of objects to repr (each as with repr)
+     * @param before a string to print before the list items, e.g. an opening bracket
+     * @param separator a separator to print between items
+     * @param after a string to print after the list items, e.g. a closing bracket
+     * @param singletonTerminator null or a string to print after the list if it is a singleton The
+     *     singleton case is notably relied upon in python syntax to distinguish a tuple of size one
+     *     such as ("foo",) from a merely parenthesized object such as ("foo").
+     * @return this printer.
+     */
+    @Override
+    public BasePrinter printList(
+        Iterable<?> list,
+        String before,
+        String separator,
+        String after,
+        @Nullable String singletonTerminator) {
+
+      this.append(before);
+      int len = appendListElements(list, separator);
+      if (singletonTerminator != null && len == 1) {
+        this.append(singletonTerminator);
+      }
+      return this.append(after);
+    }
+
+    /**
+     * Appends the given elements to the specified {@link Appendable} and returns the number of
+     * elements.
+     */
+    private int appendListElements(Iterable<?> list, String separator) {
+      boolean printSeparator = false; // don't print the separator before the first element
+      int len = 0;
+      for (Object o : list) {
+        if (printSeparator) {
+          this.append(separator);
+        }
+        this.repr(o);
+        printSeparator = true;
+        len++;
+      }
+      return len;
+    }
+
+    /**
+     * Print a Starlark list or tuple of object representations
+     *
+     * @param list the contents of the list or tuple
+     * @param isTuple if true the list will be formatted with parentheses and with a trailing comma
+     *     in case of one-element tuples. 'Soft' means that this limit may be exceeded because of
+     *     formatting.
+     * @return this printer.
+     */
+    @Override
+    public BasePrinter printList(Iterable<?> list, boolean isTuple) {
+      if (isTuple) {
+        return this.printList(list, "(", ", ", ")", ",");
+      } else {
+        return this.printList(list, "[", ", ", "]", null);
+      }
+    }
+
+    /**
+     * Perform Python-style string formatting, similar to the {@code pattern % tuple} syntax.
+     *
+     * <p>The only supported placeholder patterns are
+     * <ul>
+     *   <li>{@code %s} (convert as if by {@code str()})
+     *   <li>{@code %r} (convert as if by {@code repr()})
+     *   <li>{@code %d} (convert an integer to its decimal representation)
+     * </ul>
+     * To encode a literal percent character, escape it as {@code %%}. It is an error to have a
+     * non-escaped {@code %} at the end of the string or followed by any character not listed above.
+     *
+     * <p>If this printer has {@code simplifiedFormatStrings} set, only {@code %s} and {@code %%}
+     * are permitted.
+     *
+     * @param pattern a format string that may contain placeholders
+     * @param arguments an array containing arguments to substitute into the placeholders in order
+     * @return the formatted string
+     * @throws IllegalFormatException if {@code pattern} is not a valid format string, or if
+     *     {@code arguments} mismatches the number or type of placeholders in {@code pattern}
+     */
+    @Override
+    public BasePrinter format(String pattern, Object... arguments) {
+      return this.formatWithList(pattern, Arrays.asList(arguments));
+    }
+
+    /**
+     * Perform Python-style string formatting, similar to the {@code pattern % tuple} syntax.
+     *
+     * <p>Same as {@link #format(String, Object...)}, but with a list instead of variadic args.
+     */
+    @Override
+    public BasePrinter formatWithList(String pattern, List<?> arguments) {
+      // TODO(bazel-team): support formatting arguments, and more complex Python patterns.
+      // N.B. MissingFormatWidthException is the only kind of IllegalFormatException
+      // whose constructor can take and display arbitrary error message, hence its use below.
+
+      int length = pattern.length();
+      int argLength = arguments.size();
+      int i = 0; // index of next character in pattern
+      int a = 0; // index of next argument in arguments
+
+      while (i < length) {
+        int p = pattern.indexOf('%', i);
+        if (p == -1) {
+          Printer.append(buffer, pattern, i, length);
+          break;
+        }
+        if (p > i) {
+          Printer.append(buffer, pattern, i, p);
+        }
+        if (p == length - 1) {
+          throw new MissingFormatWidthException(
+              "incomplete format pattern ends with %: " + this.repr(pattern));
+        }
+        char directive = pattern.charAt(p + 1);
+        i = p + 2;
+        switch (directive) {
+          case '%':
+            this.append('%');
+            continue;
+          case 'd':
+          case 'r':
+          case 's':
+            if (simplifiedFormatStrings && (directive != 's')) {
+              throw new UnknownFormatConversionException(
+                  "cannot use %" + directive + " substitution placeholder when "
+                      + "simplifiedFormatStrings is set");
+            }
+            if (a >= argLength) {
+              throw new MissingFormatWidthException(
+                  "not enough arguments for format pattern "
+                      + Starlark.repr(pattern)
+                      + ": "
+                      + Starlark.repr(Tuple.copyOf(arguments)));
+            }
+            Object argument = arguments.get(a++);
+            switch (directive) {
+              case 'd':
+                if (argument instanceof Integer) {
+                  this.append(argument.toString());
+                  continue;
+                } else {
+                  throw new MissingFormatWidthException(
+                      "invalid argument " + Starlark.repr(argument) + " for format pattern %d");
+                }
+              case 'r':
+                this.repr(argument);
+                continue;
+              case 's':
+                this.str(argument);
+                continue;
+            }
+            // fall through
+          default:
+            throw new MissingFormatWidthException(
+                // The call to Starlark.repr doesn't cause an infinite recursion because it's
+                // only used to format a string properly
+                String.format(
+                    "unsupported format character \"%s\" at index %s in %s",
+                    String.valueOf(directive), p + 1, Starlark.repr(pattern)));
+        }
+      }
+      if (a < argLength) {
+        throw new MissingFormatWidthException(
+            "not all arguments converted during string formatting");
+      }
+      return this;
+    }
+
+    @Override
+    public BasePrinter append(char c) {
+      Printer.append(buffer, c);
+      return this;
+    }
+
+    @Override
+    public BasePrinter append(CharSequence s) {
+      Printer.append(buffer, s);
+      return this;
+    }
+
+    BasePrinter append(CharSequence sequence, int start, int end) {
+      return this.append(sequence.subSequence(start, end));
+    }
+  }
+
+  /** A printer that breaks lines between the entries of lists, with proper indenting. */
+  public static class PrettyPrinter extends BasePrinter {
+    static final int BASE_INDENT = 4;
+    private int indent;
+
+    protected PrettyPrinter(Appendable buffer) {
+      super(buffer);
+      indent = 0;
+    }
+
+    @Override
+    public BasePrinter printList(
+        Iterable<?> list,
+        String before,
+        String untrimmedSeparator,
+        String after,
+        @Nullable String singletonTerminator) {
+
+      // If the list is empty, do not split the presentation over
+      // several lines.
+      if (!list.iterator().hasNext()) {
+        this.append(before + after);
+        return this;
+      }
+
+      String separator = untrimmedSeparator.trim();
+
+      this.append(before + "\n");
+      indent += BASE_INDENT;
+      boolean printSeparator = false; // don't print the separator before the first element
+      int len = 0;
+      for (Object o : list) {
+        if (printSeparator) {
+          this.append(separator + "\n");
+        }
+        this.append(Strings.repeat(" ", indent));
+        this.repr(o);
+        printSeparator = true;
+        len++;
+      }
+      if (singletonTerminator != null && len == 1) {
+        this.append(singletonTerminator);
+      }
+      this.append("\n");
+      indent -= BASE_INDENT;
+      this.append(Strings.repeat(" ", indent) + after);
+      return this;
     }
   }
 }

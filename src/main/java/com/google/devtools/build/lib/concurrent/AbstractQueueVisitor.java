@@ -14,428 +14,332 @@
 package com.google.devtools.build.lib.concurrent;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
-import com.google.common.util.concurrent.AtomicLongMap;
+import com.google.common.collect.Sets;
+import com.google.common.flogger.GoogleLogger;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-
+import com.google.devtools.build.lib.concurrent.ErrorClassifier.ErrorClassification;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
-import javax.annotation.Nullable;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** A {@link QuiescingExecutor} implementation that wraps an {@link ExecutorService}. */
 public class AbstractQueueVisitor implements QuiescingExecutor {
-
   /**
-   * Default factory function for constructing {@link ThreadPoolExecutor}s. The {@link
-   * ThreadPoolExecutor}s this creates have the same value for {@code corePoolSize} and {@code
-   * maximumPoolSize} because that results in a fixed-size thread pool, and the current use cases
-   * for {@link AbstractQueueVisitor} don't require any more sophisticated thread pool size
-   * management.
+   * The most severe unhandled exception thrown by a worker thread, according to {@link
+   * #errorClassifier}. This exception gets propagated to the calling thread of {@link
+   * #awaitQuiescence} . We use the most severe error for the sake of not masking e.g. crashes in
+   * worker threads after the first critical error that can occur due to race conditions in client
+   * code.
    *
-   * <p>If client use cases change, they may invoke one of the {@link
-   * AbstractQueueVisitor#AbstractQueueVisitor} constructors that accepts a pre-constructed {@link
-   * ThreadPoolExecutor}.
-   */
-  public static final Function<ExecutorParams, ThreadPoolExecutor> EXECUTOR_FACTORY =
-      new Function<ExecutorParams, ThreadPoolExecutor>() {
-        @Override
-        public ThreadPoolExecutor apply(ExecutorParams p) {
-          return new ThreadPoolExecutor(
-              /*corePoolSize=*/ p.getParallelism(),
-              /*maximumPoolSize=*/ p.getParallelism(),
-              p.getKeepAliveTime(),
-              p.getUnits(),
-              p.getWorkQueue(),
-              new ThreadFactoryBuilder().setNameFormat(p.getPoolName() + " %d").build());
-        }
-      };
-
-  /**
-   * The first unhandled exception thrown by a worker thread.  We save it and re-throw it from
-   * the main thread to detect bugs faster; otherwise worker threads just quietly die.
+   * <p>Field updates happen only in blocks that are synchronized on the {@link
+   * AbstractQueueVisitor} object.
    *
-   * Field updates happen only in blocks that are synchronized on the {@link
-   * AbstractQueueVisitor} object; it's important to save the first one as it may be more
-   * informative than a subsequent one, and this is not a performance-critical path.
+   * <p>If {@link AbstractQueueVisitor} clients don't like the semantics of storing and propagating
+   * the most severe error, then they should be provide an {@link ErrorClassifier} that does the
+   * right thing (e.g. to cause the _first_ error to be propagated, you'd want to provide an {@link
+   * ErrorClassifier} that gives all errors the exact same {@link ErrorClassification}).
+   *
+   * <p>Note that this is not a performance-critical path.
    */
   private volatile Throwable unhandled = null;
 
   /**
-   * An uncaught exception when submitting a job to the {@link ExecutorService} is catastrophic,
-   * and usually indicates a lack of stack space on which to allocate a native thread. The {@link
-   * ExecutorService} may reach an inconsistent state in such circumstances, so we avoid blocking
-   * on its termination when this field is non-{@code null}.
+   * An uncaught exception when submitting a job to the {@link ExecutorService} is catastrophic, and
+   * usually indicates a lack of stack space on which to allocate a native thread. The {@link
+   * ExecutorService} may reach an inconsistent state in such circumstances, so we avoid blocking on
+   * its termination when this field is non-{@code null}.
    */
   private volatile Throwable catastrophe;
 
   /**
-   * Enables concurrency. For debugging or testing, set this to {@code false} to avoid thread
-   * creation and concurrency. Any deviation in observed behaviour is a bug.
-   */
-  private final boolean concurrent;
-
-  /**
    * An object used in the manner of a {@link java.util.concurrent.locks.Condition} object, for the
-   * condition {@code remainingTasks.get() == 0 || jobsMustBeStopped}.
-   * TODO(bazel-team): Replace with an actual {@link java.util.concurrent.locks.Condition} object.
+   * condition {@code remainingTasks.get() == 0 || jobsMustBeStopped}. TODO(bazel-team): Replace
+   * with an actual {@link java.util.concurrent.locks.Condition} object.
    */
   private final Object zeroRemainingTasks = new Object();
 
-  /**
-   * If {@link #concurrent} is {@code true}, then this is a counter of the number of {@link
-   * Runnable}s {@link #execute}-d that have not finished evaluation.
-   */
+  /** The number of {@link Runnable}s {@link #execute}-d that have not finished evaluation. */
   private final AtomicLong remainingTasks = new AtomicLong(0);
+
+  /**
+   * A thread that wants to add or remove a future from {@code outstandingFutures} must first obtain
+   * the <em>read</em> lock and then check the {@code threadInterrupted} flag. The thread that
+   * cancels all futures must first set the {@code threadInterrupted} flag, and then obtain the
+   * <em>write</em> lock. Only once both have happened is the main thread allowed to iterate over
+   * the {@code outstandingFutures}. This allows concurrent future registration, but ensures that
+   * canceling only happens when there are no concurrent modifications to the set since that
+   * requires iterating over all elements.
+   */
+  private final ReadWriteLock outstandingFuturesLock = new ReentrantReadWriteLock();
+
+  private final Set<ListenableFuture<?>> outstandingFutures = Sets.newConcurrentHashSet();
 
   /**
    * Flag used to record when all threads were killed by failed action execution. Only ever
    * transitions from {@code false} to {@code true}.
    *
-   * <p>May only be accessed in a block that is synchronized on {@link #zeroRemainingTasks}.
+   * <p>Except for {@link #mustJobsBeStopped}, may only be accessed in a block that is synchronized
+   * on {@link #zeroRemainingTasks}.
    */
-  private boolean jobsMustBeStopped = false;
+  private volatile boolean jobsMustBeStopped = false;
 
   /** Map from thread to number of jobs executing in the thread. Used for interrupt handling. */
-  private final AtomicLongMap<Thread> jobs = AtomicLongMap.create();
+  private final Map<Thread, AtomicLong> jobs = new ConcurrentHashMap<>();
 
-  /** The {@link ExecutorService}. If !{@code concurrent}, this may be {@code null}. */
-  @Nullable private final ExecutorService executorService;
+  private final ExecutorService executorService;
+
+  private final boolean usingPriorityQueue;
 
   /**
-   * Flag used to record when the main thread (the thread which called {@link #awaitQuiescence})
-   * is interrupted.
+   * Flag used to record when the main thread (the thread which called {@link #awaitQuiescence}) is
+   * interrupted.
    *
-   * When this is {@code true}, adding tasks to the {@link ExecutorService} will fail quietly as
+   * <p>When this is {@code true}, adding tasks to the {@link ExecutorService} will fail quietly as
    * a part of the process of shutting down the worker threads.
    */
-  private volatile boolean threadInterrupted = false;
+  private volatile boolean threadInterrupted;
 
   /**
    * Latches used to signal when the visitor has been interrupted or seen an exception. Used only
    * for testing.
    */
   private final CountDownLatch interruptedLatch = new CountDownLatch(1);
+
   private final CountDownLatch exceptionLatch = new CountDownLatch(1);
 
   /** If {@code true}, don't run new actions after an uncaught exception. */
   private final boolean failFastOnException;
-
-  /** If {@code true}, don't run new actions after an interrupt. */
-  private final boolean failFastOnInterrupt;
 
   /** If {@code true}, shut down the {@link ExecutorService} on completion. */
   private final boolean ownExecutorService;
 
   private final ErrorClassifier errorClassifier;
 
-  private static final Logger LOG = Logger.getLogger(AbstractQueueVisitor.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   /**
-   * Create the {@link AbstractQueueVisitor}.
+   * Default function for constructing {@link ThreadPoolExecutor}s. The {@link ThreadPoolExecutor}s
+   * this creates have the same value for {@code corePoolSize} and {@code maximumPoolSize} because
+   * that results in a fixed-size thread pool, and the current use cases for {@link
+   * AbstractQueueVisitor} don't require any more sophisticated thread pool size management.
    *
-   * @param concurrent {@code true} if concurrency should be enabled. Only set to {@code false} for
-   *                   debugging.
-   * @param parallelism a measure of parallelism for the {@link ExecutorService}, such as {@code
-   *                    parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code
-   *                    corePoolSize} and {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
-   * @param keepAliveTime the keep-alive time for the {@link ExecutorService}, if applicable.
-   * @param units the time units of keepAliveTime.
-   * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after an interrupt.
-   * @param poolName sets the name of threads spawned by the {@link ExecutorService}. If {@code
-   *                 null}, default thread naming will be used.
+   * <p>If client use cases change, they may invoke one of the {@link
+   * AbstractQueueVisitor#AbstractQueueVisitor} constructors that accepts a pre-constructed {@link
+   * ThreadPoolExecutor}.
    */
-  public AbstractQueueVisitor(
-      boolean concurrent,
+  private static ExecutorService createExecutorService(
       int parallelism,
       long keepAliveTime,
       TimeUnit units,
-      boolean failFastOnException,
-      boolean failFastOnInterrupt,
+      BlockingQueue<Runnable> workQueue,
       String poolName) {
-    this(
-        concurrent,
-        parallelism,
+
+    if ("1".equals(System.getProperty("experimental_use_fork_join_pool"))) {
+      return new NamedForkJoinPool(poolName, parallelism);
+    }
+    return new ThreadPoolExecutor(
+        /*corePoolSize=*/ parallelism,
+        /*maximumPoolSize=*/ parallelism,
         keepAliveTime,
         units,
-        failFastOnException,
-        failFastOnInterrupt,
-        poolName,
-        EXECUTOR_FACTORY,
-        ErrorClassifier.DEFAULT);
+        workQueue,
+        new ThreadFactoryBuilder()
+            .setNameFormat(Preconditions.checkNotNull(poolName) + " %d")
+            .build());
+  }
+
+  public static ExecutorService createExecutorService(
+      int parallelism, String poolName, boolean useForkJoinPool) {
+    if (useForkJoinPool) {
+      return new NamedForkJoinPool(poolName, parallelism);
+    }
+    return createExecutorService(parallelism, poolName);
+  }
+
+  public static ExecutorService createExecutorService(int parallelism, String poolName) {
+    return createExecutorService(
+        parallelism,
+        /*keepAliveTime=*/ 1,
+        TimeUnit.SECONDS,
+        new PriorityBlockingQueue<>(),
+        poolName);
+  }
+
+  public static AbstractQueueVisitor createWithExecutorService(
+      ExecutorService executorService,
+      boolean failFastOnException,
+      ErrorClassifier errorClassifier) {
+    if (executorService instanceof ForkJoinPool) {
+      return ForkJoinQuiescingExecutor.newBuilder()
+          .withOwnershipOf((ForkJoinPool) executorService)
+          .setErrorClassifier(errorClassifier)
+          .build();
+    }
+    return new AbstractQueueVisitor(executorService, true, failFastOnException, errorClassifier);
   }
 
   /**
    * Create the {@link AbstractQueueVisitor}.
    *
-   * @param concurrent {@code true} if concurrency should be enabled. Only set to {@code false} for
-   *                   debugging.
    * @param parallelism a measure of parallelism for the {@link ExecutorService}, such as {@code
-   *                    parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code
-   *                    corePoolSize} and {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
+   *     parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code corePoolSize} and
+   *     {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
    * @param keepAliveTime the keep-alive time for the {@link ExecutorService}, if applicable.
    * @param units the time units of keepAliveTime.
    * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after an interrupt.
    * @param poolName sets the name of threads spawned by the {@link ExecutorService}. If {@code
-   *                 null}, default thread naming will be used.
+   *     null}, default thread naming will be used.
    * @param errorClassifier an error classifier used to determine whether to log and/or stop jobs.
    */
   public AbstractQueueVisitor(
-      boolean concurrent,
       int parallelism,
       long keepAliveTime,
       TimeUnit units,
       boolean failFastOnException,
-      boolean failFastOnInterrupt,
       String poolName,
       ErrorClassifier errorClassifier) {
     this(
-        concurrent,
-        parallelism,
-        keepAliveTime,
-        units,
-        failFastOnException,
-        failFastOnInterrupt,
-        poolName,
-        EXECUTOR_FACTORY,
-        errorClassifier);
-  }
-
-  /**
-   * Create the {@link AbstractQueueVisitor}.
-   *
-   * @param concurrent {@code true} if concurrency should be enabled. Only set to {@code false} for
-   *                   debugging.
-   * @param parallelism a measure of parallelism for the {@link ExecutorService}, such as {@code
-   *                    parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code
-   *                    corePoolSize} and {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
-   * @param keepAliveTime the keep-alive time for the {@link ExecutorService}, if applicable.
-   * @param units the time units of keepAliveTime.
-   * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after interrupt.
-   * @param poolName sets the name of threads spawned by the {@link ExecutorService}. If {@code
-   *                 null}, default thread naming will be used.
-   * @param executorFactory the factory for constructing the executor service if {@code concurrent}
-   *                        is {@code true}.
-   */
-  public AbstractQueueVisitor(
-      boolean concurrent,
-      int parallelism,
-      long keepAliveTime,
-      TimeUnit units,
-      boolean failFastOnException,
-      boolean failFastOnInterrupt,
-      String poolName,
-      Function<ExecutorParams, ? extends ExecutorService> executorFactory,
-      ErrorClassifier errorClassifier) {
-    Preconditions.checkNotNull(poolName);
-    Preconditions.checkNotNull(executorFactory);
-    Preconditions.checkNotNull(errorClassifier);
-    this.concurrent = concurrent;
-    this.failFastOnException = failFastOnException;
-    this.failFastOnInterrupt = failFastOnInterrupt;
-    this.ownExecutorService = true;
-    this.executorService =
-        concurrent
-            ? executorFactory.apply(
-                new ExecutorParams(
-                    parallelism, keepAliveTime, units, poolName, new BlockingStack<Runnable>()))
-            : null;
-    this.errorClassifier = errorClassifier;
-  }
-
-  /**
-   * Create the {@link AbstractQueueVisitor}.
-   *
-   * @param concurrent {@code true} if concurrency should be enabled. Only set to {@code false}
-   *                   for debugging.
-   * @param parallelism a measure of parallelism for the {@link ExecutorService}, such as {@code
-   *                    parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code
-   *                    corePoolSize} and {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
-   * @param keepAliveTime the keep-alive time for the {@link ExecutorService}, if applicable.
-   * @param units the time units of keepAliveTime.
-   * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param poolName sets the name of threads spawned by the {@link ExecutorService}. If {@code
-   *                 null}, default thread naming will be used.
-   */
-  public AbstractQueueVisitor(
-      boolean concurrent,
-      int parallelism,
-      long keepAliveTime,
-      TimeUnit units,
-      boolean failFastOnException,
-      String poolName) {
-    this(
-        concurrent,
-        parallelism,
-        keepAliveTime,
-        units,
-        failFastOnException,
+        createExecutorService(parallelism, keepAliveTime, units, new BlockingStack<>(), poolName),
         true,
-        poolName,
-        EXECUTOR_FACTORY,
-        ErrorClassifier.DEFAULT);
-  }
-
-  /**
-   * Create the {@link AbstractQueueVisitor}.
-   *
-   * @param executorService The {@link ExecutorService} to use.
-   * @param shutdownOnCompletion If {@code true}, pass ownership of the {@link ExecutorService} to
-   *                             this class. The service will be shut down after a
-   *                             call to {@link #awaitQuiescence}. Callers must not shutdown the
-   *                             {@link ExecutorService} while queue visitors use it.
-   * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after an interrupt.
-   */
-  public AbstractQueueVisitor(
-      ExecutorService executorService,
-      boolean shutdownOnCompletion,
-      boolean failFastOnException,
-      boolean failFastOnInterrupt) {
-    this(
-        /*concurrent=*/ true,
-        executorService,
-        shutdownOnCompletion,
         failFastOnException,
-        failFastOnInterrupt,
-        ErrorClassifier.DEFAULT);
-  }
-
-  /**
-   * Create the {@link AbstractQueueVisitor}.
-   *
-   * @param concurrent if {@code false}, run tasks inline instead of using the {@link
-   *                   ExecutorService}.
-   * @param executorService The {@link ExecutorService} to use.
-   * @param shutdownOnCompletion If {@code true}, pass ownership of the {@link ExecutorService} to
-   *                             this class. The service will be shut down after a
-   *                             call to {@link #awaitQuiescence}. Callers must not shut down the
-   *                             {@link ExecutorService} while queue visitors use it.
-   * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after an interrupt.
-   */
-  public AbstractQueueVisitor(
-      boolean concurrent,
-      ExecutorService executorService,
-      boolean shutdownOnCompletion,
-      boolean failFastOnException,
-      boolean failFastOnInterrupt) {
-    Preconditions.checkArgument(executorService != null || !concurrent);
-    this.concurrent = concurrent;
-    this.failFastOnException = failFastOnException;
-    this.failFastOnInterrupt = failFastOnInterrupt;
-    this.ownExecutorService = shutdownOnCompletion;
-    this.executorService = executorService;
-    this.errorClassifier = ErrorClassifier.DEFAULT;
+        errorClassifier);
   }
 
   /**
    * Create the AbstractQueueVisitor.
    *
-   * @param concurrent if {@code false}, run tasks inline instead of using the {@link
-   *                   ExecutorService}.
    * @param executorService The {@link ExecutorService} to use.
    * @param shutdownOnCompletion If {@code true}, pass ownership of the {@link ExecutorService} to
-   *                             this class. The service will be shut down after a
-   *                             call to {@link #awaitQuiescence}. Callers must not shut down the
-   *                             {@link ExecutorService} while queue visitors use it.
+   *     this class. The service will be shut down after a call to {@link #awaitQuiescence}. Callers
+   *     must not shut down the {@link ExecutorService} while queue visitors use it.
    * @param failFastOnException if {@code true}, don't run new actions after an uncaught exception.
-   * @param failFastOnInterrupt if {@code true}, don't run new actions after an interrupt.
    * @param errorClassifier an error classifier used to determine whether to log and/or stop jobs.
    */
-  public AbstractQueueVisitor(
-      boolean concurrent,
+  protected AbstractQueueVisitor(
       ExecutorService executorService,
       boolean shutdownOnCompletion,
       boolean failFastOnException,
-      boolean failFastOnInterrupt,
       ErrorClassifier errorClassifier) {
-    Preconditions.checkArgument(executorService != null || !concurrent);
-    this.concurrent = concurrent;
-    this.failFastOnException = failFastOnException;
-    this.failFastOnInterrupt = failFastOnInterrupt;
-    this.ownExecutorService = shutdownOnCompletion;
-    this.executorService = executorService;
-    this.errorClassifier = errorClassifier;
-  }
-
-  /**
-   * Create the {@code AbstractQueueVisitor} with concurrency enabled.
-   *
-   * @param parallelism a measure of parallelism for the {@link ExecutorService}, such as {@code
-   *                    parallelism} in {@link java.util.concurrent.ForkJoinPool}, or both {@code
-   *                    corePoolSize} and {@code maximumPoolSize} in {@link ThreadPoolExecutor}.
-   * @param keepAlive the keep-alive time for the {@link ExecutorService}, if applicable.
-   * @param units the time units of keepAliveTime.
-   * @param poolName sets the name of threads spawned by the {@link ExecutorService}. If {@code
-   *                 null}, default thread naming will be used.
-   */
-  public AbstractQueueVisitor(int parallelism, long keepAlive, TimeUnit units, String poolName) {
     this(
-        true,
-        parallelism,
-        keepAlive,
-        units,
-        false,
-        true,
-        poolName,
-        EXECUTOR_FACTORY,
-        ErrorClassifier.DEFAULT);
+        executorService,
+        shutdownOnCompletion,
+        failFastOnException,
+        errorClassifier,
+        /*usingPriorityQueue=*/ false);
   }
 
+  private AbstractQueueVisitor(
+      ExecutorService executorService,
+      boolean shutdownOnCompletion,
+      boolean failFastOnException,
+      ErrorClassifier errorClassifier,
+      boolean usingPriorityQueue) {
+    this.failFastOnException = failFastOnException;
+    this.ownExecutorService = shutdownOnCompletion;
+    this.executorService = Preconditions.checkNotNull(executorService);
+    this.errorClassifier = Preconditions.checkNotNull(errorClassifier);
+    this.usingPriorityQueue = usingPriorityQueue;
+  }
 
   @Override
   public final void awaitQuiescence(boolean interruptWorkers) throws InterruptedException {
-    if (concurrent) {
-      awaitTermination(interruptWorkers);
-    } else {
-      if (Thread.currentThread().isInterrupted()) {
-        throw new InterruptedException();
-      }
-    }
-  }
-
-  /** Schedules a call. Called in a worker thread if concurrent. */
-  @Override
-  public final void execute(Runnable runnable) {
-    if (concurrent) {
-      WrappedRunnable wrappedRunnable = new WrappedRunnable(runnable);
-      try {
-        // It's impossible for this increment to result in remainingTasks.get <= 0 because
-        // remainingTasks is never negative. Therefore it isn't necessary to check its value for
-        // the purpose of updating zeroRemainingTasks.
-        long tasks = remainingTasks.incrementAndGet();
-        Preconditions.checkState(
-            tasks > 0,
-            "Incrementing remaining tasks counter resulted in impossible non-positive number.");
-        executeRunnable(wrappedRunnable);
-      } catch (Throwable e) {
-        if (!wrappedRunnable.ran) {
-          // Note that keeping track of ranTask is necessary to disambiguate the case where
-          // execute() itself failed, vs. a caller-runs policy on pool exhaustion, where the
-          // runnable threw. To be extra cautious, we decrement the task count in a finally
-          // block, even though the CountDownLatch is unlikely to throw.
-          recordError(e);
+    Throwables.propagateIfPossible(catastrophe);
+    try {
+      synchronized (zeroRemainingTasks) {
+        while (remainingTasks.get() != 0 && !jobsMustBeStopped) {
+          zeroRemainingTasks.wait();
         }
       }
-    } else {
-      runnable.run();
+    } catch (InterruptedException e) {
+      // Mark the visitor, so that it's known to be interrupted, and
+      // then break out of here, stop the worker threads and return ASAP,
+      // sending the interruption to the parent thread.
+      setInterrupted();
+    }
+
+    awaitTermination(interruptWorkers);
+  }
+
+  /** Schedules a call. Called in a worker thread. */
+  @Override
+  public final void execute(Runnable runnable) {
+    if (usingPriorityQueue) {
+      Preconditions.checkState(runnable instanceof Comparable);
+    }
+    WrappedRunnable wrappedRunnable = new WrappedRunnable(runnable);
+    try {
+      // It's impossible for this increment to result in remainingTasks.get <= 0 because
+      // remainingTasks is never negative. Therefore it isn't necessary to check its value for
+      // the purpose of updating zeroRemainingTasks.
+      long tasks = remainingTasks.incrementAndGet();
+      Preconditions.checkState(
+          tasks > 0,
+          "Incrementing remaining tasks counter resulted in impossible non-positive number.");
+      executeRunnable(wrappedRunnable);
+    } catch (Throwable e) {
+      if (!wrappedRunnable.ran) {
+        // Note that keeping track of ranTask is necessary to disambiguate the case where
+        // execute() itself failed, vs. a caller-runs policy on pool exhaustion, where the
+        // runnable threw. To be extra cautious, we decrement the task count in a finally
+        // block, even though the CountDownLatch is unlikely to throw.
+        recordError(e);
+      }
     }
   }
 
-  protected void executeRunnable(Runnable runnable) {
+  protected void executeRunnable(WrappedRunnable runnable) {
     executorService.execute(runnable);
+  }
+
+  private synchronized void maybeSaveUnhandledThrowable(Throwable e, boolean markToStopJobs) {
+    boolean critical = false;
+    ErrorClassification errorClassification = errorClassifier.classify(e);
+    switch (errorClassification) {
+      case AS_CRITICAL_AS_POSSIBLE:
+      case CRITICAL_AND_LOG:
+        critical = true;
+        logger.atWarning().withCause(e).log("Found critical error in queue visitor");
+        break;
+      case CRITICAL:
+        critical = true;
+        break;
+      default:
+        break;
+    }
+    if (unhandled == null
+        || errorClassification.compareTo(errorClassifier.classify(unhandled)) > 0) {
+      // Save the most severe error.
+      unhandled = e;
+      exceptionLatch.countDown();
+    }
+    if (markToStopJobs) {
+      synchronized (zeroRemainingTasks) {
+        if (critical && !jobsMustBeStopped) {
+          jobsMustBeStopped = true;
+          // This introduces a benign race, but it's the best we can do. When we have multiple
+          // errors of the same severity that is at least CRITICAL, we'll end up saving (above) and
+          // propagating (in 'awaitQuiescence') the most severe one we see, but the set of errors we
+          // see is non-deterministic and is at the mercy of how quickly the calling thread of
+          // 'awaitQuiescence' can do its thing after this 'notify' call.
+          zeroRemainingTasks.notify();
+        }
+      }
+    }
   }
 
   private void recordError(Throwable e) {
@@ -447,12 +351,7 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
         return;
       }
       catastrophe = e;
-      synchronized (this) {
-        if (unhandled == null) { // save only the first one.
-          unhandled = e;
-          exceptionLatch.countDown();
-        }
-      }
+      maybeSaveUnhandledThrowable(e, /*markToStopJobs=*/ false);
     } finally {
       decrementRemainingTasks();
     }
@@ -460,20 +359,20 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
 
   /**
    * A wrapped {@link Runnable} that:
+   *
    * <ul>
    *   <li>Sets {@link #run} to {@code true} when {@code WrappedRunnable} is run,
    *   <li>Records the thread evaluating {@code r} in {@link #jobs} while {@code r} is evaluated,
-   *   <li>Prevents {@param runnable} from being invoked if {@link #blockNewActions} returns
-   *   {@code true},
+   *   <li>Prevents {@link #originalRunnable} from being invoked if {@link #blockNewActions} returns
+   *       {@code true},
    *   <li>Synchronously invokes {@code runnable.run()},
-   *   <li>Catches any {@link Throwable} thrown by {@code runnable.run()}, and if it is the first
-   *   {@link Throwable} seen by this {@link AbstractQueueVisitor}, assigns it to {@link
-   *   #unhandled}, and calls {@link #markToStopAllJobsIfNeeded} to set {@link #jobsMustBeStopped}
-   *   if necessary,
+   *   <li>Catches any {@link Throwable} thrown by {@code runnable.run()}, and if it is the most
+   *       severe {@link Throwable} seen by this {@link AbstractQueueVisitor}, assigns it to {@link
+   *       #unhandled}, and sets {@link #jobsMustBeStopped} if necessary,
    *   <li>And, lastly, calls {@link #decrementRemainingTasks}.
    * </ul>
    */
-  private final class WrappedRunnable implements Runnable {
+  protected final class WrappedRunnable implements Runnable, Comparable<WrappedRunnable> {
     private final Runnable originalRunnable;
     private volatile boolean ran;
 
@@ -498,13 +397,7 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
         }
         originalRunnable.run();
       } catch (Throwable e) {
-        synchronized (AbstractQueueVisitor.this) {
-          if (unhandled == null) { // save only the first one.
-            unhandled = e;
-            exceptionLatch.countDown();
-          }
-          markToStopAllJobsIfNeeded(e);
-        }
+        maybeSaveUnhandledThrowable(e, /*markToStopJobs=*/ true);
       } finally {
         try {
           if (thread != null && addedJob) {
@@ -515,20 +408,27 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
         }
       }
     }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public int compareTo(WrappedRunnable o) {
+      // This should only be called when the concrete class is submitting comparable runnables.
+      return ((Comparable) originalRunnable).compareTo(o.originalRunnable);
+    }
   }
 
   private void addJob(Thread thread) {
-    jobs.incrementAndGet(thread);
+    jobs.computeIfAbsent(thread, k -> new AtomicLong()).incrementAndGet();
   }
 
   private void removeJob(Thread thread) {
-    if (jobs.decrementAndGet(thread) == 0) {
+    if (jobs.get(thread).decrementAndGet() == 0) {
       jobs.remove(thread);
     }
   }
 
   /** Set an internal flag to show that an interrupt was detected. */
-  private void setInterrupted() {
+  protected final void setInterrupted() {
     threadInterrupted = true;
   }
 
@@ -547,15 +447,17 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
 
   /** If this returns true, don't enqueue new actions. */
   protected boolean blockNewActions() {
-    return (failFastOnInterrupt && isInterrupted()) || (unhandled != null && failFastOnException);
+    return isInterrupted() || (unhandled != null && failFastOnException);
   }
 
   @VisibleForTesting
+  @Override
   public final CountDownLatch getExceptionLatchForTestingOnly() {
     return exceptionLatch;
   }
 
   @VisibleForTesting
+  @Override
   public final CountDownLatch getInterruptionLatchForTestingOnly() {
     return interruptedLatch;
   }
@@ -570,38 +472,66 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
    * Get number of jobs remaining. Note that this can increase in value if running tasks submit
    * further jobs.
    */
-  @VisibleForTesting
-  protected final long getTaskCount() {
+  public final long getTaskCount() {
     return remainingTasks.get();
   }
 
-  /**
-   * Waits for the task queue to drain, then shuts down the {@link ExecutorService} and
-   * waits for it to terminate.  Throws (the same) unchecked exception if any
-   * worker thread failed unexpectedly.
-   */
-  private void awaitTermination(boolean interruptWorkers) throws InterruptedException {
-    Preconditions.checkState(failFastOnInterrupt || !interruptWorkers);
-    Throwables.propagateIfPossible(catastrophe);
+  @Override
+  public void dependOnFuture(ListenableFuture<?> future) throws InterruptedException {
+    outstandingFuturesLock.readLock().lock();
     try {
-      synchronized (zeroRemainingTasks) {
-        while (remainingTasks.get() != 0 && !jobsMustBeStopped) {
-          zeroRemainingTasks.wait();
-        }
+      if (threadInterrupted) {
+        future.cancel(/*mayInterruptIfRunning=*/ true);
+        throw new InterruptedException();
       }
-    } catch (InterruptedException e) {
-      // Mark the visitor, so that it's known to be interrupted, and
-      // then break out of here, stop the worker threads and return ASAP,
-      // sending the interruption to the parent thread.
-      setInterrupted();
+      remainingTasks.incrementAndGet();
+      outstandingFutures.add(future);
+      future.addListener(() -> markFutureDone(future), MoreExecutors.directExecutor());
+    } finally {
+      outstandingFuturesLock.readLock().unlock();
     }
+  }
 
+  private void markFutureDone(ListenableFuture<?> future) {
+    decrementRemainingTasks();
+    outstandingFuturesLock.readLock().lock();
+    try {
+      if (threadInterrupted) {
+        // Since futures get worked on asynchronously, there is an inherent race between this method
+        // being called and the future getting canceled. If we get here, the other thread either
+        // already attempted to cancel the future, or is just about to do so. In either case, no
+        // need to throw or do anything with outstandingFutures here.
+        return;
+      }
+      outstandingFutures.remove(future);
+    } finally {
+      outstandingFuturesLock.readLock().unlock();
+    }
+  }
+
+  /**
+   * Whether all running and pending jobs will be stopped or cancelled. Also newly submitted tasks
+   * will be rejected if this is true.
+   *
+   * <p>This function returns the CURRENT state of whether jobs should be stopped. If the value is
+   * false right now, it may be changed to true by another thread later.
+   */
+  protected final boolean mustJobsBeStopped() {
+    return jobsMustBeStopped;
+  }
+
+  /**
+   * Waits for the task queue to drain. Then if {@code ownExecutorService} is true, shuts down the
+   * {@link ExecutorService} and waits for it to terminate. Throws (the same) unchecked exception if
+   * any worker thread failed unexpectedly.
+   */
+  protected final void awaitTermination(boolean interruptWorkers) throws InterruptedException {
     reallyAwaitTermination(interruptWorkers);
 
     if (isInterrupted()) {
       // Set interrupted bit on current thread so that callers can see that it was interrupted. Note
       // that if the thread was interrupted while awaiting termination, we might not hit this
-      // codepath, but then the current thread's interrupt bit is already set, so we are fine.
+      // code path, but then the current thread's interrupt bit is already set, so we are fine.
       Thread.currentThread().interrupt();
     }
     // Throw the first unhandled (worker thread) exception in the main thread. We throw an unchecked
@@ -621,6 +551,13 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
     if (interruptWorkers && !jobs.isEmpty()) {
       interruptInFlightTasks();
     }
+    if (interruptWorkers) {
+      // If the computation is done, this does nothing because there are no outstanding futures. Do
+      // not predicate on outstandingFutures.isEmpty() here: in the case of an interrupt, there may
+      // still be threads concurrently adding futures to the set, and we need to make sure that
+      // those are canceled correctly.
+      cancelAllFutures();
+    }
 
     if (isInterrupted()) {
       interruptedLatch.countDown();
@@ -639,7 +576,7 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
 
     if (ownExecutorService) {
       executorService.shutdown();
-      for (;;) {
+      for (; ; ) {
         try {
           Throwables.propagateIfPossible(catastrophe);
           executorService.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
@@ -653,39 +590,23 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
 
   private void interruptInFlightTasks() {
     Thread thisThread = Thread.currentThread();
-    for (Thread thread : jobs.asMap().keySet()) {
+    for (Thread thread : jobs.keySet()) {
       if (thisThread != thread) {
         thread.interrupt();
       }
     }
   }
 
-  /**
-   * Classifies a {@link Throwable} {@param e} thrown by a job.
-   *
-   * <p>If it is classified as critical, then this sets the {@link #jobsMustBeStopped} flag to
-   * {@code true} which signals {@link #awaitTermination(boolean)} to stop all jobs.
-   *
-   * <p>Also logs details about {@param e} if it is classified as something that must be logged.
-   */
-  private void markToStopAllJobsIfNeeded(Throwable e) {
-    boolean critical = false;
-    switch (errorClassifier.classify(e)) {
-        case CRITICAL_AND_LOG:
-          critical = true;
-          LOG.log(Level.WARNING, "Found critical error in queue visitor", e);
-          break;
-        case CRITICAL:
-          critical = true;
-          break;
-        default:
-          break;
-    }
-    synchronized (zeroRemainingTasks) {
-      if (critical && !jobsMustBeStopped) {
-        jobsMustBeStopped = true;
-        zeroRemainingTasks.notify();
+  private void cancelAllFutures() {
+    // Nobody else can modify outstandingFutures while this thread is holding the write lock.
+    outstandingFuturesLock.writeLock().lock();
+    try {
+      for (ListenableFuture<?> future : outstandingFutures) {
+        future.cancel(/*mayInterruptIfRunning=*/ true);
       }
+      outstandingFutures.clear();
+    } finally {
+      outstandingFuturesLock.writeLock().unlock();
     }
   }
 }

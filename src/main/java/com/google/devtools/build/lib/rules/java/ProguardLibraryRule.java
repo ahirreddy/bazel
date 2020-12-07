@@ -14,30 +14,26 @@
 
 package com.google.devtools.build.lib.rules.java;
 
-import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 
-/**
- * A base rule for libraries which can provide proguard specs.
- */
+/** A base rule for libraries which can provide proguard specs. */
 public final class ProguardLibraryRule implements RuleDefinition {
 
   @Override
-  public RuleClass build(Builder builder, final RuleDefinitionEnvironment environment) {
+  public RuleClass build(RuleClass.Builder builder, final RuleDefinitionEnvironment environment) {
     return builder
         /* <!-- #BLAZE_RULE($proguard_library).ATTRIBUTE(proguard_specs) -->
         Files to be used as Proguard specification.
-        ${SYNOPSIS}
         These will describe the set of specifications to be used by Proguard. If specified,
         they will be added to any <code>android_binary</code> target depending on this library.
 
@@ -46,15 +42,19 @@ public final class ProguardLibraryRule implements RuleDefinition {
         <code>android_binary</code>'s proguard_specs, to ensure non-tautological merges.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr("proguard_specs", LABEL_LIST).legacyAllowAnyFileType())
-        .add(attr("$proguard_whitelister", LABEL).cfg(HOST).exec().value(
-            new Attribute.ComputedDefault() {
-              @Override
-              public Object getDefault(AttributeMap rule) {
-                return rule.isAttributeValueExplicitlySpecified("proguard_specs")
-                    ? environment.getLabel("//tools/jdk:proguard_whitelister")
-                    : null;
-              }
-            }))
+        .add(
+            attr("$proguard_whitelister", LABEL)
+                .cfg(HostTransition.createFactory())
+                .exec()
+                .value(
+                    new Attribute.ComputedDefault() {
+                      @Override
+                      public Object getDefault(AttributeMap rule) {
+                        return rule.isAttributeValueExplicitlySpecified("proguard_specs")
+                            ? environment.getToolsLabel("//tools/jdk:proguard_whitelister")
+                            : null;
+                      }
+                    }))
         .build();
   }
 

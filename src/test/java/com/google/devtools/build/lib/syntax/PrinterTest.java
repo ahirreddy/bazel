@@ -15,24 +15,18 @@
 package com.google.devtools.build.lib.syntax;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.cmdline.Label;
-
+import java.util.IllegalFormatException;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.IllegalFormatException;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
 
 /**
  *  Test properties of the evaluator's datatypes and utility functions
@@ -41,97 +35,85 @@ import java.util.Map;
 @RunWith(JUnit4.class)
 public class PrinterTest {
 
-  private static List<?> makeList(Object... args) {
-    return EvalUtils.makeSequence(Arrays.<Object>asList(args), false);
-  }
-
-  private static List<?> makeTuple(Object... args) {
-    return EvalUtils.makeSequence(Arrays.<Object>asList(args), true);
-  }
-
   @Test
   public void testPrinter() throws Exception {
     // Note that prettyPrintValue and printValue only differ on behaviour of
     // labels and strings at toplevel.
-    assertEquals("foo\nbar", Printer.str("foo\nbar"));
-    assertEquals("\"foo\\nbar\"", Printer.repr("foo\nbar"));
-    assertEquals("'", Printer.str("'"));
-    assertEquals("\"'\"", Printer.repr("'"));
-    assertEquals("\"", Printer.str("\""));
-    assertEquals("\"\\\"\"", Printer.repr("\""));
-    assertEquals("3", Printer.str(3));
-    assertEquals("3", Printer.repr(3));
-    assertEquals("None", Printer.repr(Runtime.NONE));
+    assertThat(Starlark.str(createObjWithStr())).isEqualTo("<str marker>");
+    assertThat(Starlark.repr(createObjWithStr())).isEqualTo("<repr marker>");
 
-    assertEquals("//x:x", Printer.str(
-        Label.parseAbsolute("//x")));
-    assertEquals("\"//x:x\"", Printer.repr(
-        Label.parseAbsolute("//x")));
+    assertThat(Starlark.str("foo\nbar")).isEqualTo("foo\nbar");
+    assertThat(Starlark.repr("foo\nbar")).isEqualTo("\"foo\\nbar\"");
+    assertThat(Starlark.str("'")).isEqualTo("'");
+    assertThat(Starlark.repr("'")).isEqualTo("\"'\"");
+    assertThat(Starlark.str("\"")).isEqualTo("\"");
+    assertThat(Starlark.repr("\"")).isEqualTo("\"\\\"\"");
+    assertThat(Starlark.str(3)).isEqualTo("3");
+    assertThat(Starlark.repr(3)).isEqualTo("3");
+    assertThat(Starlark.repr(Starlark.NONE)).isEqualTo("None");
 
-    List<?> list = makeList("foo", "bar");
-    List<?> tuple = makeTuple("foo", "bar");
+    assertThat(Starlark.str(Label.parseAbsolute("//x", ImmutableMap.of()))).isEqualTo("//x:x");
+    assertThat(Starlark.repr(Label.parseAbsolute("//x", ImmutableMap.of())))
+        .isEqualTo("Label(\"//x:x\")");
 
-    assertEquals("(1, [\"foo\", \"bar\"], 3)",
-                 Printer.str(makeTuple(1, list, 3)));
-    assertEquals("(1, [\"foo\", \"bar\"], 3)",
-                 Printer.repr(makeTuple(1, list, 3)));
-    assertEquals("[1, (\"foo\", \"bar\"), 3]",
-                 Printer.str(makeList(1, tuple, 3)));
-    assertEquals("[1, (\"foo\", \"bar\"), 3]",
-                 Printer.repr(makeList(1, tuple, 3)));
+    List<?> list = StarlarkList.of(null, "foo", "bar");
+    List<?> tuple = Tuple.of("foo", "bar");
 
-    Map<Object, Object> dict = ImmutableMap.<Object, Object>of(
-        1, tuple,
-        2, list,
-        "foo", makeList());
-    assertEquals("{1: (\"foo\", \"bar\"), 2: [\"foo\", \"bar\"], \"foo\": []}",
-                Printer.str(dict));
-    assertEquals("{1: (\"foo\", \"bar\"), 2: [\"foo\", \"bar\"], \"foo\": []}",
-                Printer.repr(dict));
+    assertThat(Starlark.str(Tuple.of(1, list, 3))).isEqualTo("(1, [\"foo\", \"bar\"], 3)");
+    assertThat(Starlark.repr(Tuple.of(1, list, 3))).isEqualTo("(1, [\"foo\", \"bar\"], 3)");
+    assertThat(Starlark.str(StarlarkList.of(null, 1, tuple, 3)))
+        .isEqualTo("[1, (\"foo\", \"bar\"), 3]");
+    assertThat(Starlark.repr(StarlarkList.of(null, 1, tuple, 3)))
+        .isEqualTo("[1, (\"foo\", \"bar\"), 3]");
+
+    Map<Object, Object> dict =
+        ImmutableMap.<Object, Object>of(1, tuple, 2, list, "foo", StarlarkList.of(null));
+    assertThat(Starlark.str(dict))
+        .isEqualTo("{1: (\"foo\", \"bar\"), 2: [\"foo\", \"bar\"], \"foo\": []}");
+    assertThat(Starlark.repr(dict))
+        .isEqualTo("{1: (\"foo\", \"bar\"), 2: [\"foo\", \"bar\"], \"foo\": []}");
   }
 
   private void checkFormatPositionalFails(String errorMessage, String format, Object... arguments) {
-    try {
-      Printer.format(format, arguments);
-      fail();
-    } catch (IllegalFormatException e) {
-      assertThat(e).hasMessage(errorMessage);
-    }
+    IllegalFormatException e =
+        assertThrows(IllegalFormatException.class, () -> Starlark.format(format, arguments));
+    assertThat(e).hasMessageThat().isEqualTo(errorMessage);
   }
 
   @Test
-  public void testSortedOutputOfUnsortedMap() throws Exception {
-    Map<Integer, Integer> map = new HashMap<>();
-    int[] data = {5, 7, 3};
-
-    for (int current : data) {
-      map.put(current, current);
-    }
-    assertThat(Printer.str(map)).isEqualTo("{3: 3, 5: 5, 7: 7}");
+  public void testOutputOrderOfMap() throws Exception {
+    Map<Object, Object> map = new LinkedHashMap<>();
+    map.put(5, 5);
+    map.put(3, 3);
+    map.put("foo", 42);
+    map.put(7, "bar");
+    assertThat(Starlark.str(map)).isEqualTo("{5: 5, 3: 3, \"foo\": 42, 7: \"bar\"}");
   }
 
   @Test
   public void testFormatPositional() throws Exception {
-    assertEquals("foo 3", Printer.formatToString("%s %d", makeTuple("foo", 3)));
-    assertEquals("foo 3", Printer.format("%s %d", "foo", 3));
+    assertThat(Starlark.formatWithList("%s %d", Tuple.of("foo", 3))).isEqualTo("foo 3");
+    assertThat(Starlark.format("%s %d", "foo", 3)).isEqualTo("foo 3");
+
+    assertThat(Starlark.format("%s %s %s", 1, null, 3)).isEqualTo("1 null 3");
 
     // Note: formatToString doesn't perform scalar x -> (x) conversion;
     // The %-operator is responsible for that.
-    assertThat(Printer.formatToString("", makeTuple())).isEmpty();
-    assertEquals("foo", Printer.format("%s", "foo"));
-    assertEquals("3.14159", Printer.format("%s", 3.14159));
+    assertThat(Starlark.formatWithList("", Tuple.of())).isEmpty();
+    assertThat(Starlark.format("%s", "foo")).isEqualTo("foo");
+    assertThat(Starlark.format("%s", 3.14159)).isEqualTo("3.14159");
     checkFormatPositionalFails("not all arguments converted during string formatting",
         "%s", 1, 2, 3);
-    assertEquals("%foo", Printer.format("%%%s", "foo"));
+    assertThat(Starlark.format("%%%s", "foo")).isEqualTo("%foo");
     checkFormatPositionalFails("not all arguments converted during string formatting",
         "%%s", "foo");
     checkFormatPositionalFails("unsupported format character \" \" at index 1 in \"% %s\"",
         "% %s", "foo");
-    assertEquals("[1, 2, 3]", Printer.format("%s", makeList(1, 2, 3)));
-    assertEquals("(1, 2, 3)", Printer.format("%s", makeTuple(1, 2, 3)));
-    assertEquals("[]", Printer.format("%s", makeList()));
-    assertEquals("()", Printer.format("%s", makeTuple()));
-    assertEquals("% 1 \"2\" 3", Printer.format("%% %d %r %s", 1, "2", "3"));
+    assertThat(Starlark.format("%s", StarlarkList.of(null, 1, 2, 3))).isEqualTo("[1, 2, 3]");
+    assertThat(Starlark.format("%s", Tuple.of(1, 2, 3))).isEqualTo("(1, 2, 3)");
+    assertThat(Starlark.format("%s", StarlarkList.of(null))).isEqualTo("[]");
+    assertThat(Starlark.format("%s", Tuple.of())).isEqualTo("()");
+    assertThat(Starlark.format("%% %d %r %s", 1, "2", "3")).isEqualTo("% 1 \"2\" 3");
 
     checkFormatPositionalFails(
         "invalid argument \"1\" for format pattern %d",
@@ -145,125 +127,72 @@ public class PrinterTest {
   }
 
   @Test
-  public void testSingleQuotes() throws Exception {
-    assertThat(Printer.str("test", '\'')).isEqualTo("test");
-    assertThat(Printer.repr("test", '\'')).isEqualTo("'test'");
+  public void testPrettyPrinter() throws Exception {
+    assertThat(Printer.getPrettyPrinter().repr(ImmutableList.of(1, 2, 3)).toString())
+        .isEqualTo(
+            "[\n" +
+            "    1,\n" +
+            "    2,\n" +
+            "    3\n" +
+            "]");
+    assertThat(Printer.getPrettyPrinter().repr(ImmutableList.<String>of()).toString())
+        .isEqualTo("[]");
+    assertThat(Printer.getPrettyPrinter().repr(ImmutableList.of("foo")).toString())
+        .isEqualTo("[\n    \"foo\"\n]");
+    assertThat(
+            Printer.getPrettyPrinter()
+                .repr(ImmutableMap.<Object, Object>of("foo", "bar", "baz", ImmutableList.of(1, 2)))
+                .toString())
+        .isEqualTo(
+            "{\n" +
+            "    \"foo\": \"bar\",\n" +
+            "    \"baz\": [\n" +
+            "        1,\n" +
+            "        2\n" +
+            "    ]\n" +
+            "}");
+    assertThat(
+            Printer.getPrettyPrinter()
+                .repr(ImmutableMap.<Object, Object>of(
+                        "foo", "bar", "empty", ImmutableList.of(), "a", "b"))
+                .toString())
+        .isEqualTo(
+            "{\n" +
+            "    \"foo\": \"bar\",\n" +
+            "    \"empty\": [],\n" +
+            "    \"a\": \"b\"\n" +
+            "}");
+  }
 
-    assertEquals("'\\''", Printer.repr("'", '\''));
-    assertEquals("\"", Printer.str("\"", '\''));
-    assertEquals("'\"'", Printer.repr("\"", '\''));
-
-    List<?> list = makeList("foo", "bar");
-    List<?> tuple = makeTuple("foo", "bar");
-
-    assertThat(Printer.str(makeTuple(1, list, 3), '\'')).isEqualTo("(1, ['foo', 'bar'], 3)");
-    assertThat(Printer.repr(makeTuple(1, list, 3), '\'')).isEqualTo("(1, ['foo', 'bar'], 3)");
-    assertThat(Printer.str(makeList(1, tuple, 3), '\'')).isEqualTo("[1, ('foo', 'bar'), 3]");
-    assertThat(Printer.repr(makeList(1, tuple, 3), '\'')).isEqualTo("[1, ('foo', 'bar'), 3]");
-
-    Map<Object, Object> dict =
-        ImmutableMap.<Object, Object>of(1, tuple, 2, list, "foo", makeList());
-
-    assertThat(Printer.str(dict, '\''))
-        .isEqualTo("{1: ('foo', 'bar'), 2: ['foo', 'bar'], 'foo': []}");
-    assertThat(Printer.repr(dict, '\''))
-        .isEqualTo("{1: ('foo', 'bar'), 2: ['foo', 'bar'], 'foo': []}");
+  private Printer makeSimplifiedFormatPrinter() {
+    return new Printer.BasePrinter(new StringBuilder(), /*simplifiedFormatStrings=*/ true);
   }
 
   @Test
-  public void testListLimitStringLength() throws Exception {
-    int lengthDivisibleByTwo = Printer.SUGGESTED_CRITICAL_LIST_ELEMENTS_STRING_LENGTH;
-    if (lengthDivisibleByTwo % 2 == 1) {
-      ++lengthDivisibleByTwo;
-    }
-    String limit = Strings.repeat("x", lengthDivisibleByTwo);
-    String half = Strings.repeat("x", lengthDivisibleByTwo / 2);
-
-    List<String> list = Arrays.asList(limit + limit);
-
-    // String is way too long -> shorten.
-    assertThat(printListWithLimit(list)).isEqualTo("[\"" + limit + "...\"]");
-
-    LinkedList<List<String>> nestedList = new LinkedList<>();
-    nestedList.add(list);
-
-    // Same as above, but with one additional level of indirection.
-    assertThat(printListWithLimit(nestedList)).isEqualTo("[[\"" + limit + "...\"]]");
-
-    // The inner list alone would meet the limit, but because of the first element, it has to be
-    // shortened.
-    assertThat(printListWithLimit(Arrays.asList(half, Arrays.asList(limit))))
-        .isEqualTo("[\"" + half + "\", [\"" + half + "...\"]]");
-
-    // String is too long, but the ellipsis make it even longer.
-    assertThat(printListWithLimit(Arrays.asList(limit + "x"))).isEqualTo("[\"" + limit + "...\"]");
-
-    // We hit the limit exactly -> everything is printed.
-    assertThat(printListWithLimit(Arrays.asList(limit))).isEqualTo("[\"" + limit + "\"]");
-
-    // Exact hit, but with two arguments -> everything is printed.
-    assertThat(printListWithLimit(Arrays.asList(half, half)))
-        .isEqualTo("[\"" + half + "\", \"" + half + "\"]");
-
-    // First argument hits the limit -> remaining argument is shortened.
-    assertThat(printListWithLimit(Arrays.asList(limit, limit)))
-        .isEqualTo("[\"" + limit + "\", \"...\"]");
-
-    String limitMinusOne = limit.substring(0, limit.length() - 1);
-
-    // First arguments is one below the limit -> print first character of remaining argument.
-    assertThat(printListWithLimit(Arrays.asList(limitMinusOne, limit)))
-        .isEqualTo("[\"" + limitMinusOne + "\", \"x...\"]");
-
-    // First argument hits the limit -> we skip  the remaining two arguments.
-    assertThat(printListWithLimit(Arrays.asList(limit, limit, limit)))
-        .isEqualTo("[\"" + limit + "\", <2 more arguments>]");
+  public void testSimplifiedDisallowsPlaceholdersBesidesPercentS() {
+    assertThat(makeSimplifiedFormatPrinter().format("Allowed: %%").toString())
+        .isEqualTo("Allowed: %");
+    assertThat(makeSimplifiedFormatPrinter().format("Allowed: %s", "abc").toString())
+        .isEqualTo("Allowed: abc");
+    assertThrows(
+        IllegalFormatException.class,
+        () -> makeSimplifiedFormatPrinter().format("Disallowed: %r", "abc"));
+    assertThrows(
+        IllegalFormatException.class,
+        () -> makeSimplifiedFormatPrinter().format("Disallowed: %d", 5));
   }
 
-  @Test
-  public void testListLimitTooManyArgs() throws Exception {
-    StringBuilder builder = new StringBuilder();
-    List<Integer> maxLength = new LinkedList<>();
-
-    int next;
-    for (next = 0; next < Printer.SUGGESTED_CRITICAL_LIST_ELEMENTS_COUNT; ++next) {
-      maxLength.add(next);
-      if (next > 0) {
-        builder.append(", ");
+  private StarlarkValue createObjWithStr() {
+    return new StarlarkValue() {
+      @Override
+      public void repr(Printer printer) {
+        printer.append("<repr marker>");
       }
-      builder.append(next);
-    }
 
-    // There is one too many, but we print every argument nonetheless.
-    maxLength.add(next);
-    assertThat(printListWithLimit(maxLength)).isEqualTo("[" + builder + ", " + next + "]");
-
-    // There are two too many, hence we don't print them.
-    ++next;
-    maxLength.add(next);
-    assertThat(printListWithLimit(maxLength)).isEqualTo("[" + builder + ", <2 more arguments>]");
-  }
-
-  @Test
-  public void testPrintListDefaultNoLimit() throws Exception {
-    List<Integer> list = new LinkedList<>();
-    // Make sure that the resulting string is longer than the suggestion. This should also lead to
-    // way more items than suggested.
-    for (int i = 0; i < Printer.SUGGESTED_CRITICAL_LIST_ELEMENTS_STRING_LENGTH * 2; ++i) {
-      list.add(i);
-    }
-    assertThat(Printer.str(list)).isEqualTo(String.format("[%s]", Joiner.on(", ").join(list)));
-  }
-
-  private String printListWithLimit(List<?> list) {
-    return printList(list, Printer.SUGGESTED_CRITICAL_LIST_ELEMENTS_COUNT,
-        Printer.SUGGESTED_CRITICAL_LIST_ELEMENTS_STRING_LENGTH);
-  }
-
-  private String printList(List<?> list, int criticalElementsCount, int criticalStringLength) {
-    StringBuilder builder = new StringBuilder();
-    Printer.printList(
-        builder, list, "[", ", ", "]", "", '"', criticalElementsCount, criticalStringLength);
-    return builder.toString();
+      @Override
+      public void str(Printer printer) {
+        printer.append("<str marker>");
+      }
+    };
   }
 }

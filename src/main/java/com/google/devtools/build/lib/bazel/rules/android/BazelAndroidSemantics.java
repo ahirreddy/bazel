@@ -14,21 +14,21 @@
 package com.google.devtools.build.lib.bazel.rules.android;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.rules.android.AndroidBinary;
 import com.google.devtools.build.lib.rules.android.AndroidCommon;
-import com.google.devtools.build.lib.rules.android.AndroidIdeInfoProvider;
+import com.google.devtools.build.lib.rules.android.AndroidConfiguration;
+import com.google.devtools.build.lib.rules.android.AndroidDataContext;
 import com.google.devtools.build.lib.rules.android.AndroidSemantics;
-import com.google.devtools.build.lib.rules.android.ApplicationManifest;
-import com.google.devtools.build.lib.rules.android.ResourceApk;
-import com.google.devtools.build.lib.rules.java.JavaCommon;
+import com.google.devtools.build.lib.rules.android.ProguardHelper.ProguardOutput;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArtifacts;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
-import com.google.devtools.build.lib.rules.java.JavaTargetAttributes.Builder;
+import com.google.devtools.build.lib.rules.java.JavaTargetAttributes;
 
 /**
  * Implementation of Bazel-specific behavior in Android rules.
@@ -40,68 +40,75 @@ public class BazelAndroidSemantics implements AndroidSemantics {
   }
 
   @Override
-  public void addNonLocalResources(
-      RuleContext ruleContext,
-      ResourceApk resourceApk,
-      AndroidIdeInfoProvider.Builder ideInfoProviderBuilder) {}
-
-  @Override
-  public void addTransitiveInfoProviders(
-      RuleConfiguredTargetBuilder builder,
-      RuleContext ruleContext,
-      JavaCommon javaCommon,
-      AndroidCommon androidCommon,
-      Artifact jarWithAllClasses) {}
-
-  @Override
-  public ApplicationManifest getManifestForRule(RuleContext ruleContext) {
-    ApplicationManifest result = ApplicationManifest.fromRule(ruleContext);
-    if (!result.getManifest().getExecPath().getBaseName().equals("AndroidManifest.xml")) {
-      ruleContext.attributeError("manifest", "The manifest must be called 'AndroidManifest.xml'");
-      return null;
-    }
-
-    return result;
-  }
-
-  @Override
   public String getNativeDepsFileName() {
     return "nativedeps";
   }
 
   @Override
-  public ImmutableList<String> getJavacArguments() {
-    return ImmutableList.of(
-        "-source", "7",
-        "-target", "7");
+  public ImmutableList<String> getCompatibleJavacOptions(RuleContext ruleContext) {
+    ImmutableList.Builder<String> javacArgs = new ImmutableList.Builder<>();
+    if (!ruleContext.getFragment(AndroidConfiguration.class).desugarJava8()) {
+      javacArgs.add("-source", "7", "-target", "7");
+    }
+    return javacArgs.build();
   }
 
   @Override
-  public ImmutableList<String> getDxJvmArguments() {
+  public void addMainDexListActionArguments(
+      RuleContext ruleContext,
+      SpawnAction.Builder builder,
+      CustomCommandLine.Builder commandLine,
+      Artifact proguardMap) {}
+
+  @Override
+  public ImmutableList<Artifact> getProguardSpecsForManifest(
+      AndroidDataContext context, Artifact manifest) {
     return ImmutableList.of();
   }
 
   @Override
-  public void addSigningArguments(
-      RuleContext ruleContext, boolean sign, SpawnAction.Builder actionBuilder) {
-    // ApkBuilder reads the signing key from the debug.keystore file, thus, we are at its mercy
-    // for hermeticity. It turns out, it's not easy to coax ApkBuilder to read this key from a
-    // file specified on the command line. Currently, it checks $ANDROID_SDK_HOME, $USER_HOME then
-    // $HOME which means that we could make it hermetic by setting $ANDROID_SDK_HOME for the
-    // ApkBuilder invocation.
-    if (sign) {
-      Artifact debugKeyStore = ruleContext.getPrerequisiteArtifact("$debug_keystore", Mode.HOST);
-      actionBuilder
-          .addInput(debugKeyStore)
-          .setEnvironment(ImmutableMap.of("KEYSTORE", debugKeyStore.getExecPath().getPathString()));
-    } else {
-      actionBuilder.addArgument("-u");
+  public void addCoverageSupport(
+      RuleContext ruleContext,
+      AndroidCommon common,
+      JavaSemantics javaSemantics,
+      boolean forAndroidTest,
+      JavaTargetAttributes.Builder attributes,
+      JavaCompilationArtifacts.Builder artifactsBuilder) {}
+
+  @Override
+  public ImmutableList<String> getAttributesWithJavaRuntimeDeps(RuleContext ruleContext) {
+    switch (ruleContext.getRule().getRuleClass()) {
+      case "android_binary":
+        return ImmutableList.of("deps");
+      default:
+        throw new UnsupportedOperationException("Only supported for top-level binaries");
     }
   }
 
   @Override
-  public void addCoverageSupport(RuleContext ruleContext, AndroidCommon common,
-      JavaSemantics javaSemantics, boolean forAndroidTest, Builder attributes,
-      JavaCompilationArtifacts.Builder artifactsBuilder) {
+  public Artifact getProguardOutputMap(RuleContext ruleContext) throws InterruptedException {
+    return ruleContext.getImplicitOutputArtifact(JavaSemantics.JAVA_BINARY_PROGUARD_MAP);
+  }
+
+  /** Bazel does not currently support any dex postprocessing. */
+  @Override
+  public AndroidBinary.DexPostprocessingOutput postprocessClassesDexZip(
+      RuleContext ruleContext,
+      NestedSetBuilder<Artifact> filesBuilder,
+      Artifact classesDexZip,
+      ProguardOutput proguardOutput)
+      throws InterruptedException {
+    return AndroidBinary.DexPostprocessingOutput.create(classesDexZip, proguardOutput.getMapping());
+  }
+
+  @Override
+  public void registerMigrationRuleError(RuleContext ruleContext) throws RuleErrorException {
+    ruleContext.attributeError(
+        "tags",
+        "The native Android rules are deprecated. Please use the Starlark Android rules by adding "
+            + "the following load statement to the BUILD file: "
+            + "load(\"@build_bazel_rules_android//android:rules.bzl\", \""
+            + ruleContext.getRule().getRuleClass()
+            + "\"). See http://github.com/bazelbuild/rules_android.");
   }
 }

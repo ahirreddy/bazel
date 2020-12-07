@@ -1,15 +1,24 @@
+#if (!$singlePage)
+---
+layout: documentation
+title: Common Definitions
+---
+#end
+#if (!$singlePage)
 #parse("com/google/devtools/build/docgen/templates/be/header.vm")
+#end
 
-<h1>Common definitions</h1>
+<h1 id="common-definitions">Common definitions</h1>
 
 <p>This section defines various terms and concepts that are common to
 many functions or build rules below.
 </p>
 
+#if (!$singlePage)
 <div class="toc">
   <h1>Contents</h1>
   <ul>
-    <li><a href="#sh-tokenization">Borne shell tokenization</a></li>
+    <li><a href="#sh-tokenization">Bourne shell tokenization</a></li>
     <li><a href="#label-expansion">Label Expansion</a></li>
     <li><a href="#common-attributes">Attributes common to all build rules</a></li>
     <li><a href="#common-attributes-tests">Attributes common to all test rules (*_test)</a></li>
@@ -18,6 +27,7 @@ many functions or build rules below.
     <li><a href="#implicit-outputs">Implicit output targets</a></li>
   </ul>
 </div>
+#end
 <h2 id='sh-tokenization'>Bourne shell tokenization</h2>
 <p>
   Certain string attributes of some rules are split into multiple
@@ -105,16 +115,74 @@ labels attribute.
 <h2 id="configurable-attributes">Configurable attributes</h2>
 
 <p>
-  Most rule attributes can be "configured" so that their values can
-  depend on the command-line flags passed to Bazel. This can be used,
-  for example, to declare platform-dependent <code>srcs</code> or custom
-  compiler flags depending on the
-  <a href="../bazel-user-manual.html#flag--compilation_mode">compilation
-  mode</a>. This feature is very close in spirit to
-  <a href="c-cpp.html#cc_library.abi_deps">abi_deps</a>, except that it's not
-  limited to <code>cc_*</code> rules and the <code>deps</code> attribute.
+  Most attributes are "configurable", meaning that their values may change when
+  the target is built in different ways. Specifically, configurable attributes
+  may vary based on the flags passed to the Bazel command line, or what
+  downstream dependency is requesting the target. This can be used, for
+  instance, to customize the target for multiple platforms or compilation modes.
 </p>
 
+<p>
+  The following example declares different sources for different target
+  architectures. Running <code>bazel build :multiplatform_lib --cpu x86</code>
+  will build the target using <code>x86_impl.cc</code>, while substituting
+  <code>--cpu arm</code> will instead cause it to use <code>arm_impl.cc</code>.
+</p>
+
+<pre class="code">
+cc_library(
+    name = "multiplatform_lib",
+    srcs = select({
+        ":x86_mode": ["x86_impl.cc"],
+        ":arm_mode": ["arm_impl.cc"]
+    })
+)
+config_setting(
+    name = "x86_mode",
+    values = { "cpu": "x86" }
+)
+config_setting(
+    name = "arm_mode",
+    values = { "cpu": "arm" }
+)
+</pre>
+
+<p>
+  The <a href="$expander.expandRef("select")"><code>select()</code></a> function
+  chooses among different alternative values for a configurable attribute based
+  on which <a href="$expander.expandRef("config_setting")">
+  <code>config_setting</code></a> criteria is satisfied in the current
+  configuration.
+</p>
+
+<p>
+  Configurable attributes are evaluated after the processing of macros and
+  before the processing of rules (technically, between the
+  <a href="https://docs.bazel.build/versions/master/skylark/concepts.html#evaluation-model">
+  loading and analysis phases</a>.
+  Any processing that Bazel does before the <code>select()</code> is evaluated
+  will not know which branch will be chosen. In particular, macros can't change
+  their behavior based on the chosen branch, and <code>bazel query</code> can
+  only make conservative guesses about the configurable dependencies of a
+  target. Conversely, when authoring a new type of rule, you do not need to
+  worry about the ambiguity of configurable attributes because all
+  <code>select()</code> expressions have already been replaced by their resolved
+  values. See
+  <a href="https://docs.bazel.build/versions/master/configurable-attributes.html#faq">
+  this FAQ</a>
+  for more on using <code>select()</code> with rules and macros.
+</p>
+
+<p>
+  Attributes marked <code>nonconfigurable</code> in their documentation cannot
+  use this feature. Usually an attribute is nonconfigurable because Bazel
+  internally needs to know its value before it can determine how to choose the
+  <code>select()</code> branch.
+</p>
+
+<p>
+  See <a href="https://docs.bazel.build/versions/master/configurable-attributes.html">
+  Configurable Build Attributes</a> for more information.
 </p>
 
 <h2 id="implicit-outputs">Implicit output targets</h2>
@@ -166,4 +234,6 @@ labels attribute.
   the <a href="../build-ref.html">BUILD Concept Reference</a>.
 </p>
 
+#if (!$singlePage)
 #parse("com/google/devtools/build/docgen/templates/be/footer.vm")
+#end

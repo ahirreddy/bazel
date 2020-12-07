@@ -13,98 +13,46 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
-import com.google.devtools.build.lib.syntax.compiler.DebugInfo;
-import com.google.devtools.build.lib.syntax.compiler.Jump;
-import com.google.devtools.build.lib.syntax.compiler.LoopLabels;
-import com.google.devtools.build.lib.syntax.compiler.VariableScope;
 
-import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-
-/**
- * A class for flow statements (e.g. break and continue)
- */
+/** A class for flow statements (break, continue, and pass) */
 public final class FlowStatement extends Statement {
-  public enum Kind {
-    BREAK("break"),
-    CONTINUE("continue");
 
-    private String name;
+  private final TokenKind kind; // BREAK | CONTINUE | PASS
+  private final int offset;
 
-    private Kind(String name) {
-      this.name = name;
-    }
-  }
-
-  private final Kind kind;
-  private final FlowException ex;
-
-  /**
-   *
-   * @param kind The label of the statement (either break or continue)
-   */
-  public FlowStatement(Kind kind) {
+  /** @param kind The label of the statement (break, continue, or pass) */
+  FlowStatement(FileLocations locs, TokenKind kind, int offset) {
+    super(locs);
     this.kind = kind;
-    this.ex = new FlowException(kind);
+    this.offset = offset;
   }
 
-  Kind getKind() {
+  public TokenKind getKind() {
     return kind;
   }
 
   @Override
-  void doExec(Environment env) throws EvalException {
-    throw ex;
-  }
-
-  @Override
-  void validate(ValidationEnvironment env) throws EvalException {
-    if (!env.isInsideLoop()) {
-      throw new EvalException(getLocation(), kind.name + " statement must be inside a for loop");
-    }
-  }
-
-  @Override
   public String toString() {
-    return kind.name;
+    return kind.toString() + "\n";
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getStartOffset() {
+    return offset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return offset + kind.toString().length();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
-  ByteCodeAppender compile(
-      VariableScope scope, Optional<LoopLabels> loopLabels, DebugInfo debugInfo) {
-    Preconditions.checkArgument(loopLabels.isPresent(), "break/continue not within loop");
-    return new ByteCodeAppender.Simple(Jump.to(loopLabels.get().labelFor(kind)));
-  }
-
-  /**
-   * An exception that signals changes in the control flow (e.g. break or continue)
-   */
-  class FlowException extends EvalException {
-    private final Kind kind;
-
-    public FlowException(Kind kind) {
-      super(FlowStatement.this.getLocation(), "FlowException with kind = " + kind.name);
-      this.kind = kind;
-    }
-
-    /**
-     * Returns whether the enclosing loop should be terminated completely (break)
-     *
-     * @return {@code True} for 'break', {@code false} for 'continue'
-     */
-    public boolean mustTerminateLoop() {
-      return kind == Kind.BREAK;
-    }
-
-    @Override
-    public boolean canBeAddedToStackTrace() {
-      return false;
-    }
+  public Statement.Kind kind() {
+    return Statement.Kind.FLOW;
   }
 }

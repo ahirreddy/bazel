@@ -14,169 +14,110 @@
 package com.google.devtools.build.lib.syntax;
 
 import com.google.common.base.Preconditions;
-
-import java.util.List;
-
 import javax.annotation.Nullable;
 
 /**
- * Syntax node for a function argument.
+ * Syntax node for an argument to a function.
  *
- * <p>Argument is a base class for arguments passed in a call (@see Argument.Passed)
- * or defined as part of a function definition (@see Parameter).
- * It is notably used by some {@link Parser} and printer functions.
+ * <p>Arguments may be of four forms, as in {@code f(expr, id=expr, *expr, **expr)}. These are
+ * represented by the subclasses Positional, Keyword, Star, and StarStar.
  */
-public abstract class Argument extends ASTNode {
+public abstract class Argument extends Node {
 
-  public boolean isStar() {
-    return false;
+  protected final Expression value;
+
+  Argument(FileLocations locs, Expression value) {
+    super(locs);
+    this.value = Preconditions.checkNotNull(value);
   }
 
-  public boolean isStarStar() {
-    return false;
+  public final Expression getValue() {
+    return value;
   }
 
-  /**
-   * Argument.Passed is the class of arguments passed in a function call
-   * (as opposed to being used in a definition -- @see Parameter for that).
-   * Argument.Passed is usually what we mean when informally say "argument".
-   *
-   * <p>An Argument.Passed can be Positional, Keyword, Star, or StarStar.
-   */
-  public abstract static class Passed extends Argument {
-    /** the value to be passed by this argument */
-    protected final Expression value;
+  @Override
+  public int getEndOffset() {
+    return value.getEndOffset();
+  }
 
-    private Passed(Expression value) {
-      this.value = Preconditions.checkNotNull(value);
+  /** Return the name of this argument's parameter, or null if it is not a Keyword argument. */
+  @Nullable
+  public String getName() {
+    return null;
+  }
+
+  /** Syntax node for a positional argument, {@code f(expr)}. */
+  public static final class Positional extends Argument {
+    Positional(FileLocations locs, Expression value) {
+      super(locs, value);
     }
 
-    public boolean isPositional() {
-      return false;
-    }
-    public boolean isKeyword() {
-      return false;
-    }
-    @Nullable public String getName() { // only for keyword arguments
-      return null;
-    }
-    public Expression getValue() {
-      return value;
-    }
     @Override
-    public void accept(SyntaxTreeVisitor visitor) {
-      visitor.visit(this);
+    public int getStartOffset() {
+      return value.getStartOffset();
     }
   }
 
-  /** positional argument: Expression */
-  public static class Positional extends Passed {
+  /** Syntax node for a keyword argument, {@code f(id=expr)}. */
+  public static final class Keyword extends Argument {
 
-    public Positional(Expression value) {
-      super(value);
+    // Unlike in Python, keyword arguments in Bazel BUILD files
+    // are about 10x more numerous than positional arguments.
+
+    final Identifier id;
+
+    Keyword(FileLocations locs, Identifier id, Expression value) {
+      super(locs, value);
+      this.id = id;
     }
 
-    @Override public boolean isPositional() {
-      return true;
+    public Identifier getIdentifier() {
+      return id;
     }
+
     @Override
-    public String toString() {
-      return String.valueOf(value);
-    }
-  }
-
-  /** keyword argument: K = Expression */
-  public static class Keyword extends Passed {
-
-    final String name;
-
-    public Keyword(String name, Expression value) {
-      super(value);
-      this.name = name;
+    public String getName() {
+      return id.getName();
     }
 
-    @Override public String getName() {
-      return name;
-    }
-    @Override public boolean isKeyword() {
-      return true;
-    }
     @Override
-    public String toString() {
-      return name + " = " + value;
+    public int getStartOffset() {
+      return id.getStartOffset();
     }
   }
 
-  /** positional rest (starred) argument: *Expression */
-  public static class Star extends Passed {
+  /** Syntax node for an argument of the form {@code f(*expr)}. */
+  public static final class Star extends Argument {
+    private final int starOffset;
 
-    public Star(Expression value) {
-      super(value);
+    Star(FileLocations locs, int starOffset, Expression value) {
+      super(locs, value);
+      this.starOffset = starOffset;
     }
 
-    @Override public boolean isStar() {
-      return true;
-    }
     @Override
-    public String toString() {
-      return "*" + value;
+    public int getStartOffset() {
+      return starOffset;
     }
   }
 
-  /** keyword rest (star_starred) parameter: **Expression */
-  public static class StarStar extends Passed {
+  /** Syntax node for an argument of the form {@code f(**expr)}. */
+  public static final class StarStar extends Argument {
+    private final int starStarOffset;
 
-    public StarStar(Expression value) {
-      super(value);
+    StarStar(FileLocations locs, int starStarOffset, Expression value) {
+      super(locs, value);
+      this.starStarOffset = starStarOffset;
     }
 
-    @Override public boolean isStarStar() {
-      return true;
-    }
     @Override
-    public String toString() {
-      return "**" + value;
+    public int getStartOffset() {
+      return starStarOffset;
     }
   }
 
-  /** Some arguments failed to satisfy python call convention strictures */
-  protected static class ArgumentException extends Exception {
-    /** construct an ArgumentException from a message only */
-    public ArgumentException(String message) {
-      super(message);
-    }
-  }
-
-  /**
-   * Validate that the list of Argument's, whether gathered by the Parser or from annotations,
-   * satisfies the requirements of the Python calling conventions: all Positional's first,
-   * at most one Star, at most one StarStar, at the end only.
-   */
-  public static void validateFuncallArguments(List<Passed> arguments)
-      throws ArgumentException {
-    boolean hasNamed = false;
-    boolean hasStar = false;
-    boolean hasKwArg = false;
-    for (Passed arg : arguments) {
-      if (hasKwArg) {
-        throw new ArgumentException("argument after **kwargs");
-      }
-      if (arg.isPositional()) {
-        if (hasNamed) {
-          throw new ArgumentException("non-keyword arg after keyword arg");
-        } else if (arg.isStar()) {
-          throw new ArgumentException("only named arguments may follow *expression");
-        }
-      } else if (arg.isKeyword()) {
-        hasNamed = true;
-      } else if (arg.isStar()) {
-        if (hasStar) {
-          throw new ArgumentException("more than one *stararg");
-        }
-        hasStar = true;
-      } else {
-        hasKwArg = true;
-      }
-    }
+  @Override
+  public void accept(NodeVisitor visitor) {
+    visitor.visit(this);
   }
 }

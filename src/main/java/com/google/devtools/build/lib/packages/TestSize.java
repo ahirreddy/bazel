@@ -14,9 +14,8 @@
 
 package com.google.devtools.build.lib.packages;
 
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.common.options.OptionsParsingException;
-
 import java.util.Set;
 
 /**
@@ -34,6 +33,17 @@ public enum TestSize {
   // All other tests estimated to use fairly large amount of memory.
   LARGE(TestTimeout.LONG, 20),
   ENORMOUS(TestTimeout.ETERNAL, 30);
+
+  // Memoize canonical lowercase name -> TestSize mappings to avoid extraneous toUpperCases for
+  // valueOf.
+  private static final ImmutableMap<String, TestSize> CANONICAL_LOWER_CASE_NAME_TABLE;
+  static {
+    ImmutableMap.Builder<String, TestSize> builder = ImmutableMap.builder();
+    for (TestSize size : TestSize.values()) {
+      builder.put(size.name().toLowerCase(), size);
+    }
+    CANONICAL_LOWER_CASE_NAME_TABLE = builder.build();
+  }
 
   private final TestTimeout timeout;
   private final int defaultShards;
@@ -95,7 +105,7 @@ public enum TestSize {
       return null;
     }
     try {
-      return TestSize.valueOf(attr.toUpperCase());
+      return CANONICAL_LOWER_CASE_NAME_TABLE.get(attr);
     } catch (IllegalArgumentException e) {
       return null;
     }

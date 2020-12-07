@@ -13,176 +13,181 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime.commands;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
-import com.google.devtools.build.lib.query2.AbstractBlazeQueryEnvironment;
-import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Setting;
+import com.google.devtools.build.lib.pkgcache.PackageOptions;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
+import com.google.devtools.build.lib.query2.common.AbstractBlazeQueryEnvironment;
 import com.google.devtools.build.lib.query2.engine.QueryEvalResult;
 import com.google.devtools.build.lib.query2.engine.QueryException;
 import com.google.devtools.build.lib.query2.engine.QueryExpression;
-import com.google.devtools.build.lib.query2.output.OutputFormatter;
-import com.google.devtools.build.lib.query2.output.QueryOptions;
-import com.google.devtools.build.lib.query2.output.QueryOutputUtils;
-import com.google.devtools.build.lib.runtime.BlazeCommand;
-import com.google.devtools.build.lib.runtime.BlazeModule;
-import com.google.devtools.build.lib.runtime.BlazeRuntime;
+import com.google.devtools.build.lib.query2.engine.QueryUtil;
+import com.google.devtools.build.lib.query2.engine.QueryUtil.AggregateAllOutputFormatterCallback;
+import com.google.devtools.build.lib.query2.engine.ThreadSafeOutputFormatterCallback;
+import com.google.devtools.build.lib.query2.query.output.OutputFormatter;
+import com.google.devtools.build.lib.query2.query.output.QueryOptions;
+import com.google.devtools.build.lib.query2.query.output.QueryOutputUtils;
+import com.google.devtools.build.lib.query2.query.output.StreamedFormatter;
+import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import com.google.devtools.build.lib.util.AbruptExitException;
+import com.google.devtools.build.lib.runtime.KeepGoingOption;
+import com.google.devtools.build.lib.runtime.LoadingPhaseThreadsOption;
+import com.google.devtools.build.lib.runtime.QueryRuntimeHelper;
+import com.google.devtools.build.lib.util.Either;
 import com.google.devtools.build.lib.util.ExitCode;
-import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
-
+import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.io.PrintStream;
+import java.io.OutputStream;
 import java.nio.channels.ClosedByInterruptException;
-import java.util.List;
 import java.util.Set;
 
-/**
- * Command line wrapper for executing a query with blaze.
- */
-@Command(name = "query",
-         options = { PackageCacheOptions.class,
-                     QueryOptions.class },
-         help = "resource:query.txt",
-         shortDescription = "Executes a dependency graph query.",
-         allowResidue = true,
-         binaryStdOut = true,
-         completion = "label",
-         canRunInOutputDirectory = true)
-public final class QueryCommand implements BlazeCommand {
+/** Command line wrapper for executing a query with blaze. */
+@Command(
+    name = "query",
+    options = {
+      PackageOptions.class,
+      QueryOptions.class,
+      KeepGoingOption.class,
+      LoadingPhaseThreadsOption.class
+    },
+    help = "resource:query.txt",
+    shortDescription = "Executes a dependency graph query.",
+    allowResidue = true,
+    binaryStdOut = true,
+    completion = "label",
+    canRunInOutputDirectory = true)
+public final class QueryCommand extends QueryEnvironmentBasedCommand {
 
   @Override
-  public void editOptions(CommandEnvironment env, OptionsParser optionsParser) { }
-
-  /**
-   * Exit codes:
-   *   0   on successful evaluation.
-   *   1   if query evaluation did not complete.
-   *   2   if query parsing failed.
-   *   3   if errors were reported but evaluation produced a partial result
-   *        (only when --keep_going is in effect.)
-   */
-  @Override
-  public ExitCode exec(CommandEnvironment env, OptionsProvider options) {
-    BlazeRuntime runtime = env.getRuntime();
-    QueryOptions queryOptions = options.getOptions(QueryOptions.class);
-
-    try {
-      env.setupPackageCache(
-          options.getOptions(PackageCacheOptions.class),
-          runtime.getDefaultsPackageContent());
-    } catch (InterruptedException e) {
-      env.getReporter().handle(Event.error("query interrupted"));
-      return ExitCode.INTERRUPTED;
-    } catch (AbruptExitException e) {
-      env.getReporter().handle(Event.error(null, "Unknown error: " + e.getMessage()));
-      return e.getExitCode();
-    }
-
-    if (options.getResidue().isEmpty()) {
-      env.getReporter().handle(Event.error(String.format(
-          "missing query expression. Type '%s help query' for syntax and help",
-          Constants.PRODUCT_NAME)));
-      return ExitCode.COMMAND_LINE_ERROR;
-    }
-
-    Iterable<OutputFormatter> formatters = runtime.getQueryOutputFormatters();
-    OutputFormatter formatter =
-        OutputFormatter.getFormatter(formatters, queryOptions.outputFormat);
-    if (formatter == null) {
-      env.getReporter().handle(Event.error(
-          String.format("Invalid output format '%s'. Valid values are: %s",
-              queryOptions.outputFormat, OutputFormatter.formatterNames(formatters))));
-      return ExitCode.COMMAND_LINE_ERROR;
-    }
-
-    String query = Joiner.on(' ').join(options.getResidue());
-
-    Set<Setting> settings = queryOptions.toSettings();
-    AbstractBlazeQueryEnvironment<Target> queryEnv = newQueryEnvironment(
-        env,
-        queryOptions.keepGoing,
-        QueryOutputUtils.orderResults(queryOptions, formatter),
-        queryOptions.universeScope, queryOptions.loadingPhaseThreads,
-        settings);
-
-    // 1. Parse query:
+  protected Either<BlazeCommandResult, QueryEvalResult> doQuery(
+      String query,
+      CommandEnvironment env,
+      QueryOptions queryOptions,
+      boolean streamResults,
+      OutputFormatter formatter,
+      AbstractBlazeQueryEnvironment<Target> queryEnv,
+      QueryRuntimeHelper queryRuntimeHelper) {
     QueryExpression expr;
-    try {
+    try (SilentCloseable closeable = Profiler.instance().profile("QueryExpression.parse")) {
       expr = QueryExpression.parse(query, queryEnv);
     } catch (QueryException e) {
-      env.getReporter().handle(Event.error(
-          null, "Error while parsing '" + query + "': " + e.getMessage()));
-      return ExitCode.COMMAND_LINE_ERROR;
+      env.getReporter()
+          .handle(Event.error(null, "Error while parsing '" + query + "': " + e.getMessage()));
+      return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.COMMAND_LINE_ERROR));
     }
 
-    // 2. Evaluate expression:
-    QueryEvalResult<Target> result;
     try {
-      result = queryEnv.evaluateQuery(expr);
-    } catch (QueryException | InterruptedException e) {
+      formatter.verifyCompatible(queryEnv, expr);
+    } catch (QueryException e) {
+      env.getReporter().handle(Event.error(e.getMessage()));
+      return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.COMMAND_LINE_ERROR));
+    }
+
+    expr = queryEnv.transformParsedQuery(expr);
+
+    OutputStream out;
+    if (formatter.canBeBuffered()) {
+      // There is no particular reason for the 16384 constant here, except its a multiple of the
+      // gRPC buffer size. We mainly don't want to send each label individually because the output
+      // stream is connected to gRPC, and every write gets converted to one gRPC call.
+      out = new BufferedOutputStream(queryRuntimeHelper.getOutputStreamForQueryOutput(), 16384);
+    } else {
+      out = queryRuntimeHelper.getOutputStreamForQueryOutput();
+    }
+
+    ThreadSafeOutputFormatterCallback<Target> callback;
+    if (streamResults) {
+      disableAnsiCharactersFiltering(env);
+      StreamedFormatter streamedFormatter = ((StreamedFormatter) formatter);
+      streamedFormatter.setOptions(
+          queryOptions,
+          queryOptions.aspectDeps.createResolver(env.getPackageManager(), env.getReporter()));
+      streamedFormatter.setEventHandler(env.getReporter());
+      callback = streamedFormatter.createStreamCallback(out, queryOptions, queryEnv);
+    } else {
+      callback = QueryUtil.newOrderedAggregateAllOutputFormatterCallback(queryEnv);
+    }
+
+    QueryEvalResult result;
+    boolean catastrophe = true;
+    try (SilentCloseable closeable = Profiler.instance().profile("queryEnv.evaluateQuery")) {
+      result = queryEnv.evaluateQuery(expr, callback);
+      catastrophe = false;
+    } catch (QueryException e) {
+      catastrophe = false;
       // Keep consistent with reportBuildFileError()
       env.getReporter()
           // TODO(bazel-team): this is a kludge to fix a bug observed in the wild. We should make
           // sure no null error messages ever get in.
           .handle(Event.error(e.getMessage() == null ? e.toString() : e.getMessage()));
-      return ExitCode.ANALYSIS_FAILURE;
-    }
-
-    env.getReporter().switchToAnsiAllowingHandler();
-    // 3. Output results:
-    PrintStream output = new PrintStream(env.getReporter().getOutErr().getOutputStream());
-    try {
-      QueryOutputUtils.output(queryOptions, result, formatter, output,
-          queryOptions.aspectDeps.createResolver(
-              env.getPackageManager(), env.getReporter()));
-    } catch (ClosedByInterruptException | InterruptedException e) {
-      env.getReporter().handle(Event.error("query interrupted"));
-      return ExitCode.INTERRUPTED;
+      return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.ANALYSIS_FAILURE));
+    } catch (InterruptedException e) {
+      catastrophe = false;
+      IOException ioException = callback.getIoException();
+      if (ioException == null || ioException instanceof ClosedByInterruptException) {
+        env.getReporter().handle(Event.error("query interrupted"));
+        return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.INTERRUPTED));
+      } else {
+        env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
+        return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.LOCAL_ENVIRONMENTAL_ERROR));
+      }
     } catch (IOException e) {
+      catastrophe = false;
       env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
-      return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+      return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.LOCAL_ENVIRONMENTAL_ERROR));
     } finally {
-      output.flush();
+      if (!catastrophe) {
+        try {
+          out.flush();
+        } catch (IOException e) {
+          env.getReporter()
+              .handle(Event.error("Failed to flush query results: " + e.getMessage()));
+          return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.LOCAL_ENVIRONMENTAL_ERROR));
+        }
+      }
     }
-    if (result.getResultSet().isEmpty()) {
-      env.getReporter().handle(Event.info("Empty results"));
+    if (!streamResults) {
+      disableAnsiCharactersFiltering(env);
+      try (SilentCloseable closeable = Profiler.instance().profile("QueryOutputUtils.output")) {
+        Set<Target> targets =
+            ((AggregateAllOutputFormatterCallback<Target, ?>) callback).getResult();
+        QueryOutputUtils.output(
+            queryOptions,
+            result,
+            targets,
+            formatter,
+            out,
+            queryOptions.aspectDeps.createResolver(env.getPackageManager(), env.getReporter()),
+            env.getReporter());
+      } catch (ClosedByInterruptException | InterruptedException e) {
+        env.getReporter().handle(Event.error("query interrupted"));
+        return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.INTERRUPTED));
+      } catch (IOException e) {
+        env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
+        return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.LOCAL_ENVIRONMENTAL_ERROR));
+      } finally {
+        try {
+          out.flush();
+        } catch (IOException e) {
+          env.getReporter()
+              .handle(Event.error("Failed to flush query results: " + e.getMessage()));
+          return Either.ofLeft(BlazeCommandResult.exitCode(ExitCode.LOCAL_ENVIRONMENTAL_ERROR));
+        }
+      }
     }
 
-    return result.getSuccess() ? ExitCode.SUCCESS : ExitCode.PARTIAL_ANALYSIS_FAILURE;
+    return Either.ofRight(result);
   }
 
-  @VisibleForTesting // for com.google.devtools.deps.gquery.test.QueryResultTestUtil
-  public static AbstractBlazeQueryEnvironment<Target> newQueryEnvironment(CommandEnvironment env,
-      boolean keepGoing, boolean orderedResults, int loadingPhaseThreads,
-      Set<Setting> settings) {
-    return newQueryEnvironment(env, keepGoing, orderedResults, ImmutableList.<String>of(),
-        loadingPhaseThreads, settings);
-  }
-
-  public static AbstractBlazeQueryEnvironment<Target> newQueryEnvironment(CommandEnvironment env,
-      boolean keepGoing, boolean orderedResults, List<String> universeScope,
-      int loadingPhaseThreads, Set<Setting> settings) {
-    ImmutableList.Builder<QueryFunction> functions = ImmutableList.builder();
-    for (BlazeModule module : env.getRuntime().getBlazeModules()) {
-      functions.addAll(module.getQueryFunctions());
-    }
-    return AbstractBlazeQueryEnvironment.newQueryEnvironment(
-        env.getPackageManager().newTransitiveLoader(),
-        env.getSkyframeExecutor(),
-        env.getPackageManager(),
-        env.getTargetPatternEvaluator(),
-        keepGoing, orderedResults, universeScope, loadingPhaseThreads, env.getReporter(),
-        settings,
-        functions.build(),
-        env.getPackageManager().getPackagePath());
+  /**
+   * When Blaze is used with --color=no or not in a tty a ansi characters filter is set so that
+   * we don't print fancy colors in non-supporting terminal outputs. But query output, specifically
+   * the binary formatters, can print actual data that contain ansi bytes/chars. Because of that
+   * we need to remove the filtering before printing any query result.
+   */
+  private static void disableAnsiCharactersFiltering(CommandEnvironment env) {
+    env.getReporter().switchToAnsiAllowingHandler();
   }
 }

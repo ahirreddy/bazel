@@ -17,6 +17,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.SetMultimap;
 
 /**
  * Dedupes C candidate cycles of size O(L) in O(CL) time and memory in the common case and
@@ -27,7 +28,7 @@ import com.google.common.collect.ImmutableSet;
  */
 class CycleDeduper<T> {
 
-  private HashMultimap<ImmutableSet<T>, ImmutableList<T>> knownCyclesByMembers =
+  private SetMultimap<ImmutableSet<T>, ImmutableList<T>> knownCyclesByMembers =
       HashMultimap.create();
 
   /**

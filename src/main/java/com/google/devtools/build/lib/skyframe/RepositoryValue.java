@@ -1,4 +1,4 @@
-// Copyright 2014 The Bazel Authors. All rights reserved.
+// Copyright 2016 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,87 +15,137 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier.RepositoryName;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Interner;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
+import com.google.devtools.build.lib.rules.repository.RepositoryDirectoryValue;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.skyframe.AbstractSkyKey;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyValue;
 
-/**
- * A local view of an external repository.
- */
-public class RepositoryValue implements SkyValue {
-  private final Path path;
+/** A repository's name and directory. */
+public abstract class RepositoryValue implements SkyValue {
+  public abstract boolean repositoryExists();
 
-  /**
-   * If this repository is using a user-created BUILD file (any of the new_* functions) then that
-   * FileValue needs to be propagated up to the PackageLookup so it doesn't get pruned. The BUILD
-   * file symlink will be under external/, thus assumed to be immutable, thus Skyframe will prune
-   * it. Then user changes will be ignored (in favor of the cached version).
-   */
-  private final Optional<FileValue> overlaidBuildFile;
+  /** Returns the path to the repository. */
+  public abstract Path getPath();
 
-  private RepositoryValue(Path path, Optional<FileValue> overlaidBuildFile) {
-    this.path = path;
-    this.overlaidBuildFile = overlaidBuildFile;
-  }
+  /** Successful lookup value. */
+  public static final class SuccessfulRepositoryValue extends RepositoryValue {
+    private final RepositoryName repositoryName;
+    private final RepositoryDirectoryValue repositoryDirectory;
 
-  /**
-   * Creates an immutable external repository.
-   */
-  public static RepositoryValue create(Path repositoryDirectory) {
-    return new RepositoryValue(repositoryDirectory, Optional.<FileValue>absent());
-  }
+    /** Creates a repository with a given name in a certain directory. */
+    public SuccessfulRepositoryValue(
+        RepositoryName repositoryName, RepositoryDirectoryValue repository) {
+      Preconditions.checkArgument(repository.repositoryExists());
+      this.repositoryName = repositoryName;
+      this.repositoryDirectory = repository;
+    }
 
-  /**
-   * Creates an immutable external repository with a mutable BUILD file.
-   */
-  public static RepositoryValue createNew(Path repositoryDirectory, FileValue overlaidBuildFile) {
-    return new RepositoryValue(repositoryDirectory, Optional.of(overlaidBuildFile));
-  }
-
-  /**
-   * Returns the path to the directory containing the repository's contents. This directory is
-   * guaranteed to exist.  It may contain a full Bazel repository (with a WORKSPACE file,
-   * directories, and BUILD files) or simply contain a file (or set of files) for, say, a jar from
-   * Maven.
-   */
-  public Path getPath() {
-    return path;
-  }
-
-  public Optional<FileValue> getOverlaidBuildFile() {
-    return overlaidBuildFile;
-  }
-
-  @Override
-  public boolean equals(Object other) {
-    if (this == other) {
+    @Override
+    public boolean repositoryExists() {
       return true;
     }
 
-    if (other instanceof RepositoryValue) {
-      RepositoryValue otherValue = (RepositoryValue) other;
-      return overlaidBuildFile.equals(otherValue.overlaidBuildFile);
+    @Override
+    public Path getPath() {
+      return repositoryDirectory.getPath();
     }
-    return false;
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (other == null || getClass() != other.getClass()) {
+        return false;
+      }
+
+      SuccessfulRepositoryValue that = (SuccessfulRepositoryValue) other;
+      return Objects.equal(repositoryName, that.repositoryName)
+          && Objects.equal(repositoryDirectory, that.repositoryDirectory);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(repositoryName, repositoryDirectory);
+    }
   }
 
-  @Override
-  public int hashCode() {
-    return Objects.hashCode(overlaidBuildFile);
+  /** Repository could not be resolved. */
+  public static final class NoRepositoryValue extends RepositoryValue {
+    private final RepositoryName repositoryName;
+
+    private NoRepositoryValue(RepositoryName repositoryName) {
+      this.repositoryName = repositoryName;
+    }
+
+    @Override
+    public boolean repositoryExists() {
+      return false;
+    }
+
+    @Override
+    public Path getPath() {
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (other == null || getClass() != other.getClass()) {
+        return false;
+      }
+
+      NoRepositoryValue that = (NoRepositoryValue) other;
+      return Objects.equal(repositoryName, that.repositoryName);
+    }
+
+    @Override
+    public int hashCode() {
+      return repositoryName.hashCode();
+    }
   }
 
-  @Override
-  public String toString() {
-    return path.getPathString() + (overlaidBuildFile.isPresent()
-        ? " (BUILD file: " + overlaidBuildFile.get() + ")" : "");
+  public static RepositoryValue success(
+      RepositoryName repositoryName, RepositoryDirectoryValue repository) {
+    return new SuccessfulRepositoryValue(repositoryName, repository);
   }
 
-  /**
-   * Creates a key from the given repository name.
-   */
-  public static SkyKey key(RepositoryName repository) {
-    return new SkyKey(SkyFunctions.REPOSITORY, repository);
+  public static RepositoryValue notFound(RepositoryName repositoryName) {
+    // TODO(ulfjack): Store the cause here? The two possible causes are that the external package
+    // contains errors, or that the repository with the given name does not exist.
+    return new NoRepositoryValue(repositoryName);
+  }
+
+  public static Key key(RepositoryName repositoryName) {
+    return Key.create(repositoryName);
+  }
+
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class Key extends AbstractSkyKey<RepositoryName> {
+    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+
+    private Key(RepositoryName arg) {
+      super(arg);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static Key create(RepositoryName arg) {
+      return interner.intern(new Key(arg));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.REPOSITORY;
+    }
   }
 }

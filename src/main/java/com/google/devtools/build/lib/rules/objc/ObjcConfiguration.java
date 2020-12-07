@@ -15,113 +15,153 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.analysis.BlazeDirectories;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
 import com.google.devtools.build.lib.rules.apple.DottedVersion;
-import com.google.devtools.build.lib.rules.objc.ReleaseBundlingSupport.SplitArchTransition.ConfigurationDistinguisher;
-import com.google.devtools.build.lib.vfs.Path;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-
+import com.google.devtools.build.lib.rules.cpp.CppOptions;
+import com.google.devtools.build.lib.rules.cpp.HeaderDiscovery;
+import com.google.devtools.build.lib.skylarkbuildapi.apple.ObjcConfigurationApi;
 import javax.annotation.Nullable;
 
-/**
- * A compiler configuration containing flags required for Objective-C compilation.
- */
-public class ObjcConfiguration extends BuildConfiguration.Fragment {
+/** A compiler configuration containing flags required for Objective-C compilation. */
+@Immutable
+public class ObjcConfiguration extends Fragment implements ObjcConfigurationApi<PlatformType> {
   @VisibleForTesting
-  static final ImmutableList<String> DBG_COPTS = ImmutableList.of("-O0", "-DDEBUG=1",
-      "-fstack-protector", "-fstack-protector-all", "-D_GLIBCXX_DEBUG_PEDANTIC", "-D_GLIBCXX_DEBUG",
-      "-D_GLIBCPP_CONCEPT_CHECKS");
+  static final ImmutableList<String> DBG_COPTS =
+      ImmutableList.of("-O0", "-DDEBUG=1", "-fstack-protector", "-fstack-protector-all", "-g");
+
+  @VisibleForTesting
+  static final ImmutableList<String> GLIBCXX_DBG_COPTS =
+      ImmutableList.of(
+          "-D_GLIBCXX_DEBUG", "-D_GLIBCXX_DEBUG_PEDANTIC", "-D_GLIBCPP_CONCEPT_CHECKS");
 
   @VisibleForTesting
   static final ImmutableList<String> OPT_COPTS =
       ImmutableList.of(
           "-Os", "-DNDEBUG=1", "-Wno-unused-variable", "-Winit-self", "-Wno-extra");
 
-  private final DottedVersion iosMinimumOs;
   private final DottedVersion iosSimulatorVersion;
   private final String iosSimulatorDevice;
-  private final boolean generateDebugSymbols;
+  private final DottedVersion watchosSimulatorVersion;
+  private final String watchosSimulatorDevice;
+  private final DottedVersion tvosSimulatorVersion;
+  private final String tvosSimulatorDevice;
+  private final boolean generateDsym;
+  private final boolean generateLinkmap;
   private final boolean runMemleaks;
-  private final List<String> copts;
+  private final ImmutableList<String> copts;
   private final CompilationMode compilationMode;
-  private final String iosSplitCpu;
-  private final List<String> fastbuildOptions;
+  private final ImmutableList<String> fastbuildOptions;
   private final boolean enableBinaryStripping;
   private final boolean moduleMapsEnabled;
-  private final ConfigurationDistinguisher configurationDistinguisher;
   @Nullable private final String signingCertName;
-  @Nullable private final Path clientWorkspaceRoot;
-  private final String xcodeOverrideWorkspaceRoot;
-  private final boolean useAbsolutePathsForActions;
+  private final boolean debugWithGlibcxx;
+  private final boolean deviceDebugEntitlements;
+  private final boolean enableAppleBinaryNativeProtos;
+  private final HeaderDiscovery.DotdPruningMode dotdPruningPlan;
+  private final boolean shouldScanIncludes;
+  private final Label appleSdk;
+  private final boolean compileInfoMigration;
 
-  // We only load these labels if the mode which uses them is enabled. That is known as part of the
-  // BuildConfiguration. This label needs to be part of a configuration because only configurations
-  // can conditionally cause loading.
-  // They are referenced from late bound attributes, and if loading wasn't forced in a
-  // configuration, the late bound attribute will fail to be initialized because it hasn't been
-  // loaded.
-  @Nullable private final Label gcovLabel;
-  @Nullable private final Label experimentalGcovLabel;
-  @Nullable private final Label dumpSymsLabel;
-
-  ObjcConfiguration(ObjcCommandLineOptions objcOptions, BuildConfiguration.Options options,
-      @Nullable BlazeDirectories directories) {
-    this.iosMinimumOs = Preconditions.checkNotNull(objcOptions.iosMinimumOs, "iosMinimumOs");
-    this.iosSimulatorDevice =
-        Preconditions.checkNotNull(objcOptions.iosSimulatorDevice, "iosSimulatorDevice");
-    this.iosSimulatorVersion =
-        Preconditions.checkNotNull(objcOptions.iosSimulatorVersion, "iosSimulatorVersion");
-    this.generateDebugSymbols = objcOptions.generateDebugSymbols;
+  ObjcConfiguration(
+      CppOptions cppOptions, ObjcCommandLineOptions objcOptions, CoreOptions options) {
+    this.iosSimulatorDevice = objcOptions.iosSimulatorDevice;
+    this.iosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.iosSimulatorVersion);
+    this.watchosSimulatorDevice = objcOptions.watchosSimulatorDevice;
+    this.watchosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.watchosSimulatorVersion);
+    this.tvosSimulatorDevice = objcOptions.tvosSimulatorDevice;
+    this.tvosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.tvosSimulatorVersion);
+    this.generateLinkmap = objcOptions.generateLinkmap;
     this.runMemleaks = objcOptions.runMemleaks;
     this.copts = ImmutableList.copyOf(objcOptions.copts);
     this.compilationMode = Preconditions.checkNotNull(options.compilationMode, "compilationMode");
-    this.gcovLabel = options.objcGcovBinary;
-    this.experimentalGcovLabel = options.experimentalObjcGcovBinary;
-    this.dumpSymsLabel = objcOptions.dumpSyms;
-    this.iosSplitCpu = Preconditions.checkNotNull(objcOptions.iosSplitCpu, "iosSplitCpu");
+    this.generateDsym =
+        cppOptions.appleGenerateDsym
+            || (cppOptions.appleEnableAutoDsymDbg && this.compilationMode == CompilationMode.DBG);
     this.fastbuildOptions = ImmutableList.copyOf(objcOptions.fastbuildOptions);
     this.enableBinaryStripping = objcOptions.enableBinaryStripping;
     this.moduleMapsEnabled = objcOptions.enableModuleMaps;
-    this.configurationDistinguisher = objcOptions.configurationDistinguisher;
-    this.clientWorkspaceRoot = directories != null ? directories.getWorkspace() : null;
     this.signingCertName = objcOptions.iosSigningCertName;
-    this.xcodeOverrideWorkspaceRoot = objcOptions.xcodeOverrideWorkspaceRoot;
-    this.useAbsolutePathsForActions = objcOptions.useAbsolutePathsForActions;
-  }
-
-  /**
-   * Returns the minimum iOS version supported by binaries and libraries. Any dependencies on newer
-   * iOS version features or libraries will become weak dependencies which are only loaded if the
-   * runtime OS supports them.
-   */
-  public DottedVersion getMinimumOs() {
-    return iosMinimumOs;
+    this.debugWithGlibcxx = objcOptions.debugWithGlibcxx;
+    this.deviceDebugEntitlements = objcOptions.deviceDebugEntitlements;
+    this.enableAppleBinaryNativeProtos = objcOptions.enableAppleBinaryNativeProtos;
+    this.dotdPruningPlan =
+        objcOptions.useDotdPruning
+            ? HeaderDiscovery.DotdPruningMode.USE
+            : HeaderDiscovery.DotdPruningMode.DO_NOT_USE;
+    this.shouldScanIncludes = objcOptions.scanIncludes;
+    this.appleSdk = objcOptions.appleSdk;
+    this.compileInfoMigration = objcOptions.incompatibleObjcCompileInfoMigration;
   }
 
   /**
    * Returns the type of device (e.g. 'iPhone 6') to simulate when running on the simulator.
    */
+  @Override
   public String getIosSimulatorDevice() {
+    // TODO(bazel-team): Deprecate in favor of getSimulatorDeviceForPlatformType(IOS).
     return iosSimulatorDevice;
   }
 
+  @Override
   public DottedVersion getIosSimulatorVersion() {
+    // TODO(bazel-team): Deprecate in favor of getSimulatorVersionForPlatformType(IOS).
     return iosSimulatorVersion;
   }
 
-  public boolean generateDebugSymbols() {
-    return generateDebugSymbols;
+  @Override
+  public String getSimulatorDeviceForPlatformType(PlatformType platformType) {
+    switch (platformType) {
+      case IOS:
+        return iosSimulatorDevice;
+      case TVOS:
+        return tvosSimulatorDevice;
+      case WATCHOS:
+        return watchosSimulatorDevice;
+      default:
+        throw new IllegalArgumentException(
+            "ApplePlatform type " + platformType + " does not support " + "simulators.");
+    }
   }
 
+  @Override
+  public DottedVersion getSimulatorVersionForPlatformType(PlatformType platformType) {
+    switch (platformType) {
+      case IOS:
+        return iosSimulatorVersion;
+      case TVOS:
+        return tvosSimulatorVersion;
+      case WATCHOS:
+        return watchosSimulatorVersion;
+      default:
+        throw new IllegalArgumentException(
+            "ApplePlatform type " + platformType + " does not support " + "simulators.");
+    }
+  }
+
+  /**
+   * Returns whether dSYM generation is enabled.
+   */
+  @Override
+  public boolean generateDsym() {
+    return generateDsym;
+  }
+
+  /**
+   * Returns whether linkmap generation is enabled.
+   */
+  @Override
+  public boolean generateLinkmap() {
+    return generateLinkmap;
+  }
+
+  @Override
   public boolean runMemleaks() {
     return runMemleaks;
   }
@@ -136,10 +176,18 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
   /**
    * Returns the default set of clang options for the current compilation mode.
    */
-  public List<String> getCoptsForCompilationMode() {
+  @Override
+  public ImmutableList<String> getCoptsForCompilationMode() {
     switch (compilationMode) {
       case DBG:
-        return DBG_COPTS;
+        if (this.debugWithGlibcxx) {
+          return ImmutableList.<String>builder()
+              .addAll(DBG_COPTS)
+              .addAll(GLIBCXX_DBG_COPTS)
+              .build();
+        } else {
+          return DBG_COPTS;
+        }
       case FASTBUILD:
         return fastbuildOptions;
       case OPT:
@@ -153,32 +201,9 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
    * Returns options passed to (Apple) clang when compiling Objective C. These options should be
    * applied after any default options but before options specified in the attributes of the rule.
    */
-  public List<String> getCopts() {
+  @Override
+  public ImmutableList<String> getCopts() {
     return copts;
-  }
-
-  /**
-   * Returns the label of the gcov binary, used to get test coverage data. Null iff not in coverage
-   * mode.
-   */
-  @Nullable public Label getGcovLabel() {
-    return gcovLabel;
-  }
-
-  /**
-   * Returns the label of the experimental gcov binary, used to get test coverage data for {@code
-   * experimental_ios_test}. Null iff not in coverage mode.
-   */
-  @Nullable public Label getExperimentalGcovLabel() {
-    return experimentalGcovLabel;
-  }
-
-  /**
-   * Returns the label of the dump_syms binary, used to get debug symbols from a binary. Null iff
-   * !{@link #generateDebugSymbols}.
-   */
-  @Nullable public Label getDumpSymsLabel() {
-    return dumpSymsLabel;
   }
 
   /**
@@ -186,33 +211,6 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
    */
   public boolean moduleMapsEnabled() {
     return moduleMapsEnabled;
-  }
-
-  /**
-   * Returns the unique identifier distinguishing configurations that are otherwise the same.
-   *
-   * <p>Use this value for situations in which two configurations create two outputs that are the
-   * same but are not collapsed due to their different configuration owners.
-   */
-  public ConfigurationDistinguisher getConfigurationDistinguisher() {
-    return configurationDistinguisher;
-  }
-
-  @Nullable
-  @Override
-  public String getOutputDirectoryName() {
-    List<String> components = new ArrayList<>();
-    if (!iosSplitCpu.isEmpty()) {
-      components.add("ios-" + iosSplitCpu);
-    }
-    if (configurationDistinguisher != ConfigurationDistinguisher.UNKNOWN) {
-      components.add(configurationDistinguisher.toString().toLowerCase(Locale.US));
-    }
-
-    if (components.isEmpty()) {
-      return null;
-    }
-    return Joiner.on('-').join(components);
   }
 
   /**
@@ -224,37 +222,48 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
   }
 
   /**
-   * If true, all calls to actions are done with absolute paths instead of relative paths.
-   * Using absolute paths allows Xcode to debug and deal with blaze errors in the GUI properly.
-   */
-  public boolean getUseAbsolutePathsForActions() {
-    return this.useAbsolutePathsForActions;
-  }
-
-  /**
-   * Returns the path to be used for workspace_root (and path of pbxGroup mainGroup) in xcodeproj.
-   * This usually will be the absolute path of the root of Bazel client workspace or null if
-   * passed-in {@link BlazeDirectories} is null or Bazel fails to find the workspace root directory.
-   * It can also be overridden by the {@code --xcode_override_workspace_root} flag, in which case
-   * the path can be absolute or relative.
-   */
-  @Nullable
-  public String getXcodeWorkspaceRoot() {
-    if (!this.xcodeOverrideWorkspaceRoot.isEmpty()) {
-      return this.xcodeOverrideWorkspaceRoot;
-    }
-    if (this.clientWorkspaceRoot == null) {
-      return null;
-    }
-    return this.clientWorkspaceRoot.getPathString();
-  }
-
-  /**
    * Returns the flag-supplied certificate name to be used in signing or {@code null} if no such
    * certificate was specified.
    */
-  @Nullable
+  @Override
   public String getSigningCertName() {
     return this.signingCertName;
+  }
+
+  /**
+   * Returns whether device debug entitlements should be included when signing an application.
+   *
+   * <p>Note that debug entitlements will be included only if the --device_debug_entitlements flag
+   * is set <b>and</b> the compilation mode is not {@code opt}.
+   */
+  @Override
+  public boolean useDeviceDebugEntitlements() {
+    return deviceDebugEntitlements && compilationMode != CompilationMode.OPT;
+  }
+
+  /** Returns true if apple_binary targets should generate and link Objc protos. */
+  @Override
+  public boolean enableAppleBinaryNativeProtos() {
+    return enableAppleBinaryNativeProtos;
+  }
+
+  /** Returns the DotdPruningPlan for compiles in this build. */
+  public HeaderDiscovery.DotdPruningMode getDotdPruningPlan() {
+    return dotdPruningPlan;
+  }
+
+  /** Returns true iff we should do "include scanning" during this build. */
+  public boolean shouldScanIncludes() {
+    return shouldScanIncludes;
+  }
+
+  /** Returns the label for the Apple SDK for current build configuration. */
+  public Label getAppleSdk() {
+    return appleSdk;
+  }
+
+  /** Whether native rules can assume compile info has been migrated to CcInfo. */
+  public boolean compileInfoMigration() {
+    return compileInfoMigration;
   }
 }

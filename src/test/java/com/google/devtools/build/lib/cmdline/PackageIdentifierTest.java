@@ -15,21 +15,11 @@
 package com.google.devtools.build.lib.cmdline;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.fail;
 
-import com.google.devtools.build.lib.cmdline.PackageIdentifier.RepositoryName;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 
 /**
  * Unit tests for {@link PackageIdentifier}.
@@ -41,62 +31,38 @@ public class PackageIdentifierTest {
     PackageIdentifier fooA = PackageIdentifier.parse("@foo//a");
     assertThat(fooA.getRepository().strippedName()).isEqualTo("foo");
     assertThat(fooA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(fooA.getRepository().getSourceRoot()).isEqualTo(
+        PathFragment.create("external/foo"));
 
     PackageIdentifier absoluteA = PackageIdentifier.parse("//a");
-    assertThat(absoluteA.getRepository().strippedName()).isEqualTo("");
-    assertThat(fooA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(absoluteA.getRepository().strippedName()).isEmpty();
+    assertThat(absoluteA.getPackageFragment().getPathString()).isEqualTo("a");
 
     PackageIdentifier plainA = PackageIdentifier.parse("a");
-    assertThat(plainA.getRepository().strippedName()).isEqualTo("");
-    assertThat(fooA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(plainA.getRepository().strippedName()).isEmpty();
+    assertThat(plainA.getPackageFragment().getPathString()).isEqualTo("a");
 
     PackageIdentifier mainA = PackageIdentifier.parse("@//a");
-    assertThat(mainA.getRepository()).isEqualTo(PackageIdentifier.MAIN_REPOSITORY_NAME);
-  }
-
-  public void assertNotValid(String name, String expectedMessage) {
-    try {
-      RepositoryName.create(name);
-      fail();
-    } catch (LabelSyntaxException expected) {
-      assertThat(expected.getMessage()).contains(expectedMessage);
-    }
-  }
-
-  @Test
-  public void testValidateRepositoryName() throws Exception {
-    assertEquals("@foo", RepositoryName.create("@foo").toString());
-    assertThat(RepositoryName.create("").toString()).isEmpty();
-    assertEquals("@foo_bar", RepositoryName.create("@foo_bar").toString());
-    assertEquals("@foo-bar", RepositoryName.create("@foo-bar").toString());
-    assertEquals("@foo.bar", RepositoryName.create("@foo.bar").toString());
-    assertEquals("@..foo", RepositoryName.create("@..foo").toString());
-    assertEquals("@foo..", RepositoryName.create("@foo..").toString());
-    assertEquals("@.foo", RepositoryName.create("@.foo").toString());
-
-    assertNotValid("x", "workspace names must start with '@'");
-    assertNotValid("@.", "workspace names are not allowed to be '@.'");
-    assertNotValid("@..", "workspace names are not allowed to be '@..'");
-    assertNotValid("@foo/bar", "workspace names may contain only A-Z, a-z, 0-9, '-', '_' and '.'");
-    assertNotValid("@foo@", "workspace names may contain only A-Z, a-z, 0-9, '-', '_' and '.'");
-    assertNotValid("@foo\0", "workspace names may contain only A-Z, a-z, 0-9, '-', '_' and '.'");
+    assertThat(mainA.getRepository()).isEqualTo(RepositoryName.MAIN);
+    assertThat(mainA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(mainA.getRepository().getSourceRoot()).isEqualTo(PathFragment.EMPTY_FRAGMENT);
   }
 
   @Test
   public void testToString() throws Exception {
-    PackageIdentifier local = PackageIdentifier.create("", new PathFragment("bar/baz"));
-    assertEquals("bar/baz", local.toString());
-    PackageIdentifier external = PackageIdentifier.create("@foo", new PathFragment("bar/baz"));
-    assertEquals("@foo//bar/baz", external.toString());
+    PackageIdentifier local = PackageIdentifier.create("", PathFragment.create("bar/baz"));
+    assertThat(local.toString()).isEqualTo("bar/baz");
+    PackageIdentifier external = PackageIdentifier.create("@foo", PathFragment.create("bar/baz"));
+    assertThat(external.toString()).isEqualTo("@foo//bar/baz");
   }
 
   @Test
   public void testCompareTo() throws Exception {
-    PackageIdentifier foo1 = PackageIdentifier.create("@foo", new PathFragment("bar/baz"));
-    PackageIdentifier foo2 = PackageIdentifier.create("@foo", new PathFragment("bar/baz"));
-    PackageIdentifier foo3 = PackageIdentifier.create("@foo", new PathFragment("bar/bz"));
-    PackageIdentifier bar = PackageIdentifier.create("@bar", new PathFragment("bar/baz"));
-    assertEquals(0, foo1.compareTo(foo2));
+    PackageIdentifier foo1 = PackageIdentifier.create("@foo", PathFragment.create("bar/baz"));
+    PackageIdentifier foo2 = PackageIdentifier.create("@foo", PathFragment.create("bar/baz"));
+    PackageIdentifier foo3 = PackageIdentifier.create("@foo", PathFragment.create("bar/bz"));
+    PackageIdentifier bar = PackageIdentifier.create("@bar", PathFragment.create("bar/baz"));
+    assertThat(foo1.compareTo(foo2)).isEqualTo(0);
     assertThat(foo1.compareTo(foo3)).isLessThan(0);
     assertThat(foo1.compareTo(bar)).isGreaterThan(0);
   }
@@ -104,25 +70,22 @@ public class PackageIdentifierTest {
   @Test
   public void testInvalidPackageName() throws Exception {
     // This shouldn't throw an exception, package names aren't validated.
-    PackageIdentifier.create("@foo", new PathFragment("bar.baz"));
-  }
-
-  @Test
-  public void testSerialization() throws Exception {
-    PackageIdentifier inId = PackageIdentifier.create("@foo", new PathFragment("bar/baz"));
-    ByteArrayOutputStream data = new ByteArrayOutputStream();
-    ObjectOutputStream out = new ObjectOutputStream(data);
-    out.writeObject(inId);
-    ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(data.toByteArray()));
-    PackageIdentifier outId = (PackageIdentifier) in.readObject();
-    assertEquals(inId, outId);
+    PackageIdentifier.create("@foo", PathFragment.create("bar.baz"));
   }
 
   @Test
   public void testPackageFragmentEquality() throws Exception {
     // Make sure package fragments are canonicalized.
-    PackageIdentifier p1 = PackageIdentifier.create("@whatever", new PathFragment("foo/bar"));
-    PackageIdentifier p2 = PackageIdentifier.create("@whatever", new PathFragment("foo/bar"));
-    assertSame(p2.getPackageFragment(), p1.getPackageFragment());
+    PackageIdentifier p1 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
+    PackageIdentifier p2 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
+    assertThat(p1.getPackageFragment()).isSameInstanceAs(p2.getPackageFragment());
+  }
+
+  @Test
+  public void testRunfilesDir() throws Exception {
+    assertThat(PackageIdentifier.create("@foo", PathFragment.create("bar/baz")).getRunfilesPath())
+        .isEqualTo(PathFragment.create("../foo/bar/baz"));
+    assertThat(PackageIdentifier.create("@", PathFragment.create("bar/baz")).getRunfilesPath())
+        .isEqualTo(PathFragment.create("bar/baz"));
   }
 }

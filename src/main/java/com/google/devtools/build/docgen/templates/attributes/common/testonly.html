@@ -1,7 +1,7 @@
-<p><code>Boolean; optional; default 0 except as noted</code></p>
+<p><code>Boolean; optional; default False except as noted</code></p>
 
 <p>
-If 1, only testonly targets (such as tests) can depend on this target.
+If True, only testonly targets (such as tests) can depend on this target.
 </p>
 
 <p>
@@ -11,14 +11,8 @@ depend on any rule that is <code>testonly</code>.
 
 <p>
 Tests (<code>*_test</code> rules)
-and test suites (<a href="general.html#test_suite">test_suite</a> rules)
+and test suites (<a href="${link test_suite}">test_suite</a> rules)
 are <code>testonly</code> by default.
-</p>
-
-<p>
-By virtue of
-<a href="functions.html#package.default_testonly"><code>default_testonly</code></a>,
-targets under <code>javatests</code> are <code>testonly</code> by default.
 </p>
 
 <p>

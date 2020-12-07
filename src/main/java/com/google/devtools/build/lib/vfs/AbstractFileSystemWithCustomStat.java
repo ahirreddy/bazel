@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs;
 
+import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.IOException;
 
 /**
@@ -21,6 +22,13 @@ import java.io.IOException;
  * {@link FileSystem} does).
  */
 public abstract class AbstractFileSystemWithCustomStat extends AbstractFileSystem {
+
+  public AbstractFileSystemWithCustomStat() throws DefaultHashFunctionNotSetException {}
+
+  public AbstractFileSystemWithCustomStat(DigestHashFunction hashFunction) {
+    super(hashFunction);
+  }
+
   @Override
   protected boolean isFile(Path path, boolean followSymlinks) {
     FileStatus stat = statNullable(path, followSymlinks);

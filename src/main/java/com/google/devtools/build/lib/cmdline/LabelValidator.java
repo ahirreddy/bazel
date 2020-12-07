@@ -16,9 +16,7 @@ package com.google.devtools.build.lib.cmdline;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.CharMatcher;
-
 import java.util.Objects;
-
 import javax.annotation.Nullable;
 
 /**
@@ -26,10 +24,14 @@ import javax.annotation.Nullable;
  */
 public final class LabelValidator {
 
-  /**
-   * Matches punctuation in target names which requires quoting in a blaze query.
-   */
-  private static final CharMatcher PUNCTUATION_REQUIRING_QUOTING = CharMatcher.anyOf("+,=~");
+  // Target names allow all 7-bit ASCII characters except
+  // 0-31 (control characters)
+  // 58 ':' (colon)
+  // 92 '\' (backslash) - directory separator (on Windows); may be allowed in the future
+  // 127 (delete)
+  /** Matches punctuation in target names which requires quoting in a blaze query. */
+  private static final CharMatcher PUNCTUATION_REQUIRING_QUOTING =
+      CharMatcher.anyOf(" \"#$&'()*+,;<=>?[]{|}~");
 
   /**
    * Matches punctuation in target names which doesn't require quoting in a blaze query.
@@ -37,7 +39,21 @@ public final class LabelValidator {
    * Note that . is also allowed in target names, and doesn't require quoting, but has restrictions
    * on its surrounding characters; see {@link #validateTargetName(String)}.
    */
-  private static final CharMatcher PUNCTUATION_NOT_REQUIRING_QUOTING = CharMatcher.anyOf("_@-");
+  private static final CharMatcher PUNCTUATION_NOT_REQUIRING_QUOTING =
+      CharMatcher.anyOf("!%-@^_`");
+
+  // Package names allow all 7-bit ASCII characters except
+  // 0-31 (control characters)
+  // 58 ':' (colon) - target name separator
+  // 92 '\' (backslash) - directory separator (on Windows); may be allowed in the future
+  // 127 (delete)
+  /** Matches characters allowed in package name. */
+  private static final CharMatcher ALLOWED_CHARACTERS_IN_PACKAGE_NAME =
+      CharMatcher.inRange('0', '9')
+          .or(CharMatcher.inRange('a', 'z'))
+          .or(CharMatcher.inRange('A', 'Z'))
+          .or(CharMatcher.anyOf(" !\"#$%&'()*+,-./;<=>?@[]^_`{|}~"))
+          .precomputed();
 
   /**
    * Matches characters allowed in target names regardless of context.
@@ -46,13 +62,19 @@ public final class LabelValidator {
    * restrictions around surrounding characters; see {@link #validateTargetName(String)}.
    */
   private static final CharMatcher ALWAYS_ALLOWED_TARGET_CHARACTERS =
-      CharMatcher.JAVA_LETTER_OR_DIGIT
+      CharMatcher.javaLetterOrDigit()
           .or(PUNCTUATION_REQUIRING_QUOTING)
-          .or(PUNCTUATION_NOT_REQUIRING_QUOTING);
+          .or(PUNCTUATION_NOT_REQUIRING_QUOTING)
+          // On unix platforms, strings obtained from readdir() are bytes "decoded" as latin1.  But
+          // the user is likely to have stored UTF-8 in them.  So we permit all non-ASCII characters
+          // in UTF-8 by allowing all high bytes.
+          .or(CharMatcher.inRange((char) 128, (char) 255))
+          .precomputed();
 
   @VisibleForTesting
   static final String PACKAGE_NAME_ERROR =
-      "package names may contain only A-Z, a-z, 0-9, '/', '-', '.' and '_'";
+      "package names may contain A-Z, a-z, 0-9, or any of ' !\"#$%&'()*+,-./;<=>?[]^_`{|}~'"
+          + " (most 7-bit ascii characters except 0-31, 127, ':', or '\\')";
 
   @VisibleForTesting
   static final String PACKAGE_NAME_DOT_ERROR =
@@ -78,40 +100,34 @@ public final class LabelValidator {
       return "package names may not start with '/'";
     }
 
-    // Check for any character outside of [/0-9.A-Za-z_-]. Try to evaluate the
-    // conditional quickly (by looking in decreasing order of character class
-    // likelihood). To deal with . and .. pretend that the name is surrounded by '/'
-    // on both sides.
+    if (!ALLOWED_CHARACTERS_IN_PACKAGE_NAME.matchesAllOf(packageName)) {
+      return PACKAGE_NAME_ERROR;
+    }
+
+    if (packageName.charAt(packageName.length() - 1) == '/') {
+      return "package names may not end with '/'";
+    }
+    // Check for empty or dot-only package segment
     boolean nonDot = false;
-    int lastSlash = len;
+    boolean lastSlash = true;
+    // Going backward and marking the last character as being a / so we detect
+    // '.' only package segment.
     for (int i = len - 1; i >= -1; --i) {
       char c = (i >= 0) ? packageName.charAt(i) : '/';
-      if ((c < 'a' || c > 'z')
-          && c != '/'
-          && c != '_'
-          && c != '-'
-          && c != '.'
-          && (c < '0' || c > '9')
-          && (c < 'A' || c > 'Z')) {
-        return PACKAGE_NAME_ERROR;
-      }
-
       if (c == '/') {
-        if (lastSlash == i + 1) {
-          return lastSlash == len
-              ? "package names may not end with '/'"
-              : "package names may not contain '//' path separators";
+        if (lastSlash) {
+          return "package names may not contain '//' path separators";
         }
-
         if (!nonDot) {
           return PACKAGE_NAME_DOT_ERROR;
         }
         nonDot = false;
-        lastSlash = i;
+        lastSlash = true;
       } else {
         if (c != '.') {
           nonDot = true;
         }
+        lastSlash = false;
       }
     }
 
@@ -124,12 +140,9 @@ public final class LabelValidator {
    */
   @Nullable
   public static String validateTargetName(String targetName) {
-    // TODO(bazel-team): (2011) allow labels equaling '.' or ending in '/.' for now. If we ever
-    // actually configure the target we will report an error, but they will be permitted for
+    // We allow labels equaling '.' or ending in '/.' for now. If we ever
+    // actually configure the target we will report an error, but they are permitted for
     // data directories.
-
-    // TODO(bazel-team): (2011) Get rid of this code once we have reached critical mass and can
-    // pressure developers to clean up their BUILD files.
 
     // Code optimized for the common case: success.
     int len = targetName.length();
@@ -165,16 +178,16 @@ public final class LabelValidator {
         continue;
       }
       if (c == '/') {
-        if (targetName.substring(ii).startsWith("/../")) {
+        if (stringRegionMatch(targetName, "/../", ii)) {
           return "target names may not contain up-level references '..'";
-        } else if (targetName.substring(ii).startsWith("/./")) {
+        } else if (stringRegionMatch(targetName, "/./", ii)) {
           return "target names may not contain '.' as a path segment";
-        } else if (targetName.substring(ii).startsWith("//")) {
+        } else if (stringRegionMatch(targetName, "//", ii)) {
           return "target names may not contain '//' path separators";
         }
         continue;
       }
-      if (CharMatcher.JAVA_ISO_CONTROL.matches(c)) {
+      if (c <= '\u001f' || c == '\u007f') {
         return "target names may not contain non-printable characters: '" +
                String.format("\\x%02X", (int) c) + "'";
       }
@@ -192,6 +205,12 @@ public final class LabelValidator {
       return "target names may not end with '/'";
     }
     return null; // ok
+  }
+
+  // Prefer this implementation over calls to String#subString(), as the latter implies copying
+  // the subregion.
+  private static boolean stringRegionMatch(String fullString, String possibleMatch, int offset) {
+    return fullString.regionMatches(offset, possibleMatch, 0, possibleMatch.length());
   }
 
   /**
@@ -253,7 +272,7 @@ public final class LabelValidator {
     if (absName.startsWith("@")) {
       int endOfRepo = absName.indexOf("//");
       if (endOfRepo < 0) {
-        throw new BadLabelException("invalid fully-qualified label: " + absName);
+        return new PackageAndTarget("", absName.substring(1));
       }
       absName = absName.substring(endOfRepo);
     }

@@ -14,15 +14,14 @@
 package com.google.devtools.build.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
+import static org.junit.Assert.assertThrows;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /** Tests for {@link EmptySkyValue}. */
 @RunWith(JUnit4.class)
@@ -32,12 +31,10 @@ public class EmptySkyValueTest {
   public void testNotSerializable() throws IOException {
     ObjectOutputStream objOut = new ObjectOutputStream(new ByteArrayOutputStream());
 
-    try {
-      objOut.writeObject(EmptySkyValue.INSTANCE);
-      fail("Expected exception");
-    } catch (UnsupportedOperationException e) {
-      assertThat(e).hasMessage("Java serialization not supported");
-    }
+    UnsupportedOperationException e =
+        assertThrows(
+            UnsupportedOperationException.class, () -> objOut.writeObject(EmptySkyValue.INSTANCE));
+    assertThat(e).hasMessageThat().isEqualTo("Java serialization not supported");
   }
 
 }

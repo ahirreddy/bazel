@@ -13,56 +13,50 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.Predicate;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction.Factory;
-import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
-import com.google.devtools.build.lib.analysis.config.BinTools;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.Preprocessor;
-import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
-import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionName;
-
-import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * A factory of SkyframeExecutors that returns SequencedSkyframeExecutor.
  */
 public class SequencedSkyframeExecutorFactory implements SkyframeExecutorFactory {
 
+  private final BuildOptions defaultBuildOptions;
+
+  public SequencedSkyframeExecutorFactory(BuildOptions defaultBuildOptions) {
+    this.defaultBuildOptions = defaultBuildOptions;
+  }
+
   @Override
   public SkyframeExecutor create(
       PackageFactory pkgFactory,
-      TimestampGranularityMonitor tsgm,
+      FileSystem fileSystem,
       BlazeDirectories directories,
-      BinTools binTools,
+      ActionKeyContext actionKeyContext,
       Factory workspaceStatusActionFactory,
-      ImmutableList<BuildInfoFactory> buildInfoFactories,
-      Set<Path> immutableDirectories,
       Iterable<? extends DiffAwareness.Factory> diffAwarenessFactories,
-      Predicate<PathFragment> allowedMissingInputs,
-      Preprocessor.Factory.Supplier preprocessorFactorySupplier,
       ImmutableMap<SkyFunctionName, SkyFunction> extraSkyFunctions,
-      ImmutableList<PrecomputedValue.Injected> extraPrecomputedValues,
-      Iterable<SkyValueDirtinessChecker> customDirtinessCheckers) {
-    return SequencedSkyframeExecutor.create(
-        pkgFactory,
-        tsgm,
-        directories,
-        binTools,
-        workspaceStatusActionFactory,
-        buildInfoFactories,
-        immutableDirectories,
-        diffAwarenessFactories,
-        allowedMissingInputs,
-        preprocessorFactorySupplier,
-        extraSkyFunctions,
-        extraPrecomputedValues,
-        customDirtinessCheckers);
+      Iterable<SkyValueDirtinessChecker> customDirtinessCheckers,
+      @Nullable ManagedDirectoriesKnowledge managedDirectoriesKnowledge) {
+    return BazelSkyframeExecutorConstants.newBazelSkyframeExecutorBuilder()
+        .setPkgFactory(pkgFactory)
+        .setFileSystem(fileSystem)
+        .setDirectories(directories)
+        .setActionKeyContext(actionKeyContext)
+        .setDefaultBuildOptions(defaultBuildOptions)
+        .setWorkspaceStatusActionFactory(workspaceStatusActionFactory)
+        .setDiffAwarenessFactories(diffAwarenessFactories)
+        .setExtraSkyFunctions(extraSkyFunctions)
+        .setCustomDirtinessCheckers(customDirtinessCheckers)
+        .setManagedDirectoriesKnowledge(managedDirectoriesKnowledge)
+        .build();
   }
 }

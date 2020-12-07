@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/usr/bin/env bash
 
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -eu
+
 # A build status command to provide the package info generator with
 # the information about the commit being built
 
-set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(dirname ${SCRIPT_DIR})/release/common.sh"
 
@@ -31,13 +32,8 @@ fi
 if [ -n "${BUILD_LOG-}" ]; then
   echo "RELEASE_BUILD_LOG ${BUILD_LOG}"
 fi
-echo "RELEASE_COMMIT_MSG $(git_commit_msg | tr '\n' '\f')"
-release_name=$(get_release_name)
-rc=$(get_release_candidate)
+release_name=$(get_full_release_name)
 if [ -n "${release_name}" ]; then
-  if [ -n "${rc}" ]; then
-    echo "RELEASE_NAME ${release_name}rc${rc}"
-  else
-    echo "RELEASE_NAME ${release_name}"
-  fi
+  echo "RELEASE_NAME ${release_name}"
+  echo "RELEASE_NOTES $(get_full_release_notes | tr '\n' '\f')"
 fi

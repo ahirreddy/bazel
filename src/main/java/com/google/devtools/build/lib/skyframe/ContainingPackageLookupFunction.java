@@ -14,11 +14,12 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.skyframe.PackageLookupValue.ErrorReason;
+import com.google.devtools.build.lib.skyframe.PackageLookupValue.IncorrectRepositoryReferencePackageLookupValue;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import javax.annotation.Nullable;
 
 /**
@@ -27,7 +28,7 @@ import javax.annotation.Nullable;
 public class ContainingPackageLookupFunction implements SkyFunction {
 
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env) {
+  public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
     PackageIdentifier dir = (PackageIdentifier) skyKey.argument();
     PackageLookupValue pkgLookupValue =
         (PackageLookupValue) env.getValue(PackageLookupValue.key(dir));
@@ -39,6 +40,19 @@ public class ContainingPackageLookupFunction implements SkyFunction {
       return ContainingPackageLookupValue.withContainingPackage(dir, pkgLookupValue.getRoot());
     }
 
+    // Does the requested package cross into a sub-repository, which we should report via the
+    // correct package identifier?
+    if (pkgLookupValue instanceof IncorrectRepositoryReferencePackageLookupValue) {
+      IncorrectRepositoryReferencePackageLookupValue incorrectPackageLookupValue =
+          (IncorrectRepositoryReferencePackageLookupValue) pkgLookupValue;
+      PackageIdentifier correctPackageIdentifier =
+          incorrectPackageLookupValue.getCorrectedPackageIdentifier();
+      return env.getValue(ContainingPackageLookupValue.key(correctPackageIdentifier));
+    }
+
+    if (ErrorReason.REPOSITORY_NOT_FOUND.equals(pkgLookupValue.getErrorReason())) {
+      return new ContainingPackageLookupValue.NoContainingPackage(pkgLookupValue.getErrorMsg());
+    }
     PathFragment parentDir = dir.getPackageFragment().getParentDirectory();
     if (parentDir == null) {
       return ContainingPackageLookupValue.NONE;

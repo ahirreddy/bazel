@@ -14,37 +14,35 @@
 package com.google.devtools.build.lib.packages;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
 
 import com.google.common.base.Function;
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.ResolvedTargets;
-import com.google.devtools.build.lib.cmdline.TargetParsingException;
-import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.packages.util.PackageLoadingTestCaseForJunit4;
-import com.google.devtools.build.lib.pkgcache.TargetProvider;
-import com.google.devtools.build.lib.skyframe.TestSuiteExpansionValue;
+import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.events.StoredEventHandler;
+import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
+import com.google.devtools.build.lib.pkgcache.LoadingOptions;
+import com.google.devtools.build.lib.pkgcache.TestFilter;
+import com.google.devtools.build.lib.skyframe.TestsForTargetPatternValue;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
-
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.function.Predicate;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.Collection;
-import java.util.EnumSet;
+import org.mockito.Mockito;
 
 @RunWith(JUnit4.class)
-public class TestTargetUtilsTest extends PackageLoadingTestCaseForJunit4 {
+public class TestTargetUtilsTest extends PackageLoadingTestCase {
   private Target test1;
   private Target test2;
   private Target test1b;
@@ -87,14 +85,46 @@ public class TestTargetUtilsTest extends PackageLoadingTestCaseForJunit4 {
   @Test
   public void testFilterBySize() throws Exception {
     Predicate<Target> sizeFilter =
-        TestTargetUtils.testSizeFilter(EnumSet.of(TestSize.SMALL, TestSize.LARGE));
-    assertTrue(sizeFilter.apply(test1));
-    assertTrue(sizeFilter.apply(test2));
-    assertTrue(sizeFilter.apply(test1b));
-    sizeFilter = TestTargetUtils.testSizeFilter(EnumSet.of(TestSize.SMALL));
-    assertTrue(sizeFilter.apply(test1));
-    assertTrue(sizeFilter.apply(test2));
-    assertFalse(sizeFilter.apply(test1b));
+        TestFilter.testSizeFilter(EnumSet.of(TestSize.SMALL, TestSize.LARGE));
+    assertThat(sizeFilter.test(test1)).isTrue();
+    assertThat(sizeFilter.test(test2)).isTrue();
+    assertThat(sizeFilter.test(test1b)).isTrue();
+    sizeFilter = TestFilter.testSizeFilter(EnumSet.of(TestSize.SMALL));
+    assertThat(sizeFilter.test(test1)).isTrue();
+    assertThat(sizeFilter.test(test2)).isTrue();
+    assertThat(sizeFilter.test(test1b)).isFalse();
+  }
+
+  @Test
+  public void testFilterByLang() throws Exception {
+    StoredEventHandler eventHandler = new StoredEventHandler();
+    LoadingOptions options = new LoadingOptions();
+    options.testLangFilterList = ImmutableList.of("nonexistent", "existent", "-noexist", "-exist");
+    options.testSizeFilterSet = ImmutableSet.of();
+    options.testTimeoutFilterSet = ImmutableSet.of();
+    options.testTagFilterList = ImmutableList.of();
+    TestFilter filter =
+        TestFilter.forOptions(
+            options, eventHandler, ImmutableSet.of("existent_test", "exist_test"));
+    assertThat(eventHandler.getEvents()).hasSize(2);
+    Package pkg = Mockito.mock(Package.class);
+    RuleClass ruleClass = Mockito.mock(RuleClass.class);
+    Rule mockRule =
+        new Rule(
+            pkg,
+            null,
+            ruleClass,
+            Location.fromFile(""),
+            CallStack.EMPTY,
+            new AttributeContainer(ruleClass));
+    Mockito.when(ruleClass.getName()).thenReturn("existent_library");
+    assertThat(filter.apply(mockRule)).isTrue();
+    Mockito.when(ruleClass.getName()).thenReturn("exist_library");
+    assertThat(filter.apply(mockRule)).isFalse();
+    assertThat(eventHandler.getEvents())
+        .contains(Event.warn("Unknown language 'nonexistent' in --test_lang_filters option"));
+    assertThat(eventHandler.getEvents())
+        .contains(Event.warn("Unknown language 'noexist' in --test_lang_filters option"));
   }
 
   @Test
@@ -117,53 +147,10 @@ public class TestTargetUtilsTest extends PackageLoadingTestCaseForJunit4 {
     Target moderateTest = getTarget("//timeouts:moderate_timeout");
 
     Predicate<Target> timeoutFilter =
-        TestTargetUtils.testTimeoutFilter(EnumSet.of(TestTimeout.SHORT, TestTimeout.LONG));
-    assertTrue(timeoutFilter.apply(longTest));
-    assertTrue(timeoutFilter.apply(shortTest));
-    assertFalse(timeoutFilter.apply(moderateTest));
-  }
-
-  @Test
-  public void testFilterByTag() throws Exception {
-    Predicate<Target> tagFilter = TestTargetUtils.tagFilter(Lists.<String>newArrayList());
-    assertTrue(tagFilter.apply(test1));
-    assertTrue(tagFilter.apply(test2));
-    assertTrue(tagFilter.apply(test1b));
-    tagFilter = TestTargetUtils.tagFilter(Lists.newArrayList("tag1", "tag2"));
-    assertTrue(tagFilter.apply(test1));
-    assertTrue(tagFilter.apply(test2));
-    assertTrue(tagFilter.apply(test1b));
-    tagFilter = TestTargetUtils.tagFilter(Lists.newArrayList("tag1"));
-    assertTrue(tagFilter.apply(test1));
-    assertFalse(tagFilter.apply(test2));
-    assertTrue(tagFilter.apply(test1b));
-    tagFilter = TestTargetUtils.tagFilter(Lists.newArrayList("-tag2"));
-    assertTrue(tagFilter.apply(test1));
-    assertFalse(tagFilter.apply(test2));
-    assertTrue(tagFilter.apply(test1b));
-    // Applying same tag as positive and negative filter produces an empty
-    // result because the negative filter is applied first and positive filter will
-    // not match anything.
-    tagFilter = TestTargetUtils.tagFilter(Lists.newArrayList("tag2", "-tag2"));
-    assertFalse(tagFilter.apply(test1));
-    assertFalse(tagFilter.apply(test2));
-    assertFalse(tagFilter.apply(test1b));
-    tagFilter = TestTargetUtils.tagFilter(Lists.newArrayList("tag2", "-tag1"));
-    assertFalse(tagFilter.apply(test1));
-    assertTrue(tagFilter.apply(test2));
-    assertFalse(tagFilter.apply(test1b));
-  }
-
-  @Test
-  public void testExpandTestSuites() throws Exception {
-    assertExpandedSuites(Sets.newHashSet(test1, test2), Sets.newHashSet(test1, test2));
-    assertExpandedSuites(Sets.newHashSet(test1, test2), Sets.newHashSet(suite));
-    assertExpandedSuites(
-        Sets.newHashSet(test1, test2, test1b), Sets.newHashSet(test1, suite, test1b));
-    // The large test if returned as filtered from the test_suite rule, but should still be in the
-    // result set as it's explicitly added.
-    assertExpandedSuites(
-        Sets.newHashSet(test1, test2, test1b), ImmutableSet.<Target>of(test1b, suite));
+        TestFilter.testTimeoutFilter(EnumSet.of(TestTimeout.SHORT, TestTimeout.LONG));
+    assertThat(timeoutFilter.test(longTest)).isTrue();
+    assertThat(timeoutFilter.test(shortTest)).isTrue();
+    assertThat(timeoutFilter.test(moderateTest)).isFalse();
   }
 
   @Test
@@ -179,30 +166,6 @@ public class TestTargetUtilsTest extends PackageLoadingTestCaseForJunit4 {
         Sets.newHashSet(test1, test2, test1b), ImmutableSet.<Target>of(test1b, suite));
   }
 
-  @Test
-  public void testExpandTestSuitesKeepGoing() throws Exception {
-    reporter.removeHandler(failFastHandler);
-    scratch.file("broken/BUILD", "test_suite(name = 'broken', tests = ['//missing:missing_test'])");
-    ResolvedTargets<Target> actual =
-        TestTargetUtils.expandTestSuites(
-            getPackageManager(),
-            reporter,
-            Sets.newHashSet(getTarget("//broken")), /*strict=*/
-            false, /*keep_going=*/
-            true);
-    assertTrue(actual.hasError());
-    assertThat(actual.getTargets()).isEmpty();
-  }
-
-  private void assertExpandedSuites(Iterable<Target> expected, Collection<Target> suites)
-      throws Exception {
-    ResolvedTargets<Target> actual =
-        TestTargetUtils.expandTestSuites(
-            getPackageManager(), reporter, suites, /*strict=*/ false, /*keep_going=*/ true);
-    assertFalse(actual.hasError());
-    assertThat(actual.getTargets()).containsExactlyElementsIn(expected);
-  }
-
   private static final Function<Target, Label> TO_LABEL =
       new Function<Target, Label>() {
         @Override
@@ -213,37 +176,20 @@ public class TestTargetUtilsTest extends PackageLoadingTestCaseForJunit4 {
 
   private void assertExpandedSuitesSkyframe(Iterable<Target> expected, Collection<Target> suites)
       throws Exception {
+    ImmutableSet<Label> expectedLabels =
+        ImmutableSet.copyOf(Iterables.transform(expected, TO_LABEL));
     ImmutableSet<Label> suiteLabels = ImmutableSet.copyOf(Iterables.transform(suites, TO_LABEL));
-    SkyKey key = TestSuiteExpansionValue.key(suiteLabels);
-    EvaluationResult<TestSuiteExpansionValue> result =
-        getSkyframeExecutor()
-            .getDriverForTesting()
-            .evaluate(ImmutableList.of(key), false, 1, reporter);
-    ResolvedTargets<Target> actual = result.get(key).getTargets();
-    assertFalse(actual.hasError());
-    assertThat(actual.getTargets()).containsExactlyElementsIn(expected);
-  }
-
-  @Test
-  public void testExpandTestSuitesInterrupted() throws Exception {
-    reporter.removeHandler(failFastHandler);
-    scratch.file("broken/BUILD", "test_suite(name = 'broken', tests = ['//missing:missing_test'])");
-    try {
-      TestTargetUtils.expandTestSuites(
-          new TargetProvider() {
-            @Override
-            public Target getTarget(EventHandler eventHandler, Label label)
-                throws InterruptedException {
-              throw new InterruptedException();
-            }
-          },
-          reporter,
-          Sets.newHashSet(getTarget("//broken")), /*strict=*/
-          false, /*keep_going=*/
-          true);
-    } catch (TargetParsingException e) {
-      assertNotNull(e.getMessage());
-    }
-    assertTrue(Thread.currentThread().isInterrupted());
+    SkyKey key = TestsForTargetPatternValue.key(suiteLabels);
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(1)
+            .setEventHander(reporter)
+            .build();
+    EvaluationResult<TestsForTargetPatternValue> result =
+        getSkyframeExecutor().getDriver().evaluate(ImmutableList.of(key), evaluationContext);
+    ResolvedTargets<Label> actual = result.get(key).getLabels();
+    assertThat(actual.hasError()).isFalse();
+    assertThat(actual.getTargets()).containsExactlyElementsIn(expectedLabels);
   }
 }

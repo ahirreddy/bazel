@@ -14,8 +14,9 @@
 
 package com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools;
 
-import com.google.devtools.build.lib.util.CPU;
-
+import java.io.IOException;
+import java.io.StringReader;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -24,7 +25,53 @@ import java.util.regex.Pattern;
  */
 public class NdkRelease {
 
+  /** Key name for the revision in the source.properties file. */
+  private static final String REVISION_PROPERTY = "Pkg.Revision";
+
   public static NdkRelease create(String releaseString) {
+    if (releaseString.contains(REVISION_PROPERTY)) {
+      // For NDK r11+
+      return createFromSourceProperties(releaseString);
+    } else {
+      // For NDK r10e
+      return createFromReleaseTxt(releaseString);
+    }
+  }
+
+  /**
+   * Creates an NdkRelease for r11+ (uses source.properties)
+   */
+  private static NdkRelease createFromSourceProperties(String releaseString) {
+    Properties properties = new Properties();
+    try {
+      properties.load(new StringReader(releaseString));
+    } catch (IOException e) {
+      // This shouldn't happen from a StringReader.
+      throw new IllegalStateException(e);
+    }
+    String revision = properties.getProperty(REVISION_PROPERTY);
+    String[] revisionParsed = revision.split("\\.");
+    if (revisionParsed.length < 2) {
+      // Unable to parse Pkg.Revision. Return invalid NdkRelease that is assumed to be the
+      // latest NDK revision.
+      return new NdkRelease(
+          revision, false, AndroidNdkCrosstools.LATEST_KNOWN_REVISION.getKey(), null, null, false);
+    } else {
+      return new NdkRelease(
+          revision, // raw revision
+          /* isValid= */ true,
+          Integer.parseInt(revisionParsed[0]), // major revision
+          revisionParsed[1], // minor revision
+          null, // release candidate
+          true // is64 bit. 32-bit NDKs are provided for only windows.
+          );
+    }
+  }
+
+  /**
+   * Creates an NdkRelease pre-r11 (used RELEASE.TXT)
+   */
+  private static NdkRelease createFromReleaseTxt(String revisionString) {
     // NDK release should be of the format "r\d+\w?(-rc\d+)?( \(64-bit\))?", eg:
     // r8
     // r10
@@ -32,49 +79,49 @@ public class NdkRelease {
     // r10e
     // r10e-rc4
     // r10e-rc4 (64-bit)
-    Pattern releaseRegex = Pattern.compile(
-        "(?<rel>r\\d+\\w?)(-(?<rc>rc\\d+))?(?<s4> \\(64-bit\\))?");
-    Matcher matcher = releaseRegex.matcher(releaseString);
+    Pattern revisionRegex = Pattern.compile(
+        "r(?<Mrev>\\d+)(?<mrev>\\w)?(-(?<rc>rc\\d+))?(?<s4> \\(64-bit\\))?");
+    Matcher matcher = revisionRegex.matcher(revisionString);
     boolean isValid = matcher.matches();
 
     if (isValid) {
       return new NdkRelease(
-          releaseString,
+          revisionString,
           isValid,
-          matcher.group("rel"), /* release */
-          matcher.group("rc"), /* releaseCandidate */
-          matcher.group("s4") != null /* is64Bit */);
+          Integer.parseInt(matcher.group("Mrev")), /* major revision */
+          matcher.group("mrev"), /* minor revision */
+          /* releaseCandidate= */ matcher.group("rc"),
+          /* is64Bit= */ matcher.group("s4") != null);
     } else {
-      return new NdkRelease(releaseString, false, null, null, false);
+      return new NdkRelease(
+          revisionString,
+          false,
+          AndroidNdkCrosstools.LATEST_KNOWN_REVISION.getKey(), // assume latest NDK revision
+          null,
+          null,
+          false);
     }
-  }
-
-  /**
-   * Guesses the bit-ness of the NDK based on the current platform.
-   */
-  static NdkRelease guessBitness(String baseReleaseString) {
-    NdkRelease baseRelease = create(baseReleaseString);
-    boolean is64Bit = (CPU.getCurrent() == CPU.X86_64);
-    return new NdkRelease(
-        baseRelease.rawRelease + (is64Bit ? " (64-bit)" : ""),
-        baseRelease.isValid,
-        baseRelease.release,
-        baseRelease.releaseCandidate,
-        is64Bit);
   }
 
   public final String rawRelease;
   public final boolean isValid;
 
-  public final String release;
+  public final Integer majorRevision;
+  public final String minorRevision;
   public final String releaseCandidate;
   public final boolean is64Bit;
 
-  private NdkRelease(String rawRelease, boolean isValid, String release, String releaseCandidate,
+  private NdkRelease(
+      String rawRelease,
+      boolean isValid,
+      Integer majorRevision,
+      String minorRevision,
+      String releaseCandidate,
       boolean is64Bit) {
     this.rawRelease = rawRelease;
     this.isValid = isValid;
-    this.release = release;
+    this.majorRevision = majorRevision;
+    this.minorRevision = minorRevision;
     this.releaseCandidate = releaseCandidate;
     this.is64Bit = is64Bit;
   }

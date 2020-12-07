@@ -12,31 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/main/cpp/blaze_util.h"
+#include "src/main/cpp/blaze_util_platform.h"
 #include "src/main/cpp/util/file.h"
-#include "gtest/gtest.h"
+#include "googlemock/include/gmock/gmock.h"
+#include "googletest/include/gtest/gtest.h"
 
 namespace blaze {
 
-static bool Symlink(const string& old_path, const string& new_path) {
-  return symlink(old_path.c_str(), new_path.c_str()) == 0;
-}
-
-static bool CreateEmptyFile(const string& path) {
-  int fd = open(path.c_str(), O_CREAT | O_WRONLY);
-  if (fd == -1) {
-    return false;
-  }
-  return close(fd) == 0;
-}
+using std::string;
+using ::testing::HasSubstr;
 
 class BlazeUtilTest : public ::testing::Test {
  protected:
@@ -46,7 +39,8 @@ class BlazeUtilTest : public ::testing::Test {
   virtual ~BlazeUtilTest() {
   }
 
-  static void ForkAndWrite(int fds[], string input1, string input2) {
+  static void ForkAndWrite(int fds[], const string& input1,
+                           const string& input2) {
     int r = fork();
     if (r == 0) {
       close(fds[0]);
@@ -63,7 +57,7 @@ class BlazeUtilTest : public ::testing::Test {
     }
   }
 
-  static int WriteFileDescriptor2(string input1, string input2) {
+  static int WriteFileDescriptor2(const string& input1, const string& input2) {
     // create a fd for the input string
     int fds[2];
     if (pipe(fds) == -1) {
@@ -73,7 +67,7 @@ class BlazeUtilTest : public ::testing::Test {
         || fcntl(fds[1], F_SETFL, O_NONBLOCK) == -1) {
       return -1;
     }
-    if (input2.size() > 0) {
+    if (!input2.empty()) {
       ForkAndWrite(fds, input1, input2);
     } else {
       write(fds[1], input1.c_str(), input1.size());
@@ -82,14 +76,16 @@ class BlazeUtilTest : public ::testing::Test {
     return fds[0];
   }
 
-  static void AssertReadFileDescriptor2(string input1, string input2) {
+  static void AssertReadFrom2(const string& input1, const string& input2) {
     int fd = WriteFileDescriptor2(input1, input2);
     if (fd < 0) {
       FAIL() << "Unable to create a pipe!";
     } else {
       string result;
-      if (!ReadFileDescriptor(fd, &result)) {
-        perror("ReadFileDescriptor");
+      bool success = blaze_util::ReadFrom(fd, &result);
+      close(fd);
+      if (!success) {
+        perror("ReadFrom");
         FAIL() << "Unable to read file descriptor!";
       } else {
         ASSERT_EQ(input1 + input2, result);
@@ -97,155 +93,145 @@ class BlazeUtilTest : public ::testing::Test {
     }
   }
 
-  static void AssertReadFileDescriptor(string input) {
-    AssertReadFileDescriptor2(input, "");
-  }
+  static void AssertReadFrom(string input) { AssertReadFrom2(input, ""); }
 
-  static void AssertReadJvmVersion2(string expected,
-                                    string input1, string input2) {
-    int fd = WriteFileDescriptor2(input1, input2);
-    if (fd < 0) {
-      FAIL() << "Unable to create a pipe!";
-    } else {
-      ASSERT_EQ(expected, ReadJvmVersion(fd));
-    }
-  }
-
-  static void AssertReadJvmVersion(string expected, string input) {
-    AssertReadJvmVersion2(expected, input, "");
-  }
-
-  void ReadFileDescriptorTest() const {
-    AssertReadFileDescriptor("DummyJDK Blabla\n"
-                         "More DummyJDK Blabla\n");
-    AssertReadFileDescriptor("dummyjdk version \"1.42.qual\"\n"
-                         "DummyJDK Blabla\n"
-                         "More DummyJDK Blabla\n");
-    AssertReadFileDescriptor2("first_line\n",
-                         "second line version \"1.4.2_0\"\n");
-  }
-
-  void ReadJvmVersionTest() const {
-    AssertReadJvmVersion("1.42", "dummyjdk version \"1.42\"\n"
-                         "DummyJDK Blabla\n"
-                         "More DummyJDK Blabla\n");
-    AssertReadJvmVersion("1.42.qual", "dummyjdk version \"1.42.qual\"\n"
-                         "DummyJDK Blabla\n"
-                         "More DummyJDK Blabla\n");
-    AssertReadJvmVersion("1.42.qualifie", "dummyjdk version \"1.42.qualifie");
-    AssertReadJvmVersion("", "dummyjdk version ");
-    AssertReadJvmVersion2("1.4.2_0", "first_line\n",
-                         "second line version \"1.4.2_0\"\n");
-  }
-
-  void CheckJavaVersionIsAtLeastTest() const {
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", ""));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "0"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.7"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.7.0"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.0"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.6"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.42", "1"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.42", "1.7"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.42", "1.11"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.42.42", "1.11"));
-    ASSERT_TRUE(CheckJavaVersionIsAtLeast("1.42.42", "1.11.11"));
-
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "42"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "2"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.8"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.7.1"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.7.0-ver-specifier-42", "1.42"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.42", "2"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.42", "1.69"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.42", "1.42.1"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.42.42", "1.42.43"));
-    ASSERT_FALSE(CheckJavaVersionIsAtLeast("1.42.42.0", "1.42.42.1"));
+  void ReadFromTest() const {
+    AssertReadFrom(
+        "DummyJDK Blabla\n"
+        "More DummyJDK Blabla\n");
+    AssertReadFrom(
+        "dummyjdk version \"1.42.qual\"\n"
+        "DummyJDK Blabla\n"
+        "More DummyJDK Blabla\n");
+    AssertReadFrom2("first_line\n", "second line version \"1.4.2_0\"\n");
   }
 };
 
-TEST_F(BlazeUtilTest, CheckJavaVersionIsAtLeast) {
-  CheckJavaVersionIsAtLeastTest();
+TEST_F(BlazeUtilTest, ReadFrom) { ReadFromTest(); }
+
+TEST_F(BlazeUtilTest, TestSearchNullaryEmptyCase) {
+  ASSERT_FALSE(SearchNullaryOption({}, "flag", false));
+  ASSERT_TRUE(SearchNullaryOption({}, "flag", true));
 }
 
-TEST_F(BlazeUtilTest, ReadFileDescriptor) {
-  ReadFileDescriptorTest();
+TEST_F(BlazeUtilTest, TestSearchUnaryEmptyCase) {
+  ASSERT_STREQ(nullptr, SearchUnaryOption({}, "--flag", false));
 }
 
-TEST_F(BlazeUtilTest, ReadJvmVersion) {
-  ReadJvmVersionTest();
+TEST_F(BlazeUtilTest, TestSearchNullaryForEmpty) {
+  ASSERT_TRUE(SearchNullaryOption({"bazel", "build", ":target"}, "", true));
+  ASSERT_FALSE(SearchNullaryOption({"bazel", "build", ":target"}, "", false));
 }
 
-TEST_F(BlazeUtilTest, MakeDirectories) {
-  const char* tmp_dir = getenv("TEST_TMPDIR");
-  ASSERT_STRNE(tmp_dir, NULL);
-  const char* test_src_dir = getenv("TEST_SRCDIR");
-  ASSERT_STRNE(NULL, test_src_dir);
-
-  string dir = blaze_util::JoinPath(tmp_dir, "x/y/z");
-  int ok = MakeDirectories(dir, 0755);
-  ASSERT_EQ(0, ok);
-
-  // Changing permissions on an existing dir should work.
-  ok = MakeDirectories(dir, 0750);
-  ASSERT_EQ(0, ok);
-  struct stat filestat = {};
-  ASSERT_EQ(0, stat(dir.c_str(), &filestat));
-  ASSERT_EQ(0750, filestat.st_mode & 0777);
-
-  // srcdir shouldn't be writable.
-  // TODO(ulfjack): Fix this!
-//  string srcdir = blaze_util::JoinPath(test_src_dir, "x/y/z");
-//  ok = MakeDirectories(srcdir, 0755);
-//  ASSERT_EQ(-1, ok);
-//  ASSERT_EQ(EACCES, errno);
-
-  // Can't make a dir out of a file.
-  string non_dir = blaze_util::JoinPath(dir, "w");
-  ASSERT_TRUE(CreateEmptyFile(non_dir));
-  ok = MakeDirectories(non_dir, 0755);
-  ASSERT_EQ(-1, ok);
-  ASSERT_EQ(ENOTDIR, errno);
-
-  // Valid symlink should work.
-  string symlink = blaze_util::JoinPath(tmp_dir, "z");
-  ASSERT_TRUE(Symlink(dir, symlink));
-  ok = MakeDirectories(symlink, 0755);
-  ASSERT_EQ(0, ok);
-
-  // Error: Symlink to a file.
-  symlink = blaze_util::JoinPath(tmp_dir, "w");
-  ASSERT_TRUE(Symlink(non_dir, symlink));
-  ok = MakeDirectories(symlink, 0755);
-  ASSERT_EQ(-1, ok);
-  ASSERT_EQ(ENOTDIR, errno);
-
-  // Error: Symlink to a dir with wrong perms.
-  symlink = blaze_util::JoinPath(tmp_dir, "s");
-  ASSERT_TRUE(Symlink("/", symlink));
-
-  // These perms will force a chmod()
-  // TODO(ulfjack): Fix this!
-//  ok = MakeDirectories(symlink, 0000);
-//  ASSERT_EQ(-1, ok);
-//  ASSERT_EQ(EPERM, errno);
-
-  // Edge cases.
-  ASSERT_EQ(-1, MakeDirectories("", 0755));
-  ASSERT_EQ(EACCES, errno);
-  ASSERT_EQ(-1, MakeDirectories("/", 0755));
-  ASSERT_EQ(EACCES, errno);
+TEST_F(BlazeUtilTest, TestSearchNullaryForFlagNotPresent) {
+  ASSERT_FALSE(SearchNullaryOption({"bazel", "build", ":target"},
+                                   "flag", false));
+  ASSERT_TRUE(SearchNullaryOption({"bazel", "build", ":target"},
+                                   "flag", true));
 }
 
-TEST_F(BlazeUtilTest, HammerMakeDirectories) {
-  const char* tmp_dir = getenv("TEST_TMPDIR");
-  ASSERT_STRNE(tmp_dir, NULL);
+TEST_F(BlazeUtilTest, TestSearchNullaryStartupOption) {
+  ASSERT_TRUE(SearchNullaryOption({"bazel", "--flag", "build", ":target"},
+                                  "flag", false));
+  ASSERT_TRUE(SearchNullaryOption({"bazel", "--flag", "build", ":target"},
+                                  "flag", true));
+}
 
-  string path = blaze_util::JoinPath(tmp_dir, "x/y/z");
-  // TODO(ulfjack): Fix this!
-//  ASSERT_LE(0, fork());
-//  ASSERT_EQ(0, MakeDirectories(path, 0755));
+TEST_F(BlazeUtilTest, TestSearchNullaryStartupOptionWithEquals) {
+  ASSERT_DEATH(SearchNullaryOption(
+      {"bazel", "--flag=value", "build", ":target"}, "flag", false),
+              "In argument '--flag=value': option "
+              "'--flag' does not take a value");
+}
+
+TEST_F(BlazeUtilTest, TestSearchNullaryCommandOption) {
+  ASSERT_TRUE(SearchNullaryOption({"bazel", "build", ":target", "--flag"},
+                                  "flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchNullarySkipsAfterDashDash) {
+  ASSERT_FALSE(SearchNullaryOption(
+      {"bazel", "build", ":target", "--", "--flag"}, "flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchNullarySucceedsWithEqualsAndDashDash) {
+  ASSERT_FALSE(SearchNullaryOption(
+      {"bazel", "build", ":target", "--", "--flag=value"}, "flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchNullaryLastFlagWins) {
+  ASSERT_FALSE(SearchNullaryOption(
+      {"bazel", "--flag", "--noflag", "build"}, "flag", false));
+  ASSERT_FALSE(SearchNullaryOption(
+      {"bazel", "--flag", "--noflag", "build"}, "flag", true));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryForEmpty) {
+  ASSERT_STREQ(nullptr, SearchUnaryOption({"bazel", "build", ":target"}, "",
+                                          false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryFlagNotPresent) {
+  ASSERT_STREQ(nullptr,
+               SearchUnaryOption({"bazel", "build", ":target"}, "--flag",
+                                 false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryStartupOptionWithEquals) {
+  ASSERT_STREQ("value",
+               SearchUnaryOption({"bazel", "--flag=value", "build", ":target"},
+                                 "--flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryStartupOptionWithoutEquals) {
+  ASSERT_STREQ("value",
+               SearchUnaryOption(
+                   {"bazel", "--flag", "value", "build", ":target"}, "--flag",
+                   false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryCommandOptionWithEquals) {
+  ASSERT_STREQ("value",
+               SearchUnaryOption(
+                   {"bazel", "build", ":target", "--flag", "value"}, "--flag",
+                   false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryCommandOptionWithoutEquals) {
+  ASSERT_STREQ("value",
+               SearchUnaryOption(
+                   {"bazel", "build", ":target", "--flag=value"}, "--flag",
+                   false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnarySkipsAfterDashDashWithEquals) {
+  ASSERT_STREQ(nullptr,
+               SearchUnaryOption(
+                   {"bazel", "build", ":target", "--", "--flag", "value"},
+                   "--flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnarySkipsAfterDashDashWithoutEquals) {
+  ASSERT_STREQ(nullptr,
+               SearchUnaryOption(
+                   {"bazel", "build", ":target", "--", "--flag=value"},
+                   "--flag", false));
+}
+
+TEST_F(BlazeUtilTest, TestSearchUnaryCommandOptionWarnsAboutDuplicates) {
+  testing::internal::CaptureStderr();
+  for (int i = 0; i < 2; ++i) {
+    bool warn_if_dupe = (i == 0);
+    ASSERT_STREQ("v1",
+                 SearchUnaryOption(
+                     {"foo", "--flag", "v1", "bar", "--flag=v2"}, "--flag",
+                     warn_if_dupe));
+
+    if (warn_if_dupe) {
+      std::string stderr_output = testing::internal::GetCapturedStderr();
+      EXPECT_THAT(stderr_output, HasSubstr("--flag is given more than once"));
+    }
+  }
 }
 
 }  // namespace blaze

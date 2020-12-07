@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/bin/bash
 
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -eu
+
 # Main deploy functions for the continous build system
 # Just source this file and use the various method:
 #   bazel_build build bazel and run all its test
@@ -22,166 +24,48 @@
 #     Also prepare an email for announcing the release.
 
 # Load common.sh
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source $(dirname ${SCRIPT_DIR})/release/common.sh
+BUILD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname ${BUILD_SCRIPT_DIR})/release/common.sh"
+source "$(dirname ${BUILD_SCRIPT_DIR})/release/relnotes.sh"
 
-: ${GIT_REPOSITORY_URL:=https://github.com/bazelbuild/bazel}
-
-: ${GCS_BASE_URL:=https://storage.googleapis.com}
-: ${GCS_BUCKET:=bucket-o-bazel}
-
-: ${EMAIL_TEMPLATE_RC:=${SCRIPT_DIR}/rc_email.txt}
-: ${EMAIL_TEMPLATE_RELEASE:=${SCRIPT_DIR}/release_email.txt}
-
-: ${RELEASE_CANDIDATE_URL:="${GCS_BASE_URL}/${GCS_BUCKET}/%release_name%/rc%rc%/index.html"}
-: ${RELEASE_URL="${GIT_REPOSITORY_URL}/releases/tag/%release_name%"}
-
-set -eu
-
-PLATFORM="$(uname -s | tr 'A-Z' 'a-z')"
-if [[ ${PLATFORM} == "darwin" ]]; then
-  function checksum() {
-    (cd "$(dirname "$1")" && shasum -a 256 "$(basename "$1")")
-  }
-else
-  function checksum() {
-    (cd "$(dirname "$1")" && sha256sum "$(basename "$1")")
-  }
+if ! command -v gsutil &>/dev/null; then
+  echo "Required tool 'gsutil' not found. Please install it:"
+  echo "See https://cloud.google.com/sdk/downloads for instructions."
+  exit 1
 fi
+if ! command -v github-release &>/dev/null; then
+  echo "Required tool 'github-release' not found. Download it from here:"
+  echo "https://github.com/c4milo/github-release/releases"
+  echo "Just extract the archive and put the binary on your PATH."
+  exit 1
+fi
+if ! command -v debsign &>/dev/null; then
+  echo "Required tool 'debsign' not found. Please install it via apt-get:"
+  echo "apt-get install devscripts"
+  exit 1
+fi
+if ! command -v reprepro &>/dev/null; then
+  echo "Required tool 'reprepro' not found. Please install it via apt-get:"
+  echo "apt-get install reprepro"
+  exit 1
+fi
+if ! command -v gpg &>/dev/null; then
+  echo "Required tool 'gpg' not found. Please install it via apt-get:"
+  echo "apt-get install gnupg"
+  exit 1
+fi
+if ! command -v pandoc &>/dev/null; then
+  echo "Required tool 'pandoc' not found. Please install it via apt-get:"
+  echo "apt-get install pandoc"
+  exit 1
+fi
+# if ! command -v ssmtp &>/dev/null; then
+#   echo "Required tool 'ssmtp' not found. Please install it via apt-get:"
+#   echo "apt-get install ssmtp"
+#   exit 1
+# fi
 
-GIT_ROOT="$(git rev-parse --show-toplevel)"
-BUILD_SCRIPT_PATH="${GIT_ROOT}/compile.sh"
-
-# Returns the full release name in the form NAME(rcRC)?
-function get_full_release_name() {
-  local rc=$(get_release_candidate)
-  local name=$(get_release_name)
-  if [ -n "${rc}" ]; then
-    echo "${name}rc${rc}"
-  else
-    echo "${name}"
-  fi
-}
-
-function setup_android_repositories() {
-  if [ ! -f WORKSPACE.bak ] && [ -n "${ANDROID_SDK_PATH-}" ]; then
-    cp WORKSPACE WORKSPACE.bak
-    trap '[ -f WORKSPACE.bak ] && rm WORKSPACE && mv WORKSPACE.bak WORKSPACE' \
-      EXIT
-    cat >>WORKSPACE <<EOF
-android_sdk_repository(
-    name = "androidsdk",
-    path = "${ANDROID_SDK_PATH}",
-    build_tools_version = "${ANDROID_SDK_BUILD_TOOLS_VERSION:-22.0.1}",
-    api_level = ${ANDROID_SDK_API_LEVEL:-21},
-)
-
-bind(
-    name = "android_sdk_for_testing",
-    actual = "@androidsdk//:files",
-)
-EOF
-    if [ -n "${ANDROID_NDK_PATH-}" ]; then
-      cat >>WORKSPACE <<EOF
-android_ndk_repository(
-    name = "androidndk",
-    path = "${ANDROID_NDK_PATH}",
-    api_level = ${ANDROID_NDK_API_LEVEL:-21},
-)
-
-bind(
-    name = "android_ndk_for_testing",
-    actual = "@androidndk//:files",
-)
-EOF
-    fi
-  fi
-}
-
-# Set the various arguments when JDK 7 is required (deprecated).
-# This method is here to continue to build binary release of Bazel
-# for JDK 7. We will drop this method and JDK 7 support when our
-# ci system turn red on this one.
-function setup_jdk7() {
-  # This is a JDK 7 JavaBuilder from release 0.1.0.
-  local javabuilder_url="https://storage.googleapis.com/bazel/0.1.0/JavaBuilder_deploy.jar"
-  local javac_url="https://github.com/bazelbuild/bazel/blob/0.1.0/third_party/java/jdk/langtools/javac.jar?raw=true"
-  sed -i.bak 's/_version = "8"/_version = "7"/' tools/jdk/BUILD
-  rm -f tools/jdk/BUILD.bak
-  rm -f third_party/java/jdk/langtools/javac.jar
-  curl -Ls -o tools/jdk/JavaBuilder_deploy.jar "${javabuilder_url}"
-  curl -Ls -o third_party/java/jdk/langtools/javac.jar "${javac_url}"
-  # Do not use the skylark bootstrapped version of JavaBuilder
-  export BAZEL_ARGS="--singlejar_top=//src/java_tools/singlejar:bootstrap_deploy.jar \
-      --genclass_top=//src/java_tools/buildjar:bootstrap_genclass_deploy.jar \
-      --ijar_top=//third_party/ijar"
-  # Skip building JavaBuilder
-  export BAZEL_SKIP_TOOL_COMPILATION=tools/jdk/JavaBuilder_deploy.jar
-  # Ignore JDK8 tests
-  export BAZEL_TEST_FILTERS="-jdk8"
-  # And more ugly hack. Overwrite the BUILD file of JavaBuilder
-  # so we use the pre-built version in integration tests.
-  sed -i.bak 's/name = \"JavaBuilder\"/name = \"RealJavaBuilder\"/' \
-      src/java_tools/buildjar/BUILD
-  rm -f src/java_tools/buildjar/BUILD.bak
-  cat >>src/java_tools/buildjar/BUILD <<'EOF'
-genrule(
-    name = "JavaBuilder",
-    outs = ["JavaBuilder_deploy.jar"],
-    srcs = ["//tools/jdk:JavaBuilder_deploy.jar"],
-    cmd = "cp $< $@",
-    visibility = ["//visibility:public"],
-)
-EOF
-}
-
-# Main entry point for building bazel.
-# It sets the embed label to the release name if any, calls the whole
-# test suite, compile the various packages, then copy the artifacts
-# to the folder in $1
-function bazel_build() {
-  local release_label="$(get_full_release_name)"
-  local embed_label_opts=
-
-  if [ -n "${release_label}" ]; then
-    export EMBED_LABEL="${release_label}"
-  fi
-
-  if [[ "${JAVA_VERSION-}" =~ ^(1\.)?7$ ]]; then
-    setup_jdk7
-    release_label="${release_label}-jdk7"
-  fi
-
-  setup_android_repositories
-  retCode=0
-  ${BUILD_SCRIPT_PATH} ${BAZEL_COMPILE_TARGET:-all} || retCode=$?
-
-  # Exit for failure except for test failures (exit code 3).
-  if (( $retCode != 0 && $retCode != 3 )); then
-    exit $retCode
-  fi
-
-  # Build the packages
-  ./output/bazel --bazelrc=${BAZELRC:-/dev/null} --nomaster_bazelrc build \
-      --embed_label=${release_label} --stamp \
-      --workspace_status_command=scripts/ci/build_status_command.sh \
-      //scripts/packages/... || exit $?
-
-  if [ -n "${1-}" ]; then
-    # Copy the results to the output directory
-    mkdir -p $1/packages
-    cp output/bazel $1/bazel
-    cp bazel-bin/scripts/packages/install.sh $1/bazel-${release_label}-installer.sh
-    if [ "$PLATFORM" = "linux" ]; then
-      cp bazel-bin/scripts/packages/bazel-debian.deb $1/bazel_${release_label}.deb
-    fi
-    cp bazel-genfiles/scripts/packages/README.md $1/README.md
-  fi
-
-  if (( $retCode )); then
-    export BUILD_UNSTABLE=1
-  fi
-}
+export APT_GPG_KEY_ID=$(gsutil cat gs://bazel-trusted-encrypted-secrets/release-key.gpg.id)
 
 # Generate a string from a template and a list of substitutions.
 # The first parameter is the template name and each subsequent parameter
@@ -202,172 +86,336 @@ function generate_from_template() {
 # the mail subjects and the subsequent lines the mail, its content.
 # If no planed release, then this function output will be empty.
 function generate_email() {
+  RELEASE_CANDIDATE_URL="https://releases.bazel.build/%release_name%/rc%rc%/index.html"
+  RELEASE_URL="https://github.com/bazelbuild/bazel/releases/tag/%release_name%"
+
   local release_name=$(get_release_name)
   local rc=$(get_release_candidate)
   local args=(
       "%release_name%" "${release_name}"
       "%rc%" "${rc}"
-      "%relnotes%" "# $(git_commit_msg)"
+      "%relnotes%" "# $(get_full_release_notes)"
   )
   if [ -n "${rc}" ]; then
     args+=(
-        "%url%"
-        "$(generate_from_template "${RELEASE_CANDIDATE_URL}" "${args[@]}")"
+        "%url%" "$(generate_from_template "${RELEASE_CANDIDATE_URL}" "${args[@]}")"
     )
-    generate_from_template "$(cat ${EMAIL_TEMPLATE_RC})" "${args[@]}"
+    generate_from_template \
+        "$(cat "${BUILD_SCRIPT_DIR}/rc_email.txt")" \
+        "${args[@]}"
   elif [ -n "${release_name}" ]; then
     args+=(
-        "%url%"
-        "$(generate_from_template "${RELEASE_URL}" "${args[@]}")"
+        "%url%" "$(generate_from_template "${RELEASE_URL}" "${args[@]}")"
     )
-    generate_from_template "$(cat ${EMAIL_TEMPLATE_RELEASE})" "${args[@]}"
+    generate_from_template \
+        "$(cat "${BUILD_SCRIPT_DIR}/release_email.txt")" "${args[@]}"
   fi
+}
+
+function get_release_page() {
+    echo "# $(get_full_release_notes)"'
+
+_Notice_: Bazel installers contain binaries licensed under the GPLv2 with
+Classpath exception. Those installers should always be redistributed along with
+the source code.
+
+Some versions of Bazel contain a bundled version of OpenJDK. The license of the
+bundled OpenJDK and other open-source components can be displayed by running
+the command `bazel license`. The vendor and version information of the bundled
+OpenJDK can be displayed by running the command `bazel info java-runtime`.
+The binaries and source-code of the bundled OpenJDK can be
+[downloaded from our mirror server](https://mirror.bazel.build/openjdk/index.html).
+
+_Security_: All our binaries are signed with our
+[public key](https://bazel.build/bazel-release.pub.gpg) 3D5919B448457EE0.
+'
 }
 
 # Deploy a github release using a third party tool:
 #   https://github.com/c4milo/github-release
 # This methods expects the following arguments:
 #   $1..$n files generated by package_build (should not contains the README file)
-# Please set GITHUB_TOKEN to talk to the Github API and GITHUB_RELEASE
-# for the path to the https://github.com/c4milo/github-release tool.
-# This method is also affected by GIT_REPOSITORY_URL which should be the
-# URL to the github repository (defaulted to https://github.com/bazelbuild/bazel).
+# Please set GITHUB_TOKEN to talk to the Github API.
 function release_to_github() {
-  local url="${GIT_REPOSITORY_URL}"
+  local artifact_dir="$1"
+
   local release_name=$(get_release_name)
   local rc=$(get_release_candidate)
-  local release_tool="${GITHUB_RELEASE:-$(which github-release 2>/dev/null || true)}"
-  if [ ! -x "${release_tool}" ]; then
-    echo "Please set GITHUB_RELEASE to the path to the github-release binary." >&2
-    echo "This probably means you haven't installed https://github.com/c4milo/github-release " >&2
-    echo "on this machine." >&2
-    return 1
-  fi
-  local github_repo="$(echo "$url" | sed -E 's|https?://github.com/([^/]*/[^/]*).*$|\1|')"
+
   if [ -n "${release_name}" ] && [ -z "${rc}" ]; then
-    mkdir -p "${tmpdir}/to-github"
-    cp "${@}" "${tmpdir}/to-github"
-    "${GITHUB_RELEASE}" "${github_repo}" "${release_name}" "" "# $(git_commit_msg)" "${tmpdir}/to-github/"'*'
+    local github_token="$(gsutil cat gs://bazel-trusted-encrypted-secrets/github-trusted-token.enc | \
+        gcloud kms decrypt --project bazel-public --location global --keyring buildkite --key github-trusted-token --ciphertext-file - --plaintext-file -)"
+
+    GITHUB_TOKEN="${github_token}" github-release "bazelbuild/bazel" "${release_name}" "" "$(get_release_page)" "${artifact_dir}/*"
   fi
 }
 
-# Creates an index of the files contained in folder $1 in mardown format
+# Creates an index of the files contained in folder $1 in Markdown format.
 function create_index_md() {
-  # First, add the README.md
-  local file=$1/__temp.md
-  if [ -f $1/README.md ]; then
-    cat $1/README.md
-  fi
+  # First, add the release notes
+  get_release_page
   # Then, add the list of files
   echo
   echo "## Index of files"
   echo
   for f in $1/*.sha256; do  # just list the sha256 ones
     local filename=$(basename $f .sha256);
-    echo " - [${filename}](${filename}) [[SHA-256](${filename}.sha256)]"
+    echo " - [${filename}](${filename}) [[SHA-256](${filename}.sha256)] [[SIG](${filename}.sig)]"
   done
 }
 
-# Creates an index of the files contained in folder $1 in HTML format
-# It supposes hoedown (https://github.com/hoedown/hoedown) is on the path,
-# if not, set the HOEDOWN environment variable to the good path.
+# Creates an index of the files contained in folder $1 in HTML format.
 function create_index_html() {
-  local hoedown="${HOEDOWN:-$(which hoedown 2>/dev/null || true)}"
-  # Second line is to trick hoedown to behave as Github
-  create_index_md "${@}" \
-      | sed -E 's/^(Baseline.*)$/\1\
-/' | sed 's/^   + / - /' | sed 's/_/\\_/g' \
-      | "${hoedown}"
+  create_index_md "${@}" | pandoc -f markdown -t html
 }
 
 # Deploy a release candidate to Google Cloud Storage.
 # It requires to have gsutil installed. You can force the path to gsutil
-# by setting the GSUTIL environment variable. The GCS_BUCKET should be the
-# name of the Google cloud bucket to deploy to.
+# by setting the GSUTIL environment variable.
 # This methods expects the following arguments:
 #   $1..$n files generated by package_build
 function release_to_gcs() {
-  local gs="${GSUTIL:-$(which gsutil 2>/dev/null || true) -m}"
-  local release_name=$(get_release_name)
-  local rc=$(get_release_candidate)
-  if [ ! -x "${gs}" ]; then
-    echo "Please set GSUTIL to the path the gsutil binary." >&2
-    echo "gsutil (https://cloud.google.com/storage/docs/gsutil/) is the" >&2
-    echo "command-line interface to google cloud." >&2
-    return 1
+  local artifact_dir="$1"
+
+  local release_name="$(get_release_name)"
+  local rc="$(get_release_candidate)"
+
+  if [ -n "${release_name}" ]; then
+    local release_path="${release_name}/release"
+    if [ -n "${rc}" ]; then
+      release_path="${release_name}/rc${rc}"
+    fi
+    create_index_html "${artifact_dir}" > "${artifact_dir}/index.html"
+    gsutil -m cp "${artifact_dir}/**" "gs://bazel/${release_path}"
   fi
-  if [ -z "${GCS_BUCKET-}" ]; then
-    echo "Please set GCS_BUCKET to the name of your Google Cloud Storage bucket." >&2
-    return 1
+}
+
+function ensure_gpg_secret_key_imported() {
+  if ! gpg --list-secret-keys | grep "${APT_GPG_KEY_ID}" > /dev/null; then
+    keyfile=$(mktemp --tmpdir)
+    chmod 0600 "${keyfile}"
+    gsutil cat "gs://bazel-trusted-encrypted-secrets/release-key.gpg.enc" | \
+        gcloud kms decrypt --location "global" --keyring "buildkite" --key "bazel-release-key" --ciphertext-file "-" --plaintext-file "${keyfile}"
+    gpg --allow-secret-key-import --import "${keyfile}"
+    rm -f "${keyfile}"
   fi
-  if [ -n "${release_name}" ] && [ -n "${rc}" ]; then
-    # Make a temporary folder with the desired structure
-    local dir="$(mktemp -d ${TMPDIR:-/tmp}/tmp.XXXXXXXX)"
-    local prev_dir="$PWD"
-    trap "{ cd ${prev_dir}; rm -fr ${dir}; }" EXIT
-    mkdir -p "${dir}/${release_name}/rc${rc}"
-    cp "${@}" "${dir}/${release_name}/rc${rc}"
-    # Add a index.html file:
-    create_index_html "${dir}/${release_name}/rc${rc}" \
-        >"${dir}/${release_name}/rc${rc}"/index.html
-    cd ${dir}
-    "${gs}" cp -a public-read -r . "gs://${GCS_BUCKET}"
-    cd ${prev_dir}
-    rm -fr ${dir}
-    trap - EXIT
+
+  # Make sure we use stronger digest algorithm。
+  # We use reprepro to generate the debian repository,
+  # but there's no way to pass flags to gpg using reprepro, so writting it into
+  # ~/.gnupg/gpg.conf
+  if ! grep "digest-algo sha256" ~/.gnupg/gpg.conf > /dev/null; then
+    echo "digest-algo sha256" >> ~/.gnupg/gpg.conf
+  fi
+}
+
+# Generate new content of Release file
+function print_new_release_content() {
+  local distribution="$1"
+  # Print the headers of the original Release file
+  cat <<EOF
+Origin: Bazel Authors
+Label: Bazel
+Codename: $1
+Date: $(date -u "+%a, %d %b %Y %H:%M:%S UTC")
+Architectures: amd64
+Components: jdk1.8
+Description: Bazel APT Repository
+EOF
+  metadata_files=("jdk1.8/binary-amd64/Packages" "jdk1.8/binary-amd64/Packages.gz" "jdk1.8/binary-amd64/Release" "jdk1.8/source/Sources.gz" "jdk1.8/source/Release")
+  # Re-generate hashes for all metadata fiels
+  echo MD5Sum:
+   for file in ${metadata_files[*]}; do
+    path="dists/${distribution}/$file"
+    echo "" "$(md5sum ${path} | cut -d " " -f1)" "$(ls -l ${path} | cut -d " " -f5)" "$file"
+   done
+  echo SHA1:
+   for file in ${metadata_files[*]}; do
+    path="dists/${distribution}/$file"
+    echo "" "$(sha1sum ${path} | cut -d " " -f1)" "$(ls -l ${path} | cut -d " " -f5)" "$file"
+   done
+  echo SHA256:
+   for file in ${metadata_files[*]}; do
+    path="dists/${distribution}/$file"
+    echo "" "$(sha256sum ${path} | cut -d " " -f1)" "$(ls -l ${path} | cut -d " " -f5)" "$file"
+   done
+}
+
+# Merge metadata with previous distribution
+function merge_previous_dists() {
+  local distribution="$1"
+  # Download the metadata info from previous distribution
+  mkdir -p previous
+  gsutil -m cp -r "gs://bazel-apt/dists" "./previous"
+
+  # Merge Packages and Packages.gz file
+  cat "previous/dists/${distribution}/jdk1.8/binary-amd64/Packages" >> "dists/${distribution}/jdk1.8/binary-amd64/Packages"
+  gzip -9c "dists/${distribution}/jdk1.8/binary-amd64/Packages" > "dists/${distribution}/jdk1.8/binary-amd64/Packages.gz"
+
+  # Merge Sources.gz file
+  gunzip "previous/dists/${distribution}/jdk1.8/source/Sources.gz"
+  gunzip "dists/${distribution}/jdk1.8/source/Sources.gz"
+  cat "previous/dists/${distribution}/jdk1.8/source/Sources" >> "dists/${distribution}/jdk1.8/source/Sources"
+  gzip -9c "dists/${distribution}/jdk1.8/source/Sources" > "dists/${distribution}/jdk1.8/source/Sources.gz"
+  rm -f "dists/${distribution}/jdk1.8/source/Sources"
+
+  # Update Release file
+  print_new_release_content "${distribution}" > "dists/${distribution}/Release.new"
+  mv "dists/${distribution}/Release.new" "dists/${distribution}/Release"
+
+  # Generate new signatures for Release file
+  rm -f "dists/${distribution}/InRelease" "dists/${distribution}/Release.gpg"
+  gpg --output "dists/${distribution}/InRelease" --clearsign "dists/${distribution}/Release"
+  gpg --output "dists/${distribution}/Release.gpg" --detach-sign "dists/${distribution}/Release"
+}
+
+# Create a debian package with version in package name and add it to the repo
+function add_versioned_deb_pkg() {
+  local distribution="$1"
+  local deb_pkg_name="$2"
+  # Extract the original package
+  mkdir -p deb-old
+  dpkg-deb -R "${deb_pkg_name}" deb-old
+
+  # Get bazel version
+  bazel_version=$(grep "Version:" deb-old/DEBIAN/control | cut -d " " -f2)
+  bazel_version=${bazel_version/\~/}
+
+  # Generate new control file
+  mkdir -p deb-new/DEBIAN
+  sed "s/Package:\ bazel/Package:\ bazel-${bazel_version}/g" "deb-old/DEBIAN/control" > "deb-new/DEBIAN/control"
+
+  # Rename the actual Bazel binary to bazel-${bazel_version}
+  mkdir -p deb-new/usr/bin
+  cp "deb-old/usr/bin/bazel-real" "deb-new/usr/bin/bazel-${bazel_version}"
+
+  # Re-pack the debian package and add it to the repo
+  versioned_deb_pkg_name="bazel-${bazel_version}-versioned-package-amd64.deb"
+  chmod -R 0755 deb-new
+  dpkg-deb -b deb-new "${versioned_deb_pkg_name}"
+  reprepro -C jdk1.8 includedeb "${distribution}" "${versioned_deb_pkg_name}"
+}
+
+function create_apt_repository() {
+  mkdir conf
+  cat > conf/distributions <<EOF
+Origin: Bazel Authors
+Label: Bazel
+Codename: stable
+Architectures: amd64 source
+Components: jdk1.8
+Description: Bazel APT Repository
+DebOverride: override.stable
+DscOverride: override.stable
+SignWith: ${APT_GPG_KEY_ID}
+
+Origin: Bazel Authors
+Label: Bazel
+Codename: testing
+Architectures: amd64 source
+Components: jdk1.8
+Description: Bazel APT Repository
+DebOverride: override.testing
+DscOverride: override.testing
+SignWith: ${APT_GPG_KEY_ID}
+EOF
+
+  cat > conf/options <<EOF
+verbose
+ask-passphrase
+basedir .
+EOF
+
+  # TODO(#2264): this is a quick workaround #2256, figure out a correct fix.
+  cat > conf/override.stable <<EOF
+bazel     Section     contrib/devel
+bazel     Priority    optional
+EOF
+  cat > conf/override.testing <<EOF
+bazel     Section     contrib/devel
+bazel     Priority    optional
+EOF
+
+  ensure_gpg_secret_key_imported
+
+  local distribution="$1"
+  local deb_pkg_name="$2"
+  local deb_dsc_name="$3"
+
+  debsign -k "${APT_GPG_KEY_ID}" "${deb_dsc_name}"
+
+  reprepro -C jdk1.8 includedeb "${distribution}" "${deb_pkg_name}"
+  reprepro -C jdk1.8 includedsc "${distribution}" "${deb_dsc_name}"
+
+  add_versioned_deb_pkg "${distribution}" "${deb_pkg_name}"
+
+  merge_previous_dists "${distribution}"
+
+  gsutil -m cp -r dists pool "gs://bazel-apt"
+}
+
+function release_to_apt() {
+  local artifact_dir="$1"
+
+  local release_name="$(get_release_name)"
+  local rc="$(get_release_candidate)"
+
+  if [ -n "${release_name}" ]; then
+    local release_label="$(get_full_release_name)"
+    local deb_pkg_name="${release_name}/bazel_${release_label}-linux-x86_64.deb"
+    local deb_dsc_name="${release_name}/bazel_${release_label}.dsc"
+    local deb_tar_name="${release_name}/bazel_${release_label}.tar.gz"
+
+    pushd "${artifact_dir}"
+    if [ -n "${rc}" ]; then
+      create_apt_repository testing "${deb_pkg_name}" "${deb_dsc_name}"
+    else
+      create_apt_repository stable "${deb_pkg_name}" "${deb_dsc_name}"
+    fi
+    popd
   fi
 }
 
 # A wrapper around the release deployment methods.
 function deploy_release() {
-  local github_args=()
-  # Filters out README.md for github releases
-  for i in "$@"; do
-    if ! [[ "$i" =~ README.md$ ]]; then
-      github_args+=("$i")
-    fi
+  local release_label="$(get_full_release_name)"
+  local release_name="$(get_release_name)"
+
+  if [[ ! -d $1 ]]; then
+    echo "Usage: deploy_release ARTIFACT_DIR"
+    exit 1
+  fi
+  artifact_dir="$1"
+
+  if [[ -z $release_name ]]; then
+    echo "Could not get the release name - are you in a release branch directory?"
+    exit 1
+  fi
+
+  ensure_gpg_secret_key_imported
+
+  rm -f "${artifact_dir}"/*.{sha256,sig}
+  for file in "${artifact_dir}"/*; do
+    (cd "${artifact_dir}" && sha256sum "$(basename "${file}")" > "${file}.sha256")
+    gpg --no-tty --detach-sign -u "${APT_GPG_KEY_ID}" "${file}"
   done
-  release_to_github "${github_args[@]}"
-  release_to_gcs "$@"
-}
 
-# A wrapper for the whole release phase:
-#   Compute the SHA-256, and arrange the input
-#   Deploy the release
-#   Generate the email
-# Input: $1 $2 [$3 $4 [$5 $6 ...]]
-#    Each pair denotes a couple (platform, folder) where the platform
-#    is the platform built for and the folder is the folder where the
-#    artifacts for this platform are.
-# Ouputs:
-#   RELEASE_EMAIL_RECIPIENT: who to send a mail to
-#   RELEASE_EMAIL_SUBJECT: the subject of the email to be sent
-#   RELEASE_EMAIL_CONTENT: the content of the email to be sent
-function bazel_release() {
-  local README=$2/README.md
-  tmpdir=$(mktemp -d ${TMPDIR:-/tmp}/tmp.XXXXXXXX)
-  trap 'rm -fr ${tmpdir}' EXIT
-  while (( $# > 1 )); do
-    local platform=$1
-    local folder=$2
-    shift 2
-    for file in $folder/*; do
-      if [ $(basename $file) != README.md ]; then
-        if [[ "$file" =~ /([^/]*)(\.[^\./]+)$ ]]; then
-          local destfile=${tmpdir}/${BASH_REMATCH[1]}-${platform}${BASH_REMATCH[2]}
-        else
-          local destfile=${tmpdir}/$(basename $file)-${platform}
-        fi
-        mv $file $destfile
-        checksum $destfile > $destfile.sha256
-      fi
-    done
-  done
-  deploy_release $README $(find ${tmpdir} -type f)
+  apt_working_dir="$(mktemp -d --tmpdir)"
+  echo "apt_working_dir = ${apt_working_dir}"
+  mkdir "${apt_working_dir}/${release_name}"
+  cp "${artifact_dir}/bazel_${release_label}-linux-x86_64.deb" "${apt_working_dir}/${release_name}"
+  cp "${artifact_dir}/bazel_${release_label}.dsc" "${apt_working_dir}/${release_name}"
+  cp "${artifact_dir}/bazel_${release_label}.tar.gz" "${apt_working_dir}/${release_name}"
+  release_to_apt "${apt_working_dir}"
 
-  export RELEASE_EMAIL="$(generate_email)"
+  gcs_working_dir="$(mktemp -d --tmpdir)"
+  echo "gcs_working_dir = ${gcs_working_dir}"
+  cp "${artifact_dir}"/* "${gcs_working_dir}"
+  release_to_gcs "${gcs_working_dir}"
 
-  export RELEASE_EMAIL_RECIPIENT="$(echo "${RELEASE_EMAIL}" | head -1)"
-  export RELEASE_EMAIL_SUBJECT="$(echo "${RELEASE_EMAIL}" | head -2 | tail -1)"
-  export RELEASE_EMAIL_CONTENT="$(echo "${RELEASE_EMAIL}" | tail -n +3)"
+  github_working_dir="$(mktemp -d --tmpdir)"
+  echo "github_working_dir = ${github_working_dir}"
+  cp "${artifact_dir}"/* "${github_working_dir}"
+  rm -f "${github_working_dir}/bazel_${release_label}"*.{dsc,tar.gz}{,.sha256,.sig}
+  release_to_github "${github_working_dir}"
 }

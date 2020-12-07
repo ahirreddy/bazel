@@ -21,8 +21,8 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.UnixGlob;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 /** A value corresponding to a glob. */
@@ -46,7 +46,8 @@ public final class GlobValue implements SkyValue {
   }
 
   /**
-   * Returns glob matches.
+   * Returns glob matches. The matches will be in a deterministic but unspecified order. If a
+   * particular order is required, the returned iterable should be sorted.
    */
   public NestedSet<PathFragment> getMatches() {
     return matches;
@@ -73,13 +74,17 @@ public final class GlobValue implements SkyValue {
   }
 
   /**
-   * Constructs a {@link SkyKey} for a glob lookup. {@code packageName} is assumed to be an
+   * Constructs a {@link GlobDescriptor} for a glob lookup. {@code packageName} is assumed to be an
    * existing package. Trying to glob into a non-package is undefined behavior.
    *
    * @throws InvalidGlobPatternException if the pattern is not valid.
    */
   @ThreadSafe
-  public static SkyKey key(PackageIdentifier packageId, String pattern, boolean excludeDirs,
+  public static GlobDescriptor key(
+      PackageIdentifier packageId,
+      Root packageRoot,
+      String pattern,
+      boolean excludeDirs,
       PathFragment subdir)
       throws InvalidGlobPatternException {
     if (pattern.indexOf('?') != -1) {
@@ -91,30 +96,22 @@ public final class GlobValue implements SkyValue {
       throw new InvalidGlobPatternException(pattern, error);
     }
 
-    return internalKey(packageId, subdir, pattern, excludeDirs);
+    return internalKey(packageId, packageRoot, subdir, pattern, excludeDirs);
   }
 
   /**
-   * Constructs a {@link SkyKey} for a glob lookup.
+   * Constructs a {@link GlobDescriptor} for a glob lookup.
    *
    * <p>Do not use outside {@code GlobFunction}.
    */
   @ThreadSafe
-  static SkyKey internalKey(PackageIdentifier packageId, PathFragment subdir, String pattern,
+  static GlobDescriptor internalKey(
+      PackageIdentifier packageId,
+      Root packageRoot,
+      PathFragment subdir,
+      String pattern,
       boolean excludeDirs) {
-    return new SkyKey(SkyFunctions.GLOB,
-        new GlobDescriptor(packageId, subdir, pattern, excludeDirs));
-  }
-
-  /**
-   * Constructs a {@link SkyKey} for a glob lookup.
-   *
-   * <p>Do not use outside {@code GlobFunction}.
-   */
-  @ThreadSafe
-  static SkyKey internalKey(GlobDescriptor glob, String subdirName) {
-    return internalKey(glob.packageId, glob.subdir.getRelative(subdirName),
-        glob.pattern, glob.excludeDirs);
+    return GlobDescriptor.create(packageId, packageRoot, subdir, pattern, excludeDirs);
   }
 
   /**

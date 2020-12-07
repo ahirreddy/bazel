@@ -14,15 +14,13 @@
 package com.google.devtools.build.lib.util;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
-
+import java.util.Arrays;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.Arrays;
 
 /**
  * Tests for the {@link CommandBuilder} class.
@@ -39,21 +37,19 @@ public class CommandBuilderTest {
   }
 
   private void assertArgv(CommandBuilder builder, String... expected) {
-    assertThat(Arrays.asList(builder.build().getCommandLineElements())).containsExactlyElementsIn(
-        Arrays.asList(expected)).inOrder();
+    assertThat(builder.build().getCommandLineElements())
+        .asList()
+        .containsExactlyElementsIn(Arrays.asList(expected))
+        .inOrder();
   }
 
   private void assertWinCmdArgv(CommandBuilder builder, String expected) {
-    assertArgv(builder, "CMD.EXE", "/S", "/E:ON", "/V:ON", "/D", "/C", "\"" + expected + "\"");
+    assertArgv(builder, "CMD.EXE", "/S", "/E:ON", "/V:ON", "/D", "/C", expected);
   }
 
   private void assertFailure(CommandBuilder builder, String expected) {
-    try {
-      builder.build();
-      fail("Expected exception");
-    } catch (Exception e) {
-      assertThat(e).hasMessage(expected);
-    }
+    Exception e = assertThrows(Exception.class, () -> builder.build());
+    assertThat(e).hasMessageThat().isEqualTo(expected);
   }
 
   @Test

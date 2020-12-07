@@ -13,34 +13,39 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
+import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCaseForJunit4;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.io.BaseEncoding;
+import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.packages.ConstantRuleVisibility;
 import com.google.devtools.build.lib.packages.Rule;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.pkgcache.PackageOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
+import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
-
+import com.google.devtools.common.options.Options;
+import java.util.Collection;
+import java.util.UUID;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.util.Collection;
-import java.util.UUID;
-
 /**
- * Tests for the hash code calculated for Skylark RuleClasses based on the transitive closure
- * of the imports of their respective definition SkylarkEnvironments.
+ * Tests for the hash code calculated for Starlark RuleClasses based on the transitive closure of
+ * the imports of their respective definition SkylarkEnvironments.
  */
 @RunWith(JUnit4.class)
-public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
+public class SkylarkFileContentHashTests extends BuildViewTestCase {
 
   @Before
   public final void createFiles() throws Exception  {
@@ -52,22 +57,22 @@ public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
 
     scratch.file(
         "foo/ext.bzl",
-        "load('/helper/ext', 'rule_impl')",
+        "load('//helper:ext.bzl', 'rule_impl')",
         "",
         "foo1 = rule(implementation = rule_impl)",
         "foo2 = rule(implementation = rule_impl)");
 
     scratch.file(
         "bar/ext.bzl",
-        "load('/helper/ext', 'rule_impl')",
+        "load('//helper:ext.bzl', 'rule_impl')",
         "",
         "bar1 = rule(implementation = rule_impl)");
 
     scratch.file(
         "pkg/BUILD",
-        "load('/foo/ext', 'foo1')",
-        "load('/foo/ext', 'foo2')",
-        "load('/bar/ext', 'bar1')",
+        "load('//foo:ext.bzl', 'foo1')",
+        "load('//foo:ext.bzl', 'foo2')",
+        "load('//bar:ext.bzl', 'bar1')",
         "",
         "foo1(name = 'foo1')",
         "foo2(name = 'foo2')",
@@ -76,7 +81,7 @@ public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
 
   @Test
   public void testHashInvariance() throws Exception {
-    assertEquals(getHash("pkg", "foo1"), getHash("pkg", "foo1"));
+    assertThat(getHash("pkg", "foo1")).isEqualTo(getHash("pkg", "foo1"));
   }
 
   @Test
@@ -84,16 +89,16 @@ public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
     String bar1 = getHash("pkg", "bar1");
     scratch.overwriteFile(
         "bar/ext.bzl",
-        "load('/helper/ext', 'rule_impl')",
+        "load('//helper:ext.bzl', 'rule_impl')",
         "",
         "bar1 = rule(implementation = rule_impl)");
     invalidatePackages();
-    assertEquals(bar1, getHash("pkg", "bar1"));
+    assertThat(getHash("pkg", "bar1")).isEqualTo(bar1);
   }
 
   @Test
   public void testHashSameForRulesDefinedInSameFile() throws Exception {
-    assertEquals(getHash("pkg", "foo1"), getHash("pkg", "foo2"));
+    assertThat(getHash("pkg", "foo2")).isEqualTo(getHash("pkg", "foo1"));
   }
 
   @Test
@@ -106,7 +111,7 @@ public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
     String bar1 = getHash("pkg", "bar1");
     scratch.overwriteFile(
         "bar/ext.bzl",
-        "load('/helper/ext', 'rule_impl')",
+        "load('//helper:ext.bzl', 'rule_impl')",
         "# Some comments to change file hash",
         "",
         "bar1 = rule(implementation = rule_impl)");
@@ -136,44 +141,50 @@ public class SkylarkFileContentHashTests extends BuildViewTestCaseForJunit4 {
     String foo2 = getHash("pkg", "foo2");
     scratch.overwriteFile(
         "bar/ext.bzl",
-        "load('/helper/ext', 'rule_impl')",
+        "load('//helper:ext.bzl', 'rule_impl')",
         "# Some comments to change file hash",
         "",
         "bar1 = rule(implementation = rule_impl)");
     invalidatePackages();
-    assertEquals(foo1, getHash("pkg", "foo1"));
-    assertEquals(foo2, getHash("pkg", "foo2"));
+    assertThat(getHash("pkg", "foo1")).isEqualTo(foo1);
+    assertThat(getHash("pkg", "foo2")).isEqualTo(foo2);
   }
 
-  private void assertNotEquals(String hash, String hash2) {
-    assertFalse(hash.equals(hash2));
+  private static void assertNotEquals(String hash, String hash2) {
+    assertThat(hash.equals(hash2)).isFalse();
   }
 
   /**
    * Returns the hash code of the rule target defined by the pkg and the target name parameters.
-   * Asserts that the targets and it's Skylark dependencies were loaded properly.
+   * Asserts that the targets and it's Starlark dependencies were loaded properly.
    */
   private String getHash(String pkg, String name) throws Exception {
+    PackageOptions packageOptions = Options.getDefaults(PackageOptions.class);
+    packageOptions.defaultVisibility = ConstantRuleVisibility.PUBLIC;
+    packageOptions.showLoadingProgress = true;
+    packageOptions.globbingThreads = 7;
     getSkyframeExecutor()
         .preparePackageLoading(
-            new PathPackageLocator(outputBase, ImmutableList.of(rootDirectory)),
-            ConstantRuleVisibility.PUBLIC,
-            true,
-            7,
-            "",
-            UUID.randomUUID());
-    SkyKey pkgLookupKey = PackageValue.key(PackageIdentifier.parse(pkg));
+            new PathPackageLocator(
+                outputBase,
+                ImmutableList.of(Root.fromPath(rootDirectory)),
+                BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY),
+            packageOptions,
+            Options.getDefaults(StarlarkSemanticsOptions.class),
+            UUID.randomUUID(),
+            ImmutableMap.<String, String>of(),
+            new TimestampGranularityMonitor(BlazeClock.instance()));
+    skyframeExecutor.setActionEnv(ImmutableMap.<String, String>of());
+    SkyKey pkgLookupKey = PackageValue.key(PackageIdentifier.parse("@//" + pkg));
     EvaluationResult<PackageValue> result =
         SkyframeExecutorTestUtils.evaluate(
             getSkyframeExecutor(), pkgLookupKey, /*keepGoing=*/ false, reporter);
-    assertFalse(result.hasError());
-    Collection<Target> targets = result.get(pkgLookupKey).getPackage().getTargets();
+    assertThat(result.hasError()).isFalse();
+    Collection<Target> targets = result.get(pkgLookupKey).getPackage().getTargets().values();
     for (Target target : targets) {
       if (target.getName().equals(name)) {
-        return ((Rule) target)
-            .getRuleClassObject()
-            .getRuleDefinitionEnvironment()
-            .getTransitiveContentHashCode();
+        byte[] hash = ((Rule) target).getRuleClassObject().getRuleDefinitionEnvironmentDigest();
+        return BaseEncoding.base16().lowerCase().encode(hash); // hexify
       }
     }
     throw new IllegalStateException("target not found: " + name);

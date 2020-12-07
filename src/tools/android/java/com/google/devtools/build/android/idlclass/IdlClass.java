@@ -22,8 +22,7 @@ import com.google.common.collect.Sets;
 import com.google.devtools.build.buildjar.jarhelper.JarCreator;
 import com.google.devtools.build.buildjar.proto.JavaCompilation.CompilationUnit;
 import com.google.devtools.build.buildjar.proto.JavaCompilation.Manifest;
-import com.google.devtools.common.options.OptionsParser;
-
+import com.google.devtools.common.options.Options;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -43,32 +42,30 @@ import java.util.jar.JarFile;
 public class IdlClass {
 
   public static void main(String[] args) throws IOException {
-    OptionsParser optionsParser = OptionsParser.newOptionsParser(IdlClassOptions.class);
-    optionsParser.parseAndExitUponError(args);
-    IdlClassOptions options = optionsParser.getOptions(IdlClassOptions.class);
-    Preconditions.checkNotNull(options.manifestProto);
-    Preconditions.checkNotNull(options.classJar);
-    Preconditions.checkNotNull(options.outputClassJar);
-    Preconditions.checkNotNull(options.outputSourceJar);
-    Preconditions.checkNotNull(options.tempDir);
+    Options<IdlClassOptions> options =
+        Options.parseAndExitUponError(IdlClassOptions.class, /*allowResidue=*/ true, args);
+
+    IdlClassOptions idlClassOptions = options.getOptions();
+    Preconditions.checkNotNull(idlClassOptions.manifestProto);
+    Preconditions.checkNotNull(idlClassOptions.classJar);
+    Preconditions.checkNotNull(idlClassOptions.outputClassJar);
+    Preconditions.checkNotNull(idlClassOptions.outputSourceJar);
+    Preconditions.checkNotNull(idlClassOptions.tempDir);
 
     List<Path> idlSources = Lists.newArrayList();
-    for (String idlSource : optionsParser.getResidue()) {
+    for (String idlSource : options.getRemainingArgs()) {
       idlSources.add(Paths.get(idlSource));
     }
 
-    Manifest manifest = readManifest(options.manifestProto);
-    writeClassJar(options, idlSources, manifest);
-    writeSourceJar(options, idlSources, manifest);
+    Manifest manifest = readManifest(idlClassOptions.manifestProto);
+    writeClassJar(idlClassOptions, idlSources, manifest);
+    writeSourceJar(idlClassOptions, idlSources, manifest);
   }
 
   private static void writeClassJar(IdlClassOptions options,
       List<Path> idlSources, Manifest manifest) throws IOException {
     Path tempDir = options.tempDir.resolve("classjar");
-    Set<String> idlSourceSet  = Sets.newHashSet();
-    for (Path path : idlSources) {
-      idlSourceSet.add(path.toString());
-    }
+    Set<Path> idlSourceSet = Sets.newLinkedHashSet(idlSources);
     extractIdlClasses(options.classJar, manifest, tempDir, idlSourceSet);
     writeOutputJar(options.outputClassJar, tempDir);
   }
@@ -80,7 +77,7 @@ public class IdlClass {
 
     for (Path path : idlSources) {
       for (CompilationUnit unit : manifest.getCompilationUnitList()) {
-        if (unit.getPath().equals(path.toString())) {
+        if (Paths.get(unit.getPath()).equals(path)) {
           String pkg = unit.getPkg();
           Path source = idlSourceBaseDir != null ? idlSourceBaseDir.resolve(path) : path;
           Path target = tempDir.resolve(pkg.replace('.', '/')).resolve(path.getFileName());
@@ -105,18 +102,17 @@ public class IdlClass {
   }
 
   /**
-   * For each top-level class in the compilation, determine the path prefix
-   * of classes corresponding to that compilation unit.
+   * For each top-level class in the compilation, determine the path prefix of classes corresponding
+   * to that compilation unit.
    *
-   * <p>Prefixes are used to correctly handle inner classes, e.g. the top-level
-   * class "c.g.Foo" may correspond to "c/g/Foo.class" and also
-   * "c/g/Foo$Inner.class" or "c/g/Foo$0.class".
+   * <p>Prefixes are used to correctly handle inner classes, e.g. the top-level class "c.g.Foo" may
+   * correspond to "c/g/Foo.class" and also "c/g/Foo$Inner.class" or "c/g/Foo$0.class".
    */
   @VisibleForTesting
-  static ImmutableSet<String> getIdlPrefixes(Manifest manifest, Set<String> idlSources) {
+  static ImmutableSet<String> getIdlPrefixes(Manifest manifest, Set<Path> idlSources) {
     ImmutableSet.Builder<String> prefixes = ImmutableSet.builder();
     for (CompilationUnit unit : manifest.getCompilationUnitList()) {
-      if (!idlSources.contains(unit.getPath())) {
+      if (!idlSources.contains(Paths.get(unit.getPath()))) {
         continue;
       }
       String pkg;
@@ -133,15 +129,11 @@ public class IdlClass {
   }
 
   /**
-   * Unzip all the class files that correspond to idl processor-
-   * generated sources into the temporary directory.
+   * Unzip all the class files that correspond to idl processor- generated sources into the
+   * temporary directory.
    */
   private static void extractIdlClasses(
-      Path classJar,
-      Manifest manifest,
-      Path tempDir,
-      Set<String> idlSources)
-      throws IOException {
+      Path classJar, Manifest manifest, Path tempDir, Set<Path> idlSources) throws IOException {
     ImmutableSet<String> prefixes = getIdlPrefixes(manifest, idlSources);
     try (JarFile jar = new JarFile(classJar.toFile())) {
       Enumeration<JarEntry> entries = jar.entries();

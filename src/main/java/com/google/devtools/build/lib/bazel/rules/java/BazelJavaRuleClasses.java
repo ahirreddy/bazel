@@ -14,33 +14,41 @@
 
 package com.google.devtools.build.lib.bazel.rules.java;
 
-import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 import static com.google.devtools.build.lib.packages.BuildType.TRISTATE;
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fromFunctions;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
-import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
+import static com.google.devtools.build.lib.rules.java.JavaRuleClasses.CONTAINS_JAVA_PROVIDER;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
+import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses.CcToolchainRequiringRule;
+import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.PredicateWithMessage;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.RuleClass.PackageNameConstraint;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
 import com.google.devtools.build.lib.packages.TriState;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.cpp.CcBinary.CcLauncherInfo;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.java.JavaInfo;
+import com.google.devtools.build.lib.rules.java.JavaRuleClasses.IjarBaseRule;
+import com.google.devtools.build.lib.rules.java.JavaRuleClasses.JavaRuntimeBaseRule;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
 import com.google.devtools.build.lib.util.FileTypeSet;
-
-import java.util.Set;
 
 /**
  * Rule class definitions for Java rules.
@@ -49,6 +57,8 @@ public class BazelJavaRuleClasses {
 
   public static final PredicateWithMessage<Rule> JAVA_PACKAGE_NAMES = new PackageNameConstraint(
       PackageNameConstraint.ANY_SEGMENT, "java", "javatests");
+
+  protected static final String JUNIT_TESTRUNNER = "//tools/jdk:TestRunner";
 
   public static final ImplicitOutputsFunction JAVA_BINARY_IMPLICIT_OUTPUTS =
       fromFunctions(
@@ -62,51 +72,23 @@ public class BazelJavaRuleClasses {
           JavaSemantics.JAVA_LIBRARY_CLASS_JAR,
           JavaSemantics.JAVA_LIBRARY_SOURCE_JAR);
 
+  public static final ImmutableList<StarlarkProviderIdentifier> CONTAINS_CC_LINK_PARAMS =
+      ImmutableList.of(StarlarkProviderIdentifier.forKey(CcInfo.PROVIDER.getKey()));
+
   /**
-   * Common attributes for rules that depend on ijar.
+   * Meant to be the value of {@code mandatoryProvidersLists} in order for the rule to provide only
+   * a {@link JavaInfo} through an attribute.
    */
-  public static final class IjarBaseRule implements RuleDefinition {
-    @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
-      return builder
-          .add(attr("$ijar", LABEL).cfg(HOST).exec().value(env.getLabel("//tools/defaults:ijar")))
-          .setPreferredDependencyPredicate(JavaSemantics.JAVA_SOURCE)
-          .build();
-    }
-
-    @Override
-    public Metadata getMetadata() {
-      return RuleDefinition.Metadata.builder()
-          .name("$ijar_base_rule")
-          .type(RuleClassType.ABSTRACT)
-          .build();
-    }
-  }
-
+  public static final ImmutableList<ImmutableList<StarlarkProviderIdentifier>>
+      MANDATORY_JAVA_PROVIDER_ONLY = ImmutableList.of(CONTAINS_JAVA_PROVIDER);
 
   /**
    * Common attributes for Java rules.
    */
   public static final class JavaBaseRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
-      return builder
-          .add(attr(":jvm", LABEL).cfg(HOST).value(JavaSemantics.JVM))
-          .add(attr(":host_jdk", LABEL).cfg(HOST).value(JavaSemantics.HOST_JDK))
-          .add(attr(":java_toolchain", LABEL).value(JavaSemantics.JAVA_TOOLCHAIN))
-          .add(attr("$javac_extdir", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVAC_EXTDIR_LABEL)))
-          .add(attr("$java_langtools", LABEL).cfg(HOST)
-              .value(env.getLabel("//tools/defaults:java_langtools")))
-          .add(attr("$javac_bootclasspath", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVAC_BOOTCLASSPATH_LABEL)))
-          .add(attr("$javabuilder", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVABUILDER_LABEL)))
-          .add(attr("$singlejar", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.SINGLEJAR_LABEL)))
-          .add(attr("$genclass", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.GENCLASS_LABEL)))
-          .build();
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
+      return builder.build();
     }
 
     @Override
@@ -114,56 +96,62 @@ public class BazelJavaRuleClasses {
       return RuleDefinition.Metadata.builder()
           .name("$java_base_rule")
           .type(RuleClassType.ABSTRACT)
-          .ancestors(IjarBaseRule.class)
+          .ancestors(IjarBaseRule.class, JavaRuntimeBaseRule.class)
           .build();
     }
   }
 
-  static final Set<String> ALLOWED_RULES_IN_DEPS = ImmutableSet.of(
-      "cc_binary",  // NB: linkshared=1
-      "cc_library",
-      "genrule",
-      "genproto",  // TODO(bazel-team): we should filter using providers instead (skylark rule).
-      "java_import",
-      "java_library",
-      // There is no Java protoc for Bazel--yet. This is here for the benefit of J2 protos.
-      "proto_library",
-      "sh_binary",
-      "sh_library");
+  static final ImmutableSet<String> ALLOWED_RULES_IN_DEPS =
+      ImmutableSet.of(
+          "cc_binary", // NB: linkshared=1
+          "cc_library",
+          "genrule",
+          "genproto", // TODO(bazel-team): we should filter using providers instead (skylark rule).
+          "java_import",
+          "java_library",
+          "java_proto_library",
+          "java_lite_proto_library",
+          "proto_library",
+          "sh_binary",
+          "sh_library");
 
   /**
    * Common attributes for Java rules.
    */
   public static final class JavaRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(deps) -->
           The list of other libraries to be linked in to the target.
-          ${SYNOPSIS}
-          See general comments about <code>deps</code> at <a href="#common-attributes">Attributes
-          common to all build rules</a>.
+          See general comments about <code>deps</code> at
+          <a href="common-definitions.html#common-attributes">Attributes common to all build rules
+          </a>.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .override(builder.copy("deps")
-              .allowedFileTypes(JavaSemantics.JAR)
-              .allowedRuleClasses(ALLOWED_RULES_IN_DEPS)
-              .skipAnalysisTimeFileTypeCheck())
+          .override(
+              builder
+                  .copy("deps")
+                  .allowedFileTypes(JavaSemantics.JAR)
+                  .allowedRuleClasses(ALLOWED_RULES_IN_DEPS)
+                  .mandatoryProvidersList(
+                      ImmutableList.of(CONTAINS_CC_LINK_PARAMS, CONTAINS_JAVA_PROVIDER))
+                  .skipAnalysisTimeFileTypeCheck())
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(runtime_deps) -->
           Libraries to make available to the final binary or test at runtime only.
-          ${SYNOPSIS}
           Like ordinary <code>deps</code>, these will appear on the runtime classpath, but unlike
           them, not on the compile-time classpath. Dependencies needed only at runtime should be
           listed here. Dependency-analysis tools should ignore targets that appear in both
           <code>runtime_deps</code> and <code>deps</code>.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .add(attr("runtime_deps", LABEL_LIST)
-              .allowedFileTypes(JavaSemantics.JAR)
-              .allowedRuleClasses(ALLOWED_RULES_IN_DEPS)
-              .skipAnalysisTimeFileTypeCheck())
+          .add(
+              attr("runtime_deps", LABEL_LIST)
+                  .allowedFileTypes(JavaSemantics.JAR)
+                  .allowedRuleClasses(ALLOWED_RULES_IN_DEPS)
+                  .mandatoryProvidersList(MANDATORY_JAVA_PROVIDER_ONLY)
+                  .skipAnalysisTimeFileTypeCheck())
 
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(srcs) -->
           The list of source files that are processed to create the target.
-          ${SYNOPSIS}
           This attribute is almost always required; see exceptions below.
           <p>
             Source files of type <code>.java</code> are compiled. In case of generated
@@ -190,14 +178,16 @@ public class BazelJavaRuleClasses {
             class on the runtime classpath or you specify the <code>runtime_deps</code> argument.
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .add(attr("srcs", LABEL_LIST)
-              .orderIndependent()
-              .direct_compile_time_input()
-              .allowedFileTypes(JavaSemantics.JAVA_SOURCE,
-                  JavaSemantics.SOURCE_JAR, JavaSemantics.PROPERTIES))
+          .add(
+              attr("srcs", LABEL_LIST)
+                  .orderIndependent()
+                  .direct_compile_time_input()
+                  .allowedFileTypes(
+                      JavaSemantics.JAVA_SOURCE,
+                      JavaSemantics.SOURCE_JAR,
+                      JavaSemantics.PROPERTIES))
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(resources) -->
           A list of data files to include in a Java jar.
-          ${SYNOPSIS}
           <p>
             If resources are specified, they will be bundled in the jar along with the usual
             <code>.class</code> files produced by compilation. The location of the resources inside
@@ -205,19 +195,21 @@ public class BazelJavaRuleClasses {
             <a href="https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html">standard directory layout</a>,
             (a "src" directory followed by a "resources" directory grandchild). If that is not
             found, Bazel then looks for the topmost directory named "java" or "javatests" (so, for
-            example, if a resource is at &lt;workspace root&gt;/x/java/y/java/z, Bazel will use the
-             path y/java/z. This heuristic cannot be overridden.
+            example, if a resource is at <code>&lt;workspace root&gt;/x/java/y/java/z</code>, the
+            path of the resource will be <code>y/java/z</code>. This heuristic cannot be overridden.
           </p>
 
           <p>
             Resources may be source files or generated files.
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .add(attr("resources", LABEL_LIST).orderIndependent()
-              .allowedFileTypes(FileTypeSet.ANY_FILE))
+          .add(
+              attr("resources", LABEL_LIST)
+                  .orderIndependent()
+                  .allowedFileTypes(FileTypeSet.ANY_FILE)
+                  .dontCheckConstraints())
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(resource_strip_prefix) -->
           The path prefix to strip from Java resources.
-          ${SYNOPSIS}
           <p>
             If specified, this path prefix is stripped from every file in the <code>resources</code>
             attribute. It is an error for a resource file not to be under this directory. If not
@@ -227,26 +219,38 @@ public class BazelJavaRuleClasses {
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("resource_strip_prefix", STRING))
+          /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(resource_jars) -->
+          Set of archives containing Java resources.
+          <p>
+            If specified, the contents of these jars are merged into the output jar.
+          </p>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+          .add(
+              attr("resource_jars", LABEL_LIST)
+                  .orderIndependent()
+                  .allowedFileTypes(JavaSemantics.JAR))
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(plugins) -->
           Java compiler plugins to run at compile-time.
-          ${SYNOPSIS}
           Every <code>java_plugin</code> specified in this attribute will be run whenever this rule
           is built. A library may also inherit plugins from dependencies that use
           <code><a href="#java_library.exported_plugins">exported_plugins</a></code>. Resources
           generated by the plugin will be included in the resulting jar of this rule.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .add(attr("plugins", LABEL_LIST).cfg(HOST).allowedRuleClasses("java_plugin")
-              .legacyAllowAnyFileType())
-          .add(attr(":java_plugins", LABEL_LIST)
-              .cfg(HOST)
-              .allowedRuleClasses("java_plugin")
-              .silentRuleClassFilter()
-              .value(JavaSemantics.JAVA_PLUGINS))
+          .add(
+              attr("plugins", LABEL_LIST)
+                  .cfg(HostTransition.createFactory())
+                  .allowedRuleClasses("java_plugin")
+                  .legacyAllowAnyFileType())
+          .add(
+              attr(":java_plugins", LABEL_LIST)
+                  .cfg(HostTransition.createFactory())
+                  .allowedRuleClasses("java_plugin")
+                  .silentRuleClassFilter()
+                  .value(JavaSemantics.JAVA_PLUGINS))
           /* <!-- #BLAZE_RULE($java_rule).ATTRIBUTE(javacopts) -->
           Extra compiler options for this library.
-          ${SYNOPSIS}
-          Subject to <a href="#make_variables">"Make variable"</a> substitution and
-          <a href="#sh-tokenization">Bourne shell tokenization</a>.
+          Subject to <a href="make-variables.html">"Make variable"</a> substitution and
+          <a href="common-definitions.html#sh-tokenization">Bourne shell tokenization</a>.
           <p>These compiler options are passed to javac after the global compiler options.</p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("javacopts", STRING_LIST))
@@ -267,11 +271,11 @@ public class BazelJavaRuleClasses {
    * Base class for rule definitions producing Java binaries.
    */
   public static final class BaseJavaBinaryRule implements RuleDefinition {
+
     @Override
-    public RuleClass build(Builder builder, final RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, final RuleDefinitionEnvironment env) {
       return builder
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(classpath_resources) -->
-          ${SYNOPSIS}
           <em class="harmful">DO NOT USE THIS OPTION UNLESS THERE IS NO OTHER WAY)</em>
           <p>
             A list of resources that must be located at the root of the java tree. This attribute's
@@ -283,23 +287,45 @@ public class BazelJavaRuleClasses {
           .add(attr("classpath_resources", LABEL_LIST).legacyAllowAnyFileType())
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(jvm_flags) -->
           A list of flags to embed in the wrapper script generated for running this binary.
-          ${SYNOPSIS}
-          Subject to <a href="#make_variables">"Make variable"</a> substitution and
-          <a href="#sh-tokenization">Bourne shell tokenization</a>.
-          <p>
-            The wrapper script for a Java binary includes a <code>CLASSPATH</code> definition (to
-            find all the dependent jars) and invokes the right Java interpreter. The command line
-            generated by the wrapper script includes the name of the main class followed by a
-            <code>"$@"</code> so you can pass along other arguments after the classname.  However,
-            arguments intended for parsing by the JVM must be specified <i>before</i> the classname
-            on the command line. The contents of <code>jvm_flags</code> are added to the wrapper
-            script before the classname is listed.
-          </p>
+          Subject to <a href="${link make-variables#location}">$(location)</a> and
+          <a href="make-variables.html">"Make variable"</a> substitution, and
+          <a href="common-definitions.html#sh-tokenization">Bourne shell tokenization</a>.
+
+          <p>The wrapper script for a Java binary includes a CLASSPATH definition
+          (to find all the dependent jars) and invokes the right Java interpreter.
+          The command line generated by the wrapper script includes the name of
+          the main class followed by a <code>"$@"</code> so you can pass along other
+          arguments after the classname.  However, arguments intended for parsing
+          by the JVM must be specified <i>before</i> the classname on the command
+          line.  The contents of <code>jvm_flags</code> are added to the wrapper
+          script before the classname is listed.</p>
+
+          <p>Note that this attribute has <em>no effect</em> on <code>*_deploy.jar</code>
+          outputs.</p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("jvm_flags", STRING_LIST))
+          /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(use_testrunner) -->
+          Use the test runner (by default
+          <code>com.google.testing.junit.runner.BazelTestRunner</code>) class as the
+          main entry point for a Java program, and provide the test class
+          to the test runner as a value of <code>bazel.test_suite</code>
+          system property.
+
+          You can use this to override the default
+          behavior, which is to use test runner for
+          <code>java_test</code> rules,
+          and not use it for <code>java_binary</code> rules.  It is unlikely
+          you will want to do this.  One use is for <code>AllTest</code>
+          rules that are invoked by another rule (to set up a database
+          before running the tests, for example).  The <code>AllTest</code>
+          rule must be declared as a <code>java_binary</code>, but should
+          still use the test runner as its main entry point.
+
+          The name of a test runner class can be overridden with <code>main_class</code> attribute.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+          .add(attr("use_testrunner", BOOLEAN).value(false))
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(main_class) -->
           Name of class with <code>main()</code> method to use as entry point.
-          ${SYNOPSIS}
           If a rule uses this option, it does not need a <code>srcs=[...]</code> list.
           Thus, with this attribute one can make an executable from a Java library that already
           contains one or more <code>main()</code> methods.
@@ -313,24 +339,33 @@ public class BazelJavaRuleClasses {
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("main_class", STRING))
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(create_executable) -->
-          Whether to build the executable wrapper script or not.
-          ${SYNOPSIS}
-          If this option is present, no executable wrapper script is built around the
-          <code>.jar</code> file. Incompatible with <code>main_class</code> attribute.
+          Whether the binary is executable. Non-executable binaries collect transitive
+          runtime Java dependencies into a deploy jar, but cannot be executed directly.
+
+          No wrapper script is created if this attribute is set. It is an error to set
+          this to 0 if the <code>launcher</code> or <code>main_class</code> attributes
+          are set.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-          .add(attr("create_executable", BOOLEAN)
-              .nonconfigurable("internal")
-              .value(true))
+          .add(attr("create_executable", BOOLEAN).nonconfigurable("internal").value(true))
+          .add(
+              attr("$testsupport", LABEL)
+                  .value(
+                      new Attribute.ComputedDefault("use_testrunner") {
+                        @Override
+                        public Object getDefault(AttributeMap rule) {
+                          return rule.get("use_testrunner", Type.BOOLEAN)
+                              ? env.getToolsLabel(JUNIT_TESTRUNNER)
+                              : null;
+                        }
+                      }))
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(deploy_manifest_lines) -->
-          ${SYNOPSIS}
           A list of lines to add to the <code>META-INF/manifest.mf</code> file generated for the
           <code>*_deploy.jar</code> target. The contents of this attribute are <em>not</em> subject
-          to <a href="#make_variables">"Make variable"</a> substitution.
+          to <a href="make-variables.html">"Make variable"</a> substitution.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("deploy_manifest_lines", STRING_LIST))
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(stamp) -->
           Enable link stamping.
-          ${SYNOPSIS}
           Whether to encode build information into the binary. Possible values:
           <ul>
             <li><code>stamp = 1</code>: Stamp the build information into the binary. Stamped
@@ -339,12 +374,57 @@ public class BazelJavaRuleClasses {
             <li><code>stamp = 0</code>: Always replace build information by constant values. This
               gives good build result caching.</li>
             <li><code>stamp = -1</code>: Embedding of build information is controlled by the
-              <a href="blaze-user-manual.html#flag--stamp">--[no]stamp</a> flag.</li>
+              <a href="../user-manual.html#flag--stamp">--[no]stamp</a> flag.</li>
           </ul>
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           // TODO(bazel-team): describe how to access this data at runtime
           .add(attr("stamp", TRISTATE).value(TriState.AUTO))
-          .add(attr(":java_launcher", LABEL).value(JavaSemantics.JAVA_LAUNCHER))  // blaze flag
+          /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(launcher) -->
+          Specify a binary that will be used to run your Java program instead of the
+          normal <code>bin/java</code> program included with the JDK.
+          The target must be a <code>cc_binary</code>. Any <code>cc_binary</code> that
+          implements the
+          <a href="http://docs.oracle.com/javase/7/docs/technotes/guides/jni/spec/invocation.html">
+          Java Invocation API</a> can be specified as a value for this attribute.
+
+          <p>By default, Bazel will use the normal JDK launcher (bin/java or java.exe).</p>
+
+          <p>The related <a href="../user-manual.html#flag--java_launcher"><code>
+          --java_launcher</code></a> Bazel flag affects only those
+          <code>java_binary</code> and <code>java_test</code> targets that have
+          <i>not</i> specified a <code>launcher</code> attribute.</p>
+
+          <p>Note that your native (C++, SWIG, JNI) dependencies will be built differently
+          depending on whether you are using the JDK launcher or another launcher:</p>
+
+          <ul>
+            <li>If you are using the normal JDK launcher (the default), native dependencies are
+            built as a shared library named <code>{name}_nativedeps.so</code>, where
+            <code>{name}</code> is the <code>name</code> attribute of this java_binary rule.
+            Unused code is <em>not</em> removed by the linker in this configuration.</li>
+
+            <li>If you are using any other launcher, native (C++) dependencies are statically
+            linked into a binary named <code>{name}_nativedeps</code>, where <code>{name}</code>
+            is the <code>name</code> attribute of this java_binary rule. In this case,
+            the linker will remove any code it thinks is unused from the resulting binary,
+            which means any C++ code accessed only via JNI may not be linked in unless
+            that <code>cc_library</code> target specifies <code>alwayslink = 1</code>.</li>
+          </ul>
+
+          <p>When using any launcher other than the default JDK launcher, the format
+          of the <code>*_deploy.jar</code> output changes. See the main
+          <a href="#java_binary">java_binary</a> docs for details.</p>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+          .add(
+              attr("launcher", LABEL)
+                  .allowedFileTypes(FileTypeSet.NO_FILE)
+                  .mandatoryProviders(
+                      StarlarkProviderIdentifier.forKey(CcLauncherInfo.PROVIDER.getKey())))
+          .add(attr(":java_launcher", LABEL).value(JavaSemantics.JAVA_LAUNCHER)) // blaze flag
+          .add(
+              attr("$launcher", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .value(env.getToolsLabel("//tools/launcher:launcher")))
           .build();
     }
     @Override
@@ -352,11 +432,12 @@ public class BazelJavaRuleClasses {
       return RuleDefinition.Metadata.builder()
           .name("$base_java_binary")
           .type(RuleClassType.ABSTRACT)
-          .ancestors(JavaRule.class,
+          .ancestors(
+              JavaRule.class,
               // java_binary and java_test require the crosstool C++ runtime
               // libraries (libstdc++.so, libgcc_s.so).
               // TODO(bazel-team): Add tests for Java+dynamic runtime.
-              BazelCppRuleClasses.CcLinkingRule.class)
+              CcToolchainRequiringRule.class)
           .build();
     }
   }

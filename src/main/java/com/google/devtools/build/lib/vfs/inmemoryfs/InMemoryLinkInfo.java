@@ -13,9 +13,9 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs.inmemoryfs;
 
+import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.util.Clock;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 /**
@@ -31,7 +31,7 @@ class InMemoryLinkInfo extends InMemoryContentInfo {
   InMemoryLinkInfo(Clock clock, PathFragment linkContent) {
     super(clock);
     this.linkContent = linkContent;
-    this.normalizedLinkContent = linkContent.normalize();
+    this.normalizedLinkContent = linkContent;
   }
 
   @Override
@@ -56,7 +56,7 @@ class InMemoryLinkInfo extends InMemoryContentInfo {
 
   @Override
   public long getSize() {
-    return linkContent.toString().length();
+    return linkContent.getSafePathString().length();
   }
 
   /**

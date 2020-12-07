@@ -13,22 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
+import static com.google.common.truth.Truth.assertThat;
 import static java.util.Collections.singletonMap;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
 import com.google.devtools.build.lib.util.StringUtilities;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests {@link BlazeVersionInfo}.
@@ -39,23 +36,23 @@ public class BlazeVersionInfoTest {
   @Test
   public void testEmptyVersionInfoMeansNotAvailable() {
     BlazeVersionInfo info = new BlazeVersionInfo(Collections.<String, String>emptyMap());
-    assertFalse(info.isAvailable());
-    assertNull(info.getSummary());
-    assertEquals("development version", info.getReleaseName());
+    assertThat(info.isAvailable()).isFalse();
+    assertThat(info.getSummary()).isNull();
+    assertThat(info.getReleaseName()).isEqualTo("development version");
   }
 
   @Test
   public void testReleaseNameIsDevelopmentIfBuildLabelIsNull() {
     Map<String, String> data = singletonMap("Build label", "");
     BlazeVersionInfo info = new BlazeVersionInfo(data);
-    assertEquals("development version", info.getReleaseName());
+    assertThat(info.getReleaseName()).isEqualTo("development version");
   }
 
   @Test
   public void testReleaseNameIfBuildLabelIsPresent() {
     Map<String, String> data = singletonMap("Build label", "3/4/2009 (gold)");
     BlazeVersionInfo info = new BlazeVersionInfo(data);
-    assertEquals("release 3/4/2009 (gold)", info.getReleaseName());
+    assertThat(info.getReleaseName()).isEqualTo("release 3/4/2009 (gold)");
   }
 
   @Test
@@ -66,6 +63,19 @@ public class BlazeVersionInfoTest {
     data.put("And a third entry", "baz");
     BlazeVersionInfo info = new BlazeVersionInfo(data);
     Map<String, String> sortedData = new TreeMap<>(data);
-    assertEquals(StringUtilities.layoutTable(sortedData), info.getSummary());
+    assertThat(info.getSummary()).isEqualTo(StringUtilities.layoutTable(sortedData));
+  }
+
+  @Test
+  public void testVersionIsHeadIfBuildLabelIsNull() {
+    BlazeVersionInfo info = new BlazeVersionInfo(ImmutableMap.of());
+    assertThat(info.getVersion()).isEmpty();
+  }
+
+  @Test
+  public void testVersionsIIfBuildLabelIsPresent() {
+    Map<String, String> data = ImmutableMap.of("Build label", "123.4");
+    BlazeVersionInfo info = new BlazeVersionInfo(data);
+    assertThat(info.getVersion()).isEqualTo("123.4");
   }
 }

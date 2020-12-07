@@ -15,16 +15,19 @@
 package com.google.devtools.build.lib.bazel.rules.python;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
+import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.TRISTATE;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.bazel.rules.python.BazelPyRuleClasses.PyBinaryBaseRule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.TriState;
+import com.google.devtools.build.lib.rules.python.PyRuleClasses;
 import com.google.devtools.build.lib.rules.python.PythonConfiguration;
 
 /**
@@ -35,14 +38,26 @@ public final class BazelPyTestRule implements RuleDefinition {
   public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
         .requiresConfigurationFragments(PythonConfiguration.class, BazelPythonConfiguration.class)
-        .override(attr("testonly", BOOLEAN).value(true)
-            .nonconfigurable("policy decision: should be consistent across configurations"))
+        .cfg(PyRuleClasses.VERSION_TRANSITION)
+        .add(
+            attr("$zipper", LABEL)
+                .cfg(HostTransition.createFactory())
+                .exec()
+                .value(env.getToolsLabel("//tools/zip:zipper")))
+        .override(
+            attr("testonly", BOOLEAN)
+                .value(true)
+                .nonconfigurable("policy decision: should be consistent across configurations"))
         /* <!-- #BLAZE_RULE(py_test).ATTRIBUTE(stamp) -->
-        ${SYNOPSIS}
-        See the section on <a href="#py_binary_args">py_binary()</a> arguments, except
+        See the section on <a href="${link py_binary_args}">py_binary()</a> arguments, except
         that the stamp argument is set to 0 by default for tests.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .override(attr("stamp", TRISTATE).value(TriState.NO))
+        .add(
+            attr("$launcher", LABEL)
+                .cfg(HostTransition.createFactory())
+                .value(env.getToolsLabel("//tools/launcher:launcher")))
+        .add(attr(":lcov_merger", LABEL).value(BaseRuleClasses.getCoverageOutputGeneratorLabel()))
         .build();
   }
 
@@ -59,13 +74,9 @@ public final class BazelPyTestRule implements RuleDefinition {
 
 /*<!-- #BLAZE_RULE (NAME = py_test, TYPE = TEST, FAMILY = Python) -->
 
-${ATTRIBUTE_SIGNATURE}
-
 <p>
 A <code>py_test()</code> rule compiles a test.  A test is a binary wrapper
  around some test code.</p>
-
-${ATTRIBUTE_DEFINITION}
 
 <h4 id="py_test_examples">Examples</h4>
 
@@ -83,15 +94,14 @@ py_test(
 <p>It's also possible to specify a main module:</p>
 
 <pre class="code">
-py_binary(
-    name = "foo",
+py_test(
+    name = "runtest_test",
     srcs = [
-        "bar.py",
-        "baz.py",
+        "runtest_main.py",
+        "runtest_lib.py",
     ],
-    main = "bar.py",
+    main = "runtest_main.py",
 )
 </pre>
 
 <!-- #END_BLAZE_RULE -->*/
-

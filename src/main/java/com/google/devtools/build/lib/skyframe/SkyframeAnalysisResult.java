@@ -15,34 +15,59 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.actions.PackageRoots;
+import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
-
-import java.util.Collection;
 
 /**
  *  Encapsulates the raw analysis result of top level targets and aspects coming from Skyframe.
  */
 public class SkyframeAnalysisResult {
+  private final boolean hasLoadingError;
+  private final boolean hasAnalysisError;
+  private final boolean hasActionConflicts;
   private final ImmutableList<ConfiguredTarget> configuredTargets;
   private final WalkableGraph walkableGraph;
-  private final ImmutableList<AspectValue> aspects;
-  private final ImmutableMap<PackageIdentifier, Path> packageRoots;
+  private final ImmutableMap<AspectKey, ConfiguredAspect> aspects;
+  private final PackageRoots packageRoots;
 
-  public SkyframeAnalysisResult(
+  SkyframeAnalysisResult(
+      boolean hasLoadingError,
+      boolean hasAnalysisError,
+      boolean hasActionConflicts,
       ImmutableList<ConfiguredTarget> configuredTargets,
       WalkableGraph walkableGraph,
-      ImmutableList<AspectValue> aspects,
-      ImmutableMap<PackageIdentifier, Path> packageRoots) {
+      ImmutableMap<AspectKey, ConfiguredAspect> aspects,
+      PackageRoots packageRoots) {
+    this.hasLoadingError = hasLoadingError;
+    this.hasAnalysisError = hasAnalysisError;
+    this.hasActionConflicts = hasActionConflicts;
     this.configuredTargets = configuredTargets;
     this.walkableGraph = walkableGraph;
     this.aspects = aspects;
     this.packageRoots = packageRoots;
   }
 
-  public Collection<ConfiguredTarget> getConfiguredTargets() {
+  /**
+   * If the new simplified loading phase is enabled, then we can also see loading errors during the
+   * analysis phase. This method returns true if any such errors were encountered. However, you also
+   * always need to check if the loading result has an error! These will be merged eventually.
+   */
+  public boolean hasLoadingError() {
+    return hasLoadingError;
+  }
+
+  public boolean hasAnalysisError() {
+    return hasAnalysisError;
+  }
+
+  public boolean hasActionConflicts() {
+    return hasActionConflicts;
+  }
+
+  public ImmutableList<ConfiguredTarget> getConfiguredTargets() {
     return configuredTargets;
   }
 
@@ -50,11 +75,11 @@ public class SkyframeAnalysisResult {
     return walkableGraph;
   }
 
-  public Collection<AspectValue> getAspects() {
+  public ImmutableMap<AspectKey, ConfiguredAspect> getAspects() {
     return aspects;
   }
 
-  public ImmutableMap<PackageIdentifier, Path> getPackageRoots() {
+  public PackageRoots getPackageRoots() {
     return packageRoots;
   }
 }

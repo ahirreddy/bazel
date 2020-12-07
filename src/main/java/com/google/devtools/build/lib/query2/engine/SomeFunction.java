@@ -19,7 +19,8 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Argument;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ArgumentType;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskCallable;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -49,22 +50,36 @@ class SomeFunction implements QueryFunction {
   }
 
   @Override
-  public <T> void eval(QueryEnvironment<T> env, QueryExpression expression,
-      List<Argument> args, final Callback<T> callback)
-      throws QueryException, InterruptedException {
+  public <T> QueryTaskFuture<Void> eval(
+      QueryEnvironment<T> env,
+      QueryExpressionContext<T> context,
+      final QueryExpression expression,
+      List<Argument> args,
+      final Callback<T> callback) {
     final AtomicBoolean someFound = new AtomicBoolean(false);
-    env.eval(args.get(0).getExpression(), new Callback<T>() {
-      @Override
-      public void process(Iterable<T> partialResult) throws QueryException, InterruptedException {
-        if (someFound.get() || Iterables.isEmpty(partialResult)) {
-          return;
-        }
-        callback.process(ImmutableSet.of(partialResult.iterator().next()));
-        someFound.set(true);
-      }
-    });
-    if (!someFound.get()) {
-      throw new QueryException(expression, "argument set is empty");
-    }
+    QueryTaskFuture<Void> operandEvalFuture = env.eval(
+        args.get(0).getExpression(),
+        context,
+        new Callback<T>() {
+          @Override
+          public void process(Iterable<T> partialResult)
+              throws QueryException, InterruptedException {
+            if (Iterables.isEmpty(partialResult) || !someFound.compareAndSet(false, true)) {
+              return;
+            }
+            callback.process(ImmutableSet.of(partialResult.iterator().next()));
+          }
+        });
+    return env.whenSucceedsCall(
+        operandEvalFuture,
+        new QueryTaskCallable<Void>() {
+          @Override
+          public Void call() throws QueryException {
+            if (!someFound.get()) {
+              throw new QueryException(expression, "argument set is empty");
+            }
+            return null;
+          }
+        });
   }
 }

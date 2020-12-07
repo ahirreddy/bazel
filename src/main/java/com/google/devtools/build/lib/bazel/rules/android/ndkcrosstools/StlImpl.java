@@ -18,10 +18,10 @@ import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
 
 /**
  * An NdkStlImpl adds a specific Android NDK C++ STL implementation to a given CToolchain proto
@@ -32,9 +32,10 @@ public abstract class StlImpl {
   private enum RuntimeType {
     DYNAMIC("so"), STATIC("a");
 
-    private final String name, fileExtension;
+    private final String name;
+    private final String fileExtension;
 
-    private RuntimeType(String fileExtension) {
+    RuntimeType(String fileExtension) {
       this.name = name().toLowerCase();
       this.fileExtension = fileExtension;
     }    
@@ -54,8 +55,7 @@ public abstract class StlImpl {
     this.ndkPaths = ndkPaths;
   }
 
-  public void addStlImpl(
-      List<CToolchain.Builder> baseToolchains, String gccVersion) {
+  public void addStlImpl(List<CToolchain.Builder> baseToolchains, @Nullable String gccVersion) {
 
     for (CToolchain.Builder baseToolchain : baseToolchains) {
       addStlImpl(baseToolchain, gccVersion);
@@ -68,10 +68,10 @@ public abstract class StlImpl {
    * @param toolchain the toolchain to add the STL implementation to
    * @param gccVersion the gcc version for the STL impl. Applicable only to gnu-libstdc++
    */
-  public abstract void addStlImpl(CToolchain.Builder toolchain, String gccVersion);
+  public abstract void addStlImpl(CToolchain.Builder toolchain, @Nullable String gccVersion);
 
-  protected void addBaseStlImpl(CToolchain.Builder toolchain, String gccVersion) {
- 
+  protected void addBaseStlImpl(CToolchain.Builder toolchain, @Nullable String gccVersion) {
+
     toolchain
       .setToolchainIdentifier(toolchain.getToolchainIdentifier() + "-" + name)
       .setSupportsEmbeddedRuntimes(true)
@@ -84,7 +84,7 @@ public abstract class StlImpl {
   }
 
   private String createRuntimeLibrariesFilegroup(
-      String stl, String gccVersion, String targetCpu, RuntimeType type) {
+      String stl, @Nullable String gccVersion, String targetCpu, RuntimeType type) {
 
     // gnu-libstlc++ has separate libraries for 4.8 and 4.9
     String fullStlName = stl;

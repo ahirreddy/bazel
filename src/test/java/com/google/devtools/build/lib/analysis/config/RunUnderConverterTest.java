@@ -14,21 +14,16 @@
 package com.google.devtools.build.lib.analysis.config;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.common.options.OptionsParsingException;
-
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.util.List;
-
-/**
- * Tests {@link RunUnderConverter}.
- */
+/** Tests {@link RunUnderConverter}. */
 @RunWith(JUnit4.class)
 public class RunUnderConverterTest {
 
@@ -49,17 +44,15 @@ public class RunUnderConverterTest {
   private void assertEqualsRunUnder(String input, String label, String command,
       List<String> options) throws Exception {
     RunUnder runUnder = new RunUnderConverter().convert(input);
-    assertEquals(label, runUnder.getLabel() == null ? null : runUnder.getLabel().toString());
-    assertEquals(command, runUnder.getCommand());
-    assertEquals(options, runUnder.getOptions());
+    assertThat(runUnder.getLabel() == null ? null : runUnder.getLabel().toString())
+        .isEqualTo(label);
+    assertThat(runUnder.getCommand()).isEqualTo(command);
+    assertThat(runUnder.getOptions()).isEqualTo(options);
   }
 
   private void assertRunUnderFails(String input, String expectedError) {
-    try {
-      new RunUnderConverter().convert(input);
-      fail();
-    } catch (OptionsParsingException e) {
-      assertThat(e).hasMessage(expectedError);
-    }
+    OptionsParsingException e =
+        assertThrows(OptionsParsingException.class, () -> new RunUnderConverter().convert(input));
+    assertThat(e).hasMessageThat().isEqualTo(expectedError);
   }
 }

@@ -13,12 +13,11 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.cpp;
 
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.CompileOnlyTestCase;
-
+import com.google.devtools.build.lib.packages.util.Crosstool.CcToolchainConfig;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -31,6 +30,11 @@ public class CcCompileOnlyTest extends CompileOnlyTestCase {
 
   @Test
   public void testCcCompileOnly() throws Exception {
+    getAnalysisMock()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig, CcToolchainConfig.builder().withFeatures(CppRuleClasses.SUPPORTS_PIC));
+    useConfiguration("--cpu=k8");
     scratch.file("package/BUILD",
         "cc_binary(name='foo', srcs=['foo.cc', ':bar'], deps = [':foolib'])",
         "cc_library(name='foolib', srcs=['foolib.cc'])",
@@ -50,11 +54,11 @@ public class CcCompileOnlyTest extends CompileOnlyTestCase {
 
     ConfiguredTarget target = getConfiguredTarget("//package:foo");
 
-    assertNotNull(getArtifactByExecPathSuffix(target, "/foo.pic.o"));
-    assertNotNull(getArtifactByExecPathSuffix(target, "/bar.pic.o"));
+    assertThat(getArtifactByExecPathSuffix(target, "/foo.pic.o")).isNotNull();
+    assertThat(getArtifactByExecPathSuffix(target, "/bar.pic.o")).isNotNull();
     // Check that deps are not built
-    assertNull(getArtifactByExecPathSuffix(target, "/foolib.pic.o"));
+    assertThat(getArtifactByExecPathSuffix(target, "/foolib.pic.o")).isNull();
     // Check that linking is not executed
-    assertNull(getArtifactByExecPathSuffix(target, "/foo"));
+    assertThat(getArtifactByExecPathSuffix(target, "/foo")).isNull();
   }
 }

@@ -14,21 +14,40 @@
 
 package com.google.devtools.build.lib.rules.apple;
 
-import com.google.common.base.Function;
+import static com.google.devtools.build.lib.packages.Attribute.attr;
+import static com.google.devtools.build.lib.packages.BuildType.LABEL;
+
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
-import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos.XcodeprojBuildSetting;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
+import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleToolchainApi;
+import java.io.Serializable;
 
 /**
  * Utility class for resolving items for the Apple toolchain (such as common tool flags, and paths).
  */
-public class AppleToolchain {
+@Immutable
+public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
+
   // These next two strings are shared secrets with the xcrunwrapper.sh to allow
   // expansion of DeveloperDir and SDKRoot and runtime, since they aren't known
   // until compile time on any given build machine.
   private static final String DEVELOPER_DIR = "__BAZEL_XCODE_DEVELOPER_DIR__";
   private static final String SDKROOT_DIR = "__BAZEL_XCODE_SDKROOT__";
-  
+
+  // These two paths are framework paths relative to SDKROOT.
+  @VisibleForTesting
+  public static final String DEVELOPER_FRAMEWORK_PATH = "/Developer/Library/Frameworks";
+  @VisibleForTesting
+  public static final String SYSTEM_FRAMEWORK_PATH = "/System/Library/Frameworks";
+
   // There is a handy reference to many clang warning flags at
   // http://nshipster.com/clang-diagnostics/
   // There is also a useful narrative for many Xcode settings at
@@ -51,31 +70,9 @@ public class AppleToolchain {
           .put("GCC_WARN_UNUSED_VARIABLE", "-Wunused-variable")
           .build();
 
-  private AppleToolchain() {
-    throw new UnsupportedOperationException("static-only");
-  }
-
-  /**
-   * Returns the platform plist name (for example, iPhoneSimulator) for the platform corresponding
-   * to the value of {@code --ios_cpu} in the given configuration.
-   */
-  // TODO(bazel-team): Support non-ios platforms.
-  public static String getPlatformPlistName(AppleConfiguration configuration) {
-    return Platform.forIosArch(configuration.getIosCpu()).getNameInPlist();
-  }
-
-  /**
-   * Returns the platform directory inside of Xcode for a given configuration.
-   */
-  public static String platformDir(AppleConfiguration configuration) {
-    return platformDir(getPlatformPlistName(configuration));
-  }
-
-  /**
-   * Returns the platform directory inside of Xcode for a given platform name (e.g. iphoneos).
-   */
+  /** Returns the platform directory inside of Xcode for a platform name. */
   public static String platformDir(String platformName) {
-    return DEVELOPER_DIR + "/Platforms/" + platformName + ".platform";
+    return developerDir() + "/Platforms/" + platformName + ".platform";
   }
 
   /**
@@ -86,46 +83,110 @@ public class AppleToolchain {
   }
 
   /**
+   * Returns the Developer directory inside of Xcode for a given configuration.
+   */
+  public static String developerDir() {
+    return DEVELOPER_DIR;
+  }
+
+  /**
+   * Returns the platform frameworks directory inside of Xcode for a given {@link ApplePlatform}.
+   */
+  public static String platformDeveloperFrameworkDir(ApplePlatform platform) {
+    String platformDir = platformDir(platform.getNameInPlist());
+    return platformDir + "/Developer/Library/Frameworks";
+  }
+
+  /** Returns the SDK frameworks directory inside of Xcode for a given configuration. */
+  public static String sdkFrameworkDir(ApplePlatform targetPlatform, XcodeConfigInfo xcodeConfig) {
+    String relativePath;
+    switch (targetPlatform) {
+      case IOS_DEVICE:
+      case IOS_SIMULATOR:
+        if (xcodeConfig
+                .getSdkVersionForPlatform(targetPlatform)
+                .compareTo(DottedVersion.fromStringUnchecked("9.0"))
+            >= 0) {
+          relativePath = SYSTEM_FRAMEWORK_PATH;
+        } else {
+          relativePath = DEVELOPER_FRAMEWORK_PATH;
+        }
+        break;
+      case MACOS:
+      case WATCHOS_DEVICE:
+      case WATCHOS_SIMULATOR:
+      case TVOS_DEVICE:
+      case TVOS_SIMULATOR:
+        relativePath = SYSTEM_FRAMEWORK_PATH;
+        break;
+      default:
+        throw new IllegalArgumentException("Unhandled platform " + targetPlatform);
+    }
+    return sdkDir() + relativePath;
+  }
+
+  /** The default label of the build-wide {@code xcode_config} configuration rule. */
+  public static LabelLateBoundDefault<AppleConfiguration> getXcodeConfigLabel(
+      String toolsRepository) {
+    return LabelLateBoundDefault.fromTargetConfiguration(
+        AppleConfiguration.class,
+        Label.parseAbsoluteUnchecked(
+            toolsRepository + AppleCommandLineOptions.DEFAULT_XCODE_VERSION_CONFIG_LABEL),
+        (Attribute.LateBoundDefault.Resolver<AppleConfiguration, Label> & Serializable)
+            (rule, attributes, appleConfig) -> appleConfig.getXcodeConfigLabel());
+  }
+
+  /**
+   * Returns the platform directory inside of Xcode for a given configuration.
+   */
+  @Override
+  public String sdkDirConstant() {
+    return sdkDir();
+  }
+
+  /**
+   * Returns the Developer directory inside of Xcode for a given configuration.
+   */
+  @Override
+  public String developerDirConstant() {
+    return developerDir();
+  }
+
+  /**
    * Returns the platform frameworks directory inside of Xcode for a given configuration.
    */
-  public static String platformDeveloperFrameworkDir(AppleConfiguration configuration) {
-    return platformDir(configuration) + "/Developer/Library/Frameworks";
+  @Override
+  public String platformFrameworkDirFromConfig(AppleConfiguration configuration) {
+    return platformDeveloperFrameworkDir(configuration.getSingleArchPlatform());
   }
 
   /**
-   * Returns the SDK frameworks directory inside of Xcode for a given configuration.
+   * Base rule definition to be ancestor for rules which may require an xcode toolchain.
    */
-  public static String sdkDeveloperFrameworkDir() {
-    return sdkDir() + "/Developer/Library/Frameworks";
-  }
+  public static class RequiresXcodeConfigRule implements RuleDefinition {
+    private final String toolsRepository;
 
-  /**
-   * Returns swift libraries path.
-   */
-  public static String swiftLibDir(AppleConfiguration configuration) {
-    return DEVELOPER_DIR + "/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/"
-        + swiftPlatform(configuration);
-  }
+    public RequiresXcodeConfigRule(String toolsRepository) {
+      this.toolsRepository = toolsRepository;
+    }
 
-  /**
-   * Returns a platform name string suitable for use in Swift tools.
-   */
-  public static String swiftPlatform(AppleConfiguration configuration) {
-    return getPlatformPlistName(configuration).toLowerCase();
-  }
-
-  /**
-   * Returns a series of xcode build settings which configure compilation warnings to
-   * "recommended settings". Without these settings, compilation might result in some spurious
-   * warnings, and xcode would complain that the settings be changed to these values.
-   */
-  public static Iterable<? extends XcodeprojBuildSetting> defaultWarningsForXcode() {
-    return Iterables.transform(DEFAULT_WARNINGS.keySet(),
-        new Function<String, XcodeprojBuildSetting>() {
-      @Override
-      public XcodeprojBuildSetting apply(String key) {
-        return XcodeprojBuildSetting.newBuilder().setName(key).setValue("YES").build();
-      }
-    });
+    @Override
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
+      return builder
+          .add(
+              attr(XcodeConfigRule.XCODE_CONFIG_ATTR_NAME, LABEL)
+                  .allowedRuleClasses("xcode_config")
+                  .checkConstraints()
+                  .direct_compile_time_input()
+                  .value(getXcodeConfigLabel(toolsRepository)))
+          .build();
+    }
+    @Override
+    public Metadata getMetadata() {
+      return RuleDefinition.Metadata.builder()
+          .name("$requires_xcode_config")
+          .type(RuleClassType.ABSTRACT)
+          .build();
+    }
   }
 }

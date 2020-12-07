@@ -14,37 +14,63 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
-import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.Package;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.skyframe.AbstractSkyKey;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import javax.annotation.Nullable;
 
 /**
  * SkyFunction that throws a {@link BuildFileContainsErrorsException} for {@link Package} that
- * loaded, but was in error. Must only be requested when a SkyFunction wishes to ignore the errors
- * in a {@link Package} in keep_going mode, but to shut down the build in nokeep_going mode. Thus,
- * this SkyFunction should only be requested when the corresponding {@link PackageFunction} has
- * already been successfully called and the resulting Package contains an error.
+ * loaded, but was in error. Must only be requested when a SkyFunction wishes to ignore the Skyframe
+ * error from a {@link PackageValue} in keep_going mode, but to shut down the build in nokeep_going
+ * mode. Thus, this SkyFunction should only be requested when the corresponding {@link
+ * PackageFunction} has already been successfully called and the resulting Package contains an
+ * error.
  *
- * <p>This SkyFunction never returns a value, only throws a {@link BuildFileNotFoundException}, and
- * should never return null, since all of its dependencies should already be present.
+ * <p>This SkyFunction always throws a {@link BuildFileContainsErrorsException}. It also should
+ * never request a skyframe restart, since all of its dependencies should already be present.
  */
 public class PackageErrorFunction implements SkyFunction {
-  public static SkyKey key(PackageIdentifier packageIdentifier) {
-    return new SkyKey(SkyFunctions.PACKAGE_ERROR, packageIdentifier);
+  public static Key key(PackageIdentifier packageIdentifier) {
+    return Key.create(packageIdentifier);
+  }
+
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class Key extends AbstractSkyKey<PackageIdentifier> {
+    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+
+    private Key(PackageIdentifier arg) {
+      super(arg);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static Key create(PackageIdentifier arg) {
+      return interner.intern(new Key(arg));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.PACKAGE_ERROR;
+    }
   }
 
   @Nullable
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env) throws PackageErrorFunctionException {
+  public SkyValue compute(SkyKey skyKey, Environment env)
+      throws PackageErrorFunctionException, InterruptedException {
     PackageIdentifier packageIdentifier = (PackageIdentifier) skyKey.argument();
     try {
       SkyKey packageKey = PackageValue.key(packageIdentifier);

@@ -15,75 +15,121 @@
 package com.google.devtools.build.lib.syntax;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertThrows;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.packages.StructProvider;
+import com.google.devtools.build.lib.skylarkinterface.StarlarkBuiltin;
+import com.google.devtools.build.lib.syntax.EvalUtils.ComparisonException;
+import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
+import javax.annotation.Nullable;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-
 /**
- *  Test properties of the evaluator's datatypes and utility functions
- *  without actually creating any parse trees.
+ * Test properties of the evaluator's datatypes and utility functions without actually creating any
+ * parse trees.
  */
 @RunWith(JUnit4.class)
-public class EvalUtilsTest {
+public final class EvalUtilsTest extends EvaluationTestCase {
 
-  private static List<?> makeList(Object... args) {
-    return EvalUtils.makeSequence(Arrays.<Object>asList(args), false);
+  private static StarlarkList<Object> makeList(@Nullable Mutability mu) {
+    return StarlarkList.of(mu, 1, 2, 3);
   }
 
-  private static List<?> makeTuple(Object... args) {
-    return EvalUtils.makeSequence(Arrays.<Object>asList(args), true);
+  private static Dict<Object, Object> makeDict(@Nullable Mutability mu) {
+    return Dict.of(mu, 1, 1, 2, 2);
   }
 
-  private static Map<Object, Object> makeDict() {
-    return new LinkedHashMap<>();
+  /** MockClassA */
+  @StarlarkBuiltin(name = "MockClassA", doc = "MockClassA")
+  public static class MockClassA implements StarlarkValue {}
+
+  /** MockClassB */
+  public static class MockClassB extends MockClassA {
   }
 
   @Test
   public void testDataTypeNames() throws Exception {
-    assertEquals("string", EvalUtils.getDataTypeName("foo"));
-    assertEquals("int", EvalUtils.getDataTypeName(3));
-    assertEquals("Tuple", EvalUtils.getDataTypeName(makeTuple(1, 2, 3)));
-    assertEquals("List",  EvalUtils.getDataTypeName(makeList(1, 2, 3)));
-    assertEquals("dict",  EvalUtils.getDataTypeName(makeDict()));
-    assertEquals("NoneType", EvalUtils.getDataTypeName(Runtime.NONE));
+    assertThat(Starlark.type("foo")).isEqualTo("string");
+    assertThat(Starlark.type(3)).isEqualTo("int");
+    assertThat(Starlark.type(Tuple.of(1, 2, 3))).isEqualTo("tuple");
+    assertThat(Starlark.type(makeList(null))).isEqualTo("list");
+    assertThat(Starlark.type(makeDict(null))).isEqualTo("dict");
+    assertThat(Starlark.type(Starlark.NONE)).isEqualTo("NoneType");
+    assertThat(Starlark.type(new MockClassA())).isEqualTo("MockClassA");
+    assertThat(Starlark.type(new MockClassB())).isEqualTo("MockClassA");
   }
 
   @Test
-  public void testDatatypeMutability() throws Exception {
-    assertTrue(EvalUtils.isImmutable("foo"));
-    assertTrue(EvalUtils.isImmutable(3));
-    assertTrue(EvalUtils.isImmutable(makeTuple(1, 2, 3)));
-    assertFalse(EvalUtils.isImmutable(makeList(1, 2, 3)));
-    assertFalse(EvalUtils.isImmutable(makeDict()));
+  public void testDatatypeMutabilityPrimitive() throws Exception {
+    assertThat(EvalUtils.isImmutable("foo")).isTrue();
+    assertThat(EvalUtils.isImmutable(3)).isTrue();
+  }
+
+  @Test
+  public void testDatatypeMutabilityShallow() throws Exception {
+    assertThat(EvalUtils.isImmutable(Tuple.of(1, 2, 3))).isTrue();
+
+    assertThat(EvalUtils.isImmutable(makeList(null))).isTrue();
+    assertThat(EvalUtils.isImmutable(makeDict(null))).isTrue();
+
+    Mutability mu = Mutability.create("test");
+    assertThat(EvalUtils.isImmutable(makeList(mu))).isFalse();
+    assertThat(EvalUtils.isImmutable(makeDict(mu))).isFalse();
+  }
+
+  @Test
+  public void testDatatypeMutabilityDeep() throws Exception {
+    Mutability mu = Mutability.create("test");
+    assertThat(EvalUtils.isImmutable(Tuple.of(makeList(null)))).isTrue();
+    assertThat(EvalUtils.isImmutable(Tuple.of(makeList(mu)))).isFalse();
   }
 
   @Test
   public void testComparatorWithDifferentTypes() throws Exception {
-    TreeMap<Object, Object> map = new TreeMap<>(EvalUtils.SKYLARK_COMPARATOR);
-    map.put(2, 3);
-    map.put("1", 5);
-    map.put(42, 4);
-    map.put("test", 7);
-    map.put(-1, 2);
-    map.put("4", 6);
-    map.put(2.0, 1);
-    map.put(Runtime.NONE, 0);
+    Mutability mu = Mutability.create("test");
+    Object[] objects = {
+      "1",
+      2,
+      true,
+      Starlark.NONE,
+      Tuple.of(1, 2, 3),
+      Tuple.of("1", "2", "3"),
+      StarlarkList.of(mu, 1, 2, 3),
+      StarlarkList.of(mu, "1", "2", "3"),
+      Dict.of(mu, "key", 123),
+      Dict.of(mu, 123, "value"),
+      StructProvider.STRUCT.create(ImmutableMap.of("key", (Object) "value"), "no field %s"),
+    };
 
-    int expected = 0;
-    // Expected order of keys is NoneType -> Double -> Integers -> Strings
-    for (Object obj : map.values()) {
-      assertThat(obj).isEqualTo(expected);
-      ++expected;
+    for (int i = 0; i < objects.length; ++i) {
+      for (int j = 0; j < objects.length; ++j) {
+        if (i != j) {
+          Object first = objects[i];
+          Object second = objects[j];
+          assertThrows(
+              ComparisonException.class, () -> EvalUtils.SKYLARK_COMPARATOR.compare(first, second));
+        }
+      }
     }
+  }
+
+  @Test
+  public void testComparatorWithNones() throws Exception {
+    assertThrows(
+        ComparisonException.class,
+        () -> EvalUtils.SKYLARK_COMPARATOR.compare(Starlark.NONE, Starlark.NONE));
+  }
+
+  @Test
+  public void testLen() {
+    assertThat(Starlark.len("abc")).isEqualTo(3);
+    assertThat(Starlark.len(Tuple.of(1, 2, 3))).isEqualTo(3);
+    assertThat(Starlark.len(StarlarkList.of(null, 1, 2, 3))).isEqualTo(3);
+    assertThat(Starlark.len(Dict.of(null, "one", 1, "two", 2))).isEqualTo(2);
+    assertThat(Starlark.len(true)).isEqualTo(-1);
+    assertThrows(IllegalArgumentException.class, () -> Starlark.len(this));
   }
 }

@@ -23,7 +23,7 @@ source ${DIR}/testenv.sh || { echo "testenv.sh not found!" >&2; exit 1; }
 : ${COMMAND_ALIASES:=bazel}
 
 # Completion script
-: ${COMPLETION:="$TEST_SRCDIR/scripts/bazel-complete.bash"}
+: ${COMPLETION:="$TEST_SRCDIR/io_bazel/scripts/bazel-complete.bash"}
 
 # Set this to test completion with package path (if enabled)
 : ${PACKAGE_PATH_PREFIX:=}
@@ -68,7 +68,7 @@ expand() {
         #
         # Alias expansion still inserts an extra space after 'blaze',
         # though, hence the following sed.  Not sure why.
-        for i in ${COMMAND_ALIASES[@]}; do
+        for i in "${COMMAND_ALIASES[@]}"; do
           echo "alias $i=\"echo $i'\""
         done
         echo -en "$input'"
@@ -82,7 +82,7 @@ expand() {
 # e.g. assert_expansion 'foo' 'foo_expand' 'flag1=bar;flag2=baz'
 assert_expansion() {
     local prefix=$1 expected=$2 flags=${3:-}
-    for i in ${COMMAND_ALIASES[@]}; do
+    for i in "${COMMAND_ALIASES[@]}"; do
       local nprefix="$i $prefix"
       local nexpected="$i $expected"
       assert_equals "$nexpected" "$(expand "$nprefix\t" "$flags" "/dev/null")"
@@ -99,8 +99,8 @@ assert_expansion() {
 # in STDERR receiving a string containing regex unexpected-error.
 assert_expansion_error_not_contains() {
   local prefix=$1 not_expected=$2 flags=${3:-}
-  local temp_file=$(mktemp -t tmp.stderr.XXXXXX)
-  for i in ${COMMAND_ALIASES[@]}; do
+  local temp_file="$(mktemp "${TEST_TMPDIR}/tmp.stderr.XXXXXX")"
+  for i in "${COMMAND_ALIASES[@]}"; do
     local nprefix="$i "
     expand "$nprefix\t" "$flags" "$temp_file" > /dev/null
     assert_not_contains "$not_expected" "$temp_file"
@@ -170,8 +170,10 @@ source ${COMPLETION}
 assert_expansion_function() {
   local ws=${PWD}
   local function="$1" displacement="$2" type="$3" expected="$4" current="$5"
-  assert_equals "$(echo -e "${expected}")" \
-      "$(eval "_bazel__${function} \"${ws}\" \"${displacement}\" \"${current}\" \"${type}\"")"
+  disable_errexit
+  local actual_result=$(eval "_bazel__${function} \"${ws}\" \"${displacement}\" \"${current}\" \"${type}\"")
+  enable_errexit
+  assert_equals "$(echo -ne "${expected}")" "${actual_result}"
 }
 
 test_expand_rules_in_package() {
@@ -404,9 +406,9 @@ test_basic_subcommand_expansion() {
                      'shutdown '
 }
 
-test_common_options() {
-    # 'Test common option completion'
-    assert_expansion '--h' \
+test_common_startup_options() {
+    # 'Test common startup option completion'
+    assert_expansion '--hos' \
                      '--host_jvm_'
     assert_expansion '--host_jvm_a' \
                      '--host_jvm_args='

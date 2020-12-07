@@ -14,54 +14,43 @@
 package com.google.devtools.build.lib.profiler;
 
 import com.google.common.base.Preconditions;
-import com.google.devtools.build.lib.util.BlazeClock;
-import com.google.devtools.build.lib.util.Clock;
-
-import java.util.concurrent.TimeUnit;
+import com.google.devtools.build.lib.clock.BlazeClock;
+import com.google.devtools.build.lib.clock.Clock;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.logging.Logger;
 
 /**
- * A convenient way to actively get access to timing information (e.g. for logging and/or
- * profiling purposes) with minimal boilerplate. The lack of boilerplate comes at a performance
- * cost; do not use {@link AutoProfiler} on performance critical code.
+ * A convenient way to actively get access to timing information (e.g. for logging and/or profiling
+ * purposes) with minimal boilerplate. The lack of boilerplate comes at a performance cost; do not
+ * use {@link AutoProfiler} on performance critical code.
  *
  * <p>The intended usage is:
  *
- * <pre>
- * {@code
- * try (AutoProfiler p = AutoProfiler.logged("<description of your code>")) {
+ * <pre>{@code
+ * try (AutoProfiler p = GoogleAutoProfilerUtils.logged("<description of your code>")) {
  *   // Your code here.
  * }
- * }
- * </pre>
+ * }</pre>
  *
  * <p>but if the try-with-resources pattern is too cumbersome, you can also do
  *
- * <pre>
- * {@code
- * AutoProfiler p = AutoProfiler.logged("<description of your code>");
+ * <pre>{@code
+ * AutoProfiler p = GoogleAutoProfilerUtils.logged("<description of your code>");
  * // Your code here.
  * long elapsedTimeNanos = p.completeAndGetElapsedTimeNanos();
- * }
- * </pre>
+ * }</pre>
  *
  * <p>An {@link AutoProfiler} can also automatically talk to the active {@link Profiler} instance:
  *
- * <pre>
- * {@code
+ * <pre>{@code
  * try (AutoProfiler p = AutoProfiler.profiled("<description of your code>")) {
  *   // Your code here.
  * }
- * }
- * </pre>
+ * }</pre>
  */
-public class AutoProfiler implements AutoCloseable {
+public class AutoProfiler implements SilentCloseable {
   private static final AtomicReference<Clock> CLOCK_REF = new AtomicReference<>(null);
-  private static final AtomicReference<LoggingElapsedTimeReceiverFactory>
-      LOGGING_ELAPSED_TIME_RECEIVER_FACTORY_REF = new AtomicReference<>(
-          LoggingElapsedTimeReceiver.FACTORY);
 
   private final ElapsedTimeReceiver elapsedTimeReceiver;
   private final long startTimeNanos;
@@ -100,75 +89,13 @@ public class AutoProfiler implements AutoCloseable {
   }
 
   /**
-   * Factory to use for creating {@link ElapsedTimeReceiver} instances for servicing
-   * {@link #logged} et al.
-   */
-  public interface LoggingElapsedTimeReceiverFactory {
-    ElapsedTimeReceiver create(String taskDescription, Logger logger, TimeUnit timeUnit);
-  }
-
-  /**
-   * Inject a custom {@link LoggingElapsedTimeReceiverFactory} for servicing {@link #logged} et al.
-   *
-   * <p>Use this if you want custom logging behavior.
-   */
-  public static void setLoggingElapsedTimeReceiverFactory(
-      LoggingElapsedTimeReceiverFactory factory) {
-    LOGGING_ELAPSED_TIME_RECEIVER_FACTORY_REF.set(factory);
-  }
-
-  /**
-   * Returns an {@link AutoProfiler} that, when closed, logs the elapsed time in milliseconds to
-   * the given {@link Logger}.
+   * Returns an {@link AutoProfiler} that, when closed, records the elapsed time using {@link
+   * Profiler}.
    *
    * <p>The returned {@link AutoProfiler} is thread-safe.
    */
-  public static AutoProfiler logged(String taskDescription, Logger logger) {
-    return logged(taskDescription, logger, TimeUnit.MILLISECONDS);
-  }
-
-  /**
-   * Returns an {@link AutoProfiler} that, when closed, logs the elapsed time the given
-   * {@link TimeUnit} to the given {@link Logger}.
-   *
-   * <p>The returned {@link AutoProfiler} is thread-safe.
-   */
-  public static AutoProfiler logged(String taskDescription, Logger logger, TimeUnit timeUnit) {
-    return create(LOGGING_ELAPSED_TIME_RECEIVER_FACTORY_REF.get().create(
-        taskDescription, logger, timeUnit));
-  }
-
-  /**
-   * Returns an {@link AutoProfiler} that, when closed, records the elapsed time using
-   * {@link Profiler}.
-   *
-   * <p>The returned {@link AutoProfiler} is thread-safe.
-   */
-  public static AutoProfiler profiled(Object object, ProfilerTask profilerTaskType) {
-    return create(new ProfilingElapsedTimeReceiver(object, profilerTaskType));
-  }
-
-  /**
-   * Returns an {@link AutoProfiler} that, when closed, records the elapsed time using
-   * {@link Profiler} and also logs it (in milliseconds) to the given {@link Logger}.
-   *
-   * <p>The returned {@link AutoProfiler} is thread-safe.
-   */
-  public static AutoProfiler profiledAndLogged(String taskDescription,
-      ProfilerTask profilerTaskType, Logger logger) {
-    ElapsedTimeReceiver profilingReceiver =
-        new ProfilingElapsedTimeReceiver(taskDescription, profilerTaskType);
-    ElapsedTimeReceiver loggingReceiver = LOGGING_ELAPSED_TIME_RECEIVER_FACTORY_REF.get().create(
-        taskDescription, logger, TimeUnit.MILLISECONDS);
-    return create(new SequencedElapsedTimeReceiver(profilingReceiver, loggingReceiver));
-  }
-
-  /**
-   * Returns an {@link AutoProfiler} that doesn't do anything when closed and so is only useful for
-   * {@link #completeAndGetElapsedTimeNanos()}.
-   */
-  public static AutoProfiler timed() {
-    return create(NULL_RECEIVER);
+  public static AutoProfiler profiled(String description, ProfilerTask profilerTaskType) {
+    return create(new ProfilingElapsedTimeReceiver(description, profilerTaskType));
   }
 
   /**
@@ -218,78 +145,24 @@ public class AutoProfiler implements AutoCloseable {
     elapsedTimeReceiver.accept(elapsedTimeNanos);
   }
 
-  private static final ElapsedTimeReceiver NULL_RECEIVER = new ElapsedTimeReceiver() {
-    @Override
-    public void accept(long elapsedTimeNanos) {
-    }
-  };
-
-  private static class SequencedElapsedTimeReceiver implements ElapsedTimeReceiver {
-    private final ElapsedTimeReceiver firstReceiver;
-    private final ElapsedTimeReceiver secondReceiver;
-
-    private SequencedElapsedTimeReceiver(ElapsedTimeReceiver firstReceiver,
-        ElapsedTimeReceiver secondReceiver) {
-      this.firstReceiver = firstReceiver;
-      this.secondReceiver = secondReceiver;
-    }
-
-    @Override
-    public void accept(long elapsedTimeNanos) {
-      firstReceiver.accept(elapsedTimeNanos);
-      secondReceiver.accept(elapsedTimeNanos);
-    }
-  }
-
-  private static class LoggingElapsedTimeReceiver implements ElapsedTimeReceiver {
-    private static final LoggingElapsedTimeReceiverFactory FACTORY =
-        new LoggingElapsedTimeReceiverFactory() {
-          @Override
-          public ElapsedTimeReceiver create(String taskDescription, Logger logger,
-              TimeUnit timeUnit) {
-            return new LoggingElapsedTimeReceiver(taskDescription, logger, timeUnit);
-          }
-        };
-
-    private final String taskDescription;
-    private final Logger logger;
-    private final TimeUnit timeUnit;
-
-    private LoggingElapsedTimeReceiver(String taskDescription, Logger logger, TimeUnit timeUnit) {
-      this.taskDescription = taskDescription;
-      this.logger = logger;
-      this.timeUnit = timeUnit;
-    }
-
-    @Override
-    public void accept(long elapsedTimeNanos) {
-      if (elapsedTimeNanos > 0) {
-        logger.info(String.format("Spent %d %s doing %s",
-            timeUnit.convert(elapsedTimeNanos, TimeUnit.NANOSECONDS),
-            timeUnit.toString().toLowerCase(),
-            taskDescription));
-      }
-    }
-  }
-
-  private static class ProfilingElapsedTimeReceiver implements ElapsedTimeReceiver {
+  static class ProfilingElapsedTimeReceiver implements ElapsedTimeReceiver {
     private final long startTimeNanos;
-    private final Object object;
+    private final String description;
     private final ProfilerTask profilerTaskType;
 
-    private ProfilingElapsedTimeReceiver(Object object, ProfilerTask profilerTaskType) {
+    ProfilingElapsedTimeReceiver(String description, ProfilerTask profilerTaskType) {
       this.startTimeNanos = Profiler.nanoTimeMaybe();
-      this.object = object;
+      this.description = description;
       this.profilerTaskType = profilerTaskType;
     }
 
     @Override
     public void accept(long elapsedTimeNanos) {
       if (elapsedTimeNanos > 0) {
-        Profiler.instance().logSimpleTaskDuration(startTimeNanos, elapsedTimeNanos,
-            profilerTaskType, object);
+        Profiler.instance()
+            .logSimpleTaskDuration(
+                startTimeNanos, Duration.ofNanos(elapsedTimeNanos), profilerTaskType, description);
       }
     }
   }
 }
-

@@ -16,11 +16,10 @@ package com.google.devtools.build.lib.actions;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.actions.extra.SpawnInfo;
-import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import java.util.Collection;
+import javax.annotation.Nullable;
 
 /**
  * A delegating spawn that allow us to overwrite certain methods while maintaining the original
@@ -35,38 +34,13 @@ public class DelegateSpawn implements Spawn {
   }
 
   @Override
-  public final ImmutableMap<String, String> getExecutionInfo() {
+  public ImmutableMap<String, String> getExecutionInfo() {
     return spawn.getExecutionInfo();
-  }
-
-  @Override
-  public boolean isRemotable() {
-    return spawn.isRemotable();
-  }
-
-  @Override
-  public ImmutableList<Artifact> getFilesetManifests() {
-    return spawn.getFilesetManifests();
-  }
-
-  @Override
-  public String asShellCommand(Path workingDir) {
-    return spawn.asShellCommand(workingDir);
-  }
-
-  @Override
-  public ImmutableMap<PathFragment, Artifact> getRunfilesManifests() {
-    return spawn.getRunfilesManifests();
   }
 
   @Override
   public RunfilesSupplier getRunfilesSupplier() {
     return spawn.getRunfilesSupplier();
-  }
-
-  @Override
-  public SpawnInfo getExtraActionInfo() {
-    return spawn.getExtraActionInfo();
   }
 
   @Override
@@ -80,12 +54,17 @@ public class DelegateSpawn implements Spawn {
   }
 
   @Override
-  public Iterable<? extends ActionInput> getToolFiles() {
+  public ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> getFilesetMappings() {
+    return spawn.getFilesetMappings();
+  }
+
+  @Override
+  public NestedSet<? extends ActionInput> getToolFiles() {
     return spawn.getToolFiles();
   }
 
   @Override
-  public Iterable<? extends ActionInput> getInputFiles() {
+  public NestedSet<? extends ActionInput> getInputFiles() {
     return spawn.getInputFiles();
   }
 
@@ -95,7 +74,7 @@ public class DelegateSpawn implements Spawn {
   }
 
   @Override
-  public ActionMetadata getResourceOwner() {
+  public ActionExecutionMetadata getResourceOwner() {
     return spawn.getResourceOwner();
   }
 
@@ -105,12 +84,18 @@ public class DelegateSpawn implements Spawn {
   }
 
   @Override
-  public ActionOwner getOwner() {
-    return spawn.getOwner();
+  public String getMnemonic() {
+    return spawn.getMnemonic();
   }
 
   @Override
-  public String getMnemonic() {
-    return spawn.getMnemonic();
+  public ImmutableMap<String, String> getCombinedExecProperties() {
+    return spawn.getCombinedExecProperties();
+  }
+
+  @Override
+  @Nullable
+  public PlatformInfo getExecutionPlatform() {
+    return spawn.getExecutionPlatform();
   }
 }

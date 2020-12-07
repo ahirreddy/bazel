@@ -14,10 +14,10 @@
 package com.google.devtools.build.lib.analysis.buildinfo;
 
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.io.Serializable;
 
 /**
@@ -29,7 +29,7 @@ public interface BuildInfoFactory extends Serializable {
   /**
    * Type of the build-data artifact.
    */
-  public enum BuildInfoType {
+  enum BuildInfoType {
     /**
      * Ignore changes to this file for the purposes of determining whether an action needs to be
      * re-executed. I.e., the action is only re-executed if at least one other input has changed.
@@ -45,46 +45,16 @@ public interface BuildInfoFactory extends Serializable {
   /**
    * Context for the creation of build-info artifacts.
    */
-  public interface BuildInfoContext {
-    Artifact getBuildInfoArtifact(PathFragment rootRelativePath, Root root, BuildInfoType type);
-    Root getBuildDataDirectory();
-  }
-
-  /**
-   * Build-info key for lookup from the {@link
-   * com.google.devtools.build.lib.analysis.AnalysisEnvironment}.
-   */
-  public static final class BuildInfoKey implements Serializable {
-    private final String name;
-
-    public BuildInfoKey(String name) {
-      this.name = name;
-    }
-
-    @Override
-    public String toString() {
-      return name;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-      if (!(o instanceof BuildInfoKey)) {
-        return false;
-      }
-      return name.equals(((BuildInfoKey) o).name);
-    }
-
-    @Override
-    public int hashCode() {
-      return name.hashCode();
-    }
+  interface BuildInfoContext {
+    Artifact getBuildInfoArtifact(
+        PathFragment rootRelativePath, ArtifactRoot root, BuildInfoType type);
   }
 
   /**
    * Create actions and artifacts for language-specific build-info files.
    */
   BuildInfoCollection create(BuildInfoContext context, BuildConfiguration config,
-      Artifact buildInfo, Artifact buildChangelist);
+      Artifact buildInfo, Artifact buildChangelist, RepositoryName repositoryName);
 
   /**
    * Returns the key for the information created by this factory.

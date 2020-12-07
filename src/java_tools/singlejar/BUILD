@@ -1,78 +1,48 @@
-package(default_visibility = ["//src:__subpackages__"])
+# Description:
+#   SingleJar combines multiple zip files and additional files
+#   into a single zip file.
+package(default_visibility = ["//src/java_tools:__subpackages__"])
 
 filegroup(
     name = "srcs",
-    srcs = glob(["**"]) + ["//src/java_tools/singlejar/java/com/google/devtools/build/zip:srcs"],
-    visibility = ["//src/test/shell/bazel:__pkg__"],
+    srcs = glob(["*"]) + [
+        "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:srcs",
+        "//src/java_tools/singlejar/java/com/google/devtools/build/zip:srcs",
+        "//src/java_tools/singlejar/javatests/com/google/devtools/build/singlejar:srcs",
+        "//src/java_tools/singlejar/javatests/com/google/devtools/build/zip:srcs",
+    ],
+    visibility = ["//src:__subpackages__"],
 )
 
-java_library(
+package_group(
+    name = "singlejar_package_group",
+    packages = ["//src/java_tools/singlejar/..."],
+)
+
+alias(
     name = "libSingleJar",
-    srcs = glob(["java/**/singlejar/**/*.java"]),
-    deps = [
-        "//src/java_tools/singlejar/java/com/google/devtools/build/zip",
-        "//src/main/java/com/google/devtools/build/lib:shell",
-        "//third_party:jsr305",
-    ],
-)
-
-java_binary(
-    name = "SingleJar",
-    main_class = "com.google.devtools.build.singlejar.SingleJar",
-    runtime_deps = [":libSingleJar"],
-)
-
-java_test(
-    name = "tests",
-    srcs = glob(["javatests/**/singlejar/**/*.java"]),
-    args = ["com.google.devtools.build.singlejar.SingleJarTests"],
-    deps = [
-        ":libSingleJar",
-        "//src/java_tools/singlejar/java/com/google/devtools/build/zip",
-        "//src/main/java/com/google/devtools/build/lib:shell",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
-        "//third_party:guava",
-        "//third_party:jsr305",
-        "//third_party:junit4",
-        "//third_party:truth",
-    ],
-)
-
-java_test(
-    name = "zipTests",
-    size = "enormous",
-    srcs = glob(["javatests/**/zip/**/*.java"]),
-    args = ["com.google.devtools.build.zip.ZipTests"],
-    tags = ["zip"],
-    deps = [
-        "//src/java_tools/singlejar/java/com/google/devtools/build/zip",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
-        "//third_party:guava",
-        "//third_party:guava-testlib",
-        "//third_party:junit4",
-        "//third_party:truth",
-    ],
-)
-
-#
-# Bootstrapping using Skylark rules
-#
-load("/tools/build_rules/java_rules_skylark", "bootstrap_java_library", "bootstrap_java_binary")
-
-bootstrap_java_library(
-    name = "skylark-deps",
-    jars = [
-        "//third_party:jsr305-jars",
-    ],
-)
-
-bootstrap_java_binary(
-    name = "bootstrap",
-    srcs = glob(["java/**/*.java"]) + ["//src/java_tools/singlejar/java/com/google/devtools/build/zip:java-srcs"],
-    main_class = "com.google.devtools.build.singlejar.SingleJar",
+    actual = "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:libSingleJar",
     visibility = ["//visibility:public"],
-    deps = [
-        ":skylark-deps",
-        "//src/main/java/com/google/devtools/build/lib:shell-skylark",
-    ],
+)
+
+alias(
+    name = "SingleJar",
+    actual = "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:bazel-singlejar",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "SingleJar_deploy.jar",
+    actual = "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:bazel-singlejar_deploy.jar",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "bootstrap",
+    actual = "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:bootstrap",
+)
+
+alias(
+    name = "bootstrap_deploy.jar",
+    actual = "//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:bootstrap_deploy.jar",
 )

@@ -33,10 +33,23 @@
 #include <string.h>
 
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "third_party/ijar/common.h"
+
+namespace {
+// Converts a value to string.
+// Workaround for mingw where std::to_string is not implemented.
+// See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=52015.
+template <typename T>
+std::string ToString(const T& value) {
+  std::ostringstream oss;
+  oss << value;
+  return oss.str();
+}
+}  // namespace
 
 namespace devtools_ijar {
 
@@ -59,17 +72,19 @@ enum CONSTANT {
 };
 
 // See Tables 4.1, 4.4, 4.5 in JVM Spec.
-enum ACCESS  {
-  ACC_PUBLIC          = 0x0001,
-  ACC_PRIVATE         = 0x0002,
-  ACC_PROTECTED       = 0x0004,
-  ACC_STATIC          = 0x0008,
-  ACC_FINAL           = 0x0010,
-  ACC_SYNCHRONIZED    = 0x0020,
-  ACC_VOLATILE        = 0x0040,
-  ACC_TRANSIENT       = 0x0080,
-  ACC_INTERFACE       = 0x0200,
-  ACC_ABSTRACT        = 0x0400
+enum ACCESS {
+  ACC_PUBLIC = 0x0001,
+  ACC_PRIVATE = 0x0002,
+  ACC_PROTECTED = 0x0004,
+  ACC_STATIC = 0x0008,
+  ACC_FINAL = 0x0010,
+  ACC_SYNCHRONIZED = 0x0020,
+  ACC_BRIDGE = 0x0040,
+  ACC_VOLATILE = 0x0040,
+  ACC_TRANSIENT = 0x0080,
+  ACC_INTERFACE = 0x0200,
+  ACC_ABSTRACT = 0x0400,
+  ACC_SYNTHETIC = 0x1000
 };
 
 // See Table 4.7.20-A in Java 8 JVM Spec.
@@ -347,7 +362,7 @@ struct Constant_MethodHandle : Constant
   }
 
   std::string Display() {
-    return "Constant_MethodHandle::" + std::to_string(reference_kind_) + "::"
+    return "Constant_MethodHandle::" + ToString(reference_kind_) + "::"
         + constant(reference_index_)->Display();
   }
 
@@ -390,7 +405,7 @@ struct Constant_InvokeDynamic : Constant
 
   std::string Display() {
     return  "Constant_InvokeDynamic::"
-        + std::to_string(bootstrap_method_attr_index_) + "::"
+        + ToString(bootstrap_method_attr_index_) + "::"
         + constant(name_and_type_index_)->Display();
   }
 
@@ -417,6 +432,10 @@ struct Attribute {
   }
 
   Constant *attribute_name_;
+};
+
+struct KeepForCompileAttribute : Attribute {
+  void Write(u1 *&p) { WriteProlog(p, 0); }
 };
 
 // See sec.4.7.5 of JVM spec.
@@ -490,27 +509,28 @@ struct InnerClassesAttribute : Attribute {
            ++i_entry) {
         Entry* entry = entries_[i_entry];
         if (entry->inner_class_info->Kept() ||
-            used_class_names.find(entry->inner_class_info->Display())
-                != used_class_names.end() ||
-            entry->outer_class_info == class_name ||
-            entry->outer_class_info == NULL ||
-            entry->inner_name == NULL) {
+            used_class_names.find(entry->inner_class_info->Display()) !=
+                used_class_names.end() ||
+            entry->outer_class_info == class_name) {
+          if (entry->inner_name == NULL) {
+            // JVMS 4.7.6: inner_name_index is zero iff the class is anonymous
+            continue;
+          }
+
           kept_entries.insert(i_entry);
 
-          // These are zero for anonymous inner classes
+          // JVMS 4.7.6: outer_class_info_index is zero for top-level classes
           if (entry->outer_class_info != NULL) {
             entry->outer_class_info->slot();
           }
 
-          if (entry->inner_name != NULL) {
-            entry->inner_name->slot();
-          }
+          entry->inner_name->slot();
         }
       }
       iteration += 1;
     } while (entry_count != static_cast<int>(kept_entries.size()));
 
-    if (kept_entries.size() == 0) {
+    if (kept_entries.empty()) {
       return;
     }
 
@@ -799,10 +819,8 @@ struct TypeAnnotation {
   };
 
   struct EmptyInfo : TargetInfo {
-    void Write(u1 *&p) {}
-    static EmptyInfo *Read(const u1 *&p) {
-      return new EmptyInfo;
-    }
+    void Write(u1 *& /*p*/) {}
+    static EmptyInfo *Read(const u1 *& /*p*/) { return new EmptyInfo; }
   };
 
   struct MethodFormalParameterInfo : TargetInfo {
@@ -1005,8 +1023,8 @@ struct SignatureAttribute : Attribute {
 // We preserve Deprecated attributes because they are required by the
 // compiler to generate warning messages.
 struct DeprecatedAttribute : Attribute {
-
-  static DeprecatedAttribute* Read(const u1 *&p, Constant *attribute_name) {
+  static DeprecatedAttribute *Read(const u1 *& /*p*/,
+                                   Constant *attribute_name) {
     DeprecatedAttribute *attr = new DeprecatedAttribute;
     attr->attribute_name_ = attribute_name;
     return attr;
@@ -1110,8 +1128,8 @@ struct ParameterAnnotationsAttribute : Attribute {
 // See sec.4.7.20 of Java 8 JVM spec. Includes RuntimeVisibleTypeAnnotations
 // and RuntimeInvisibleTypeAnnotations.
 struct TypeAnnotationsAttribute : Attribute {
-  static TypeAnnotationsAttribute* Read(const u1 *&p, Constant *attribute_name,
-                                        u4 attribute_length) {
+  static TypeAnnotationsAttribute *Read(const u1 *&p, Constant *attribute_name,
+                                        u4 /*attribute_length*/) {
     auto attr = new TypeAnnotationsAttribute;
     attr->attribute_name_ = attribute_name;
     u2 num_annotations = get_u2be(p);
@@ -1144,7 +1162,7 @@ struct TypeAnnotationsAttribute : Attribute {
 // See JVMS §4.7.24
 struct MethodParametersAttribute : Attribute {
   static MethodParametersAttribute *Read(const u1 *&p, Constant *attribute_name,
-                                         u4 attribute_length) {
+                                         u4 /*attribute_length*/) {
     auto attr = new MethodParametersAttribute;
     attr->attribute_name_ = attribute_name;
     u1 parameters_count = get_u1(p);
@@ -1174,6 +1192,48 @@ struct MethodParametersAttribute : Attribute {
   };
 
   std::vector<MethodParameter*> parameters_;
+};
+
+// See JVMS §4.7.28
+struct NestHostAttribute : Attribute {
+  static NestHostAttribute *Read(const u1 *&p, Constant *attribute_name,
+                                 u4 /*attribute_length*/) {
+    auto attr = new NestHostAttribute;
+    attr->attribute_name_ = attribute_name;
+    attr->host_class_index_ = constant(get_u2be(p));
+    return attr;
+  }
+
+  void Write(u1 *&p) {
+    WriteProlog(p, 2);
+    put_u2be(p, host_class_index_->slot());
+  }
+
+  Constant *host_class_index_;
+};
+
+// See JVMS §4.7.29
+struct NestMembersAttribute : Attribute {
+  static NestMembersAttribute *Read(const u1 *&p, Constant *attribute_name,
+                                    u4 /*attribute_length*/) {
+    auto attr = new NestMembersAttribute;
+    attr->attribute_name_ = attribute_name;
+    u2 number_of_classes = get_u2be(p);
+    for (int ii = 0; ii < number_of_classes; ++ii) {
+      attr->classes_.push_back(constant(get_u2be(p)));
+    }
+    return attr;
+  }
+
+  void Write(u1 *&p) {
+    WriteProlog(p, classes_.size() * 2 + 2);
+    put_u2be(p, classes_.size());
+    for (size_t ii = 0; ii < classes_.size(); ++ii) {
+      put_u2be(p, classes_[ii]->slot());
+    }
+  }
+
+  std::vector<Constant *> classes_;
 };
 
 struct GeneralAttribute : Attribute {
@@ -1279,7 +1339,9 @@ struct ClassFile : HasAttrs {
 
   bool ReadConstantPool(const u1 *&p);
 
-  void StripIfAnonymous();
+  bool IsExplicitlyKept();
+
+  bool IsLocalOrAnonymous();
 
   void WriteHeader(u1 *&p) {
     put_u4be(p, magic);
@@ -1385,6 +1447,16 @@ void HasAttrs::ReadAttrs(const u1 *&p) {
     } else if (attr_name == "MethodParameters") {
       attributes.push_back(
           MethodParametersAttribute::Read(p, attribute_name, attribute_length));
+    } else if (attr_name == "NestHost") {
+      attributes.push_back(
+          NestHostAttribute::Read(p, attribute_name, attribute_length));
+    } else if (attr_name == "NestMembers") {
+      attributes.push_back(
+          NestMembersAttribute::Read(p, attribute_name, attribute_length));
+    } else if (attr_name == "com.google.devtools.ijar.KeepForCompile") {
+      auto attr = new KeepForCompileAttribute;
+      attr->attribute_name_ = attribute_name;
+      attributes.push_back(attr);
     } else {
       // Skip over unknown attributes with a warning.  The JVM spec
       // says this is ok, so long as we handle the mandatory attributes.
@@ -1511,53 +1583,37 @@ bool ClassFile::ReadConstantPool(const u1 *&p) {
   return true;
 }
 
-// Anonymous inner classes are stripped to opaque classes that only extend
-// Object. None of their methods or fields are accessible anyway.
-void ClassFile::StripIfAnonymous() {
-  int enclosing_index = -1;
-  int inner_classes_index = -1;
-
-  for (size_t ii = 0; ii < attributes.size(); ++ii) {
-    if (attributes[ii]->attribute_name_->Display() == "EnclosingMethod") {
-      enclosing_index = ii;
-    } else if (attributes[ii]->attribute_name_->Display() == "InnerClasses") {
-      inner_classes_index = ii;
+bool ClassFile::IsLocalOrAnonymous() {
+  for (const Attribute *attribute : attributes) {
+    if (attribute->attribute_name_->Display() == "EnclosingMethod") {
+      // JVMS 4.7.6: a class must has EnclosingMethod attribute iff it
+      // represents a local class or an anonymous class
+      return true;
     }
   }
+  return false;
+}
 
-  // Presence of an EnclosingMethod attribute indicates a local or anonymous
-  // class, which can be stripped.
-  if (enclosing_index > -1) {
-    // Clear the signature to only extend java.lang.Object.
-    super_class = NULL;
-    interfaces.clear();
-
-    // Clear away all fields (implementation details).
-    for (size_t ii = 0; ii < fields.size(); ++ii) {
-      delete fields[ii];
-    }
-    fields.clear();
-
-    // Clear away all methods (implementation details).
-    for (size_t ii = 0; ii < methods.size(); ++ii) {
-      delete methods[ii];
-    }
-    methods.clear();
-
-    // Only preserve the InnerClasses attribute to comply with the spec.
-    Attribute *attr = NULL;
-    for (size_t ii = 0; ii < attributes.size(); ++ii) {
-      if (static_cast<int>(ii) != inner_classes_index) {
-        delete attributes[ii];
-      } else {
-        attr = attributes[ii];
-      }
-    }
-    attributes.clear();
-    if (attr != NULL) {
-      attributes.push_back(attr);
+static bool HasKeepForCompile(const std::vector<Attribute *> attributes) {
+  for (const Attribute *attribute : attributes) {
+    if (attribute->attribute_name_->Display() ==
+        "com.google.devtools.ijar.KeepForCompile") {
+      return true;
     }
   }
+  return false;
+}
+
+bool ClassFile::IsExplicitlyKept() {
+  if (HasKeepForCompile(attributes)) {
+    return true;
+  }
+  for (const Member *method : methods) {
+    if (HasKeepForCompile(method->attributes)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static ClassFile *ReadClass(const void *classdata, size_t length) {
@@ -1596,25 +1652,41 @@ static ClassFile *ReadClass(const void *classdata, size_t length) {
   for (int ii = 0; ii < fields_count; ++ii) {
     Member *field = Member::Read(p);
 
-    if (!(field->access_flags & ACC_PRIVATE)) { // drop private fields
-      clazz->fields.push_back(field);
+    if ((field->access_flags & ACC_PRIVATE) == ACC_PRIVATE) {
+      // drop private fields
+      continue;
     }
+    clazz->fields.push_back(field);
   }
 
   u2 methods_count = get_u2be(p);
   for (int ii = 0; ii < methods_count; ++ii) {
     Member *method = Member::Read(p);
 
+    if (HasKeepForCompile(method->attributes)) {
+      // Always keep methods marked as such
+      clazz->methods.push_back(method);
+      continue;
+    }
+
     // drop class initializers
     if (method->name->Display() == "<clinit>") continue;
 
-    if (!(method->access_flags & ACC_PRIVATE)) { // drop private methods
-      clazz->methods.push_back(method);
+    if ((method->access_flags & ACC_PRIVATE) == ACC_PRIVATE) {
+      // drop private methods
+      continue;
     }
+    if ((method->access_flags & (ACC_SYNTHETIC | ACC_BRIDGE | ACC_PUBLIC |
+                                 ACC_PROTECTED)) == ACC_SYNTHETIC) {
+      // drop package-private non-bridge synthetic methods, e.g. synthetic
+      // constructors used to instantiate private nested classes within their
+      // declaring compilation unit
+      continue;
+    }
+    clazz->methods.push_back(method);
   }
 
   clazz->ReadAttrs(p);
-  clazz->StripIfAnonymous();
 
   return clazz;
 }
@@ -1794,14 +1866,17 @@ void ClassFile::WriteClass(u1 *&p) {
   delete[] body;
 }
 
-
-void StripClass(u1 *&classdata_out, const u1 *classdata_in, size_t in_length) {
+bool StripClass(u1 *&classdata_out, const u1 *classdata_in, size_t in_length) {
   ClassFile *clazz = ReadClass(classdata_in, in_length);
-  if (clazz == NULL) {
-    // Class is invalid. Simply copy it to the output and call it a day.
+  bool keep = true;
+  if (clazz == NULL || clazz->IsExplicitlyKept()) {
+    // Class is invalid or kept. Simply copy it to the output and call it a day.
+    // TODO: If kept, only emit methods marked with KeepForCompile attribute,
+    // as opposed to the entire type.
     put_n(classdata_out, classdata_in, in_length);
+  } else if (clazz->IsLocalOrAnonymous()) {
+    keep = false;
   } else {
-
     // Constant pool item zero is a dummy entry.  Setting it marks the
     // beginning of the output phase; calls to Constant::slot() will
     // fail if called prior to this.
@@ -1819,6 +1894,7 @@ void StripClass(u1 *&classdata_out, const u1 *classdata_in, size_t in_length) {
 
   const_pool_in.clear();
   const_pool_out.clear();
+  return keep;
 }
 
 }  // namespace devtools_ijar

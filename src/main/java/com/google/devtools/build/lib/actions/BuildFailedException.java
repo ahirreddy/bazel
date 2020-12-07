@@ -14,68 +14,110 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.cmdline.Label;
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.devtools.build.lib.causes.Cause;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.util.ExitCode;
+import javax.annotation.Nullable;
 
 /**
- * This exception gets thrown if there were errors during the execution phase of
- * the build.
+ * This exception gets thrown if there were errors during the execution phase of the build.
  *
- * <p>The argument to the constructor may be null if the thrower has already
- * printed an error message; in this case, no error message should be printed by
- * the catcher. (Typically, this happens when the builder is unsuccessful and
- * {@code --keep_going} was specified. This error corresponds to one or more
- * actions failing, but since those actions' failures will be reported
- * separately, the exception carries no message and is just used for control
- * flow.)
+ * <p>The argument to the constructor may be null if the thrower has already printed an error
+ * message; in this case, no error message should be printed by the catcher. (Typically, this
+ * happens when the builder is unsuccessful and {@code --keep_going} was specified. This error
+ * corresponds to one or more actions failing, but since those actions' failures will be reported
+ * separately, the exception carries no message and is just used for control flow.)
+ *
+ * <p>This exception typically leads to Bazel termination with exit code {@link
+ * ExitCode#BUILD_FAILURE}. However, if a more specific exit code is appropriate, it can be
+ * propagated by specifying the exit code to the constructor using a {@link DetailedExitCode}.
  */
 @ThreadSafe
 public class BuildFailedException extends Exception {
   private final boolean catastrophic;
-  private final Action action;
-  private final Iterable<Label> rootCauses;
+  @Nullable private final Action action;
+  private final NestedSet<Cause> rootCauses;
   private final boolean errorAlreadyShown;
+  private final DetailedExitCode detailedExitCode;
 
   public BuildFailedException() {
     this(null);
   }
 
   public BuildFailedException(String message) {
-    this(message, false, null, ImmutableList.<Label>of());
+    this(
+        message,
+        /*catastrophic=*/ false,
+        /*action=*/ null,
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        /*errorAlreadyShown=*/ false,
+        DetailedExitCode.justExitCode(ExitCode.BUILD_FAILURE));
+  }
+
+  public BuildFailedException(String message, DetailedExitCode detailedExitCode) {
+    this(
+        message,
+        /*catastrophic=*/ false,
+        /*action=*/ null,
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        /*errorAlreadyShown=*/ false,
+        detailedExitCode);
   }
 
   public BuildFailedException(String message, boolean catastrophic) {
-    this(message, catastrophic, null, ImmutableList.<Label>of());
+    this(
+        message,
+        catastrophic,
+        /*action=*/ null,
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        /*errorAlreadyShown=*/ false,
+        DetailedExitCode.justExitCode(ExitCode.BUILD_FAILURE));
   }
 
-  public BuildFailedException(String message, boolean catastrophic,
-      Action action, Iterable<Label> rootCauses) {
-    this(message, catastrophic, action, rootCauses, false);
-  }
-
-  public BuildFailedException(String message, boolean catastrophic,
-      Action action, Iterable<Label> rootCauses, boolean errorAlreadyShown) {
+  public BuildFailedException(
+      String message,
+      boolean catastrophic,
+      Action action,
+      NestedSet<Cause> rootCauses,
+      boolean errorAlreadyShown,
+      DetailedExitCode detailedExitCode) {
     super(message);
     this.catastrophic = catastrophic;
-    this.rootCauses = ImmutableList.copyOf(rootCauses);
+    this.rootCauses = rootCauses;
     this.action = action;
     this.errorAlreadyShown = errorAlreadyShown;
+    this.detailedExitCode = checkNotNull(detailedExitCode);
   }
 
   public boolean isCatastrophic() {
     return catastrophic;
   }
 
+  @Nullable
   public Action getAction() {
     return action;
   }
 
-  public Iterable<Label> getRootCauses() {
+  public NestedSet<Cause> getRootCauses() {
     return rootCauses;
   }
 
   public boolean isErrorAlreadyShown() {
     return errorAlreadyShown || getMessage() == null;
+  }
+
+  /**
+   * Returns the pair of {@link ExitCode} and optional {@link FailureDetail} to return from this
+   * Bazel invocation.
+   */
+  public DetailedExitCode getDetailedExitCode() {
+    return detailedExitCode;
   }
 }

@@ -26,26 +26,10 @@ filegroup(
     visibility = ["//third_party:__pkg__"],
 )
 
-java_library(
-    name = "annotations",
-    srcs = ["@bazel-j2objc//:annotations"],
-)
-
-objc_library(
-    name = "jre_emul_lib",
-    sdk_dylibs = [
-        "libicucore",
-        "libz",
-    ],
-    sdk_frameworks = [
-        "Security",
-    ],
-    deps = ["@bazel-j2objc//:jre_emul_archive"],
-)
-
-# Proto support is a work in progress.
-# We put an empty filegroup here so Bazel analysis doesn't fail.
 filegroup(
-    name = "proto_runtime",
-    srcs = [],
+    name = "embedded_tools_srcs",
+    srcs = [
+        "BUILD.remote",
+        "BUILD.tools",
+    ],
 )

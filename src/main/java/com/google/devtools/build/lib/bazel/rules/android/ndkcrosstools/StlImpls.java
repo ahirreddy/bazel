@@ -15,9 +15,9 @@
 package com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools;
 
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain.Builder;
-
+import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /**
  * Class that contains implementations of NdkStlImpl, one for each STL implementation of the STL
@@ -25,18 +25,18 @@ import java.util.List;
  */
 public final class StlImpls {
 
-  public static final String DEFAULT_STL_NAME = "gnu-libstdcpp";
-  
   private StlImpls() {}
   
   public static class GnuLibStdCppStlImpl extends StlImpl {
 
+    public static final String NAME = "gnu-libstdcpp";
+
     public GnuLibStdCppStlImpl(NdkPaths ndkPaths) {
-      super(DEFAULT_STL_NAME, ndkPaths);
+      super(NAME, ndkPaths);
     }
 
     @Override
-    public void addStlImpl(Builder toolchain, String gccVersion) {
+    public void addStlImpl(CToolchain.Builder toolchain, @Nullable String gccVersion) {
       addBaseStlImpl(toolchain, gccVersion);
       toolchain.addAllUnfilteredCxxFlag(createIncludeFlags(
           ndkPaths.createGnuLibstdcIncludePaths(gccVersion, toolchain.getTargetCpu())));
@@ -45,38 +45,50 @@ public final class StlImpls {
 
   public static class LibCppStlImpl extends StlImpl {
 
+    public static final String NAME = "libcpp";
+
     public LibCppStlImpl(NdkPaths ndkPaths) {
-      super("libcpp", ndkPaths);
+      super(NAME, ndkPaths);
     }
 
     @Override
-    public void addStlImpl(Builder toolchain, String gccVersion) {
+    public void addStlImpl(CToolchain.Builder toolchain, @Nullable String gccVersion) {
       addBaseStlImpl(toolchain, null);
       toolchain.addAllUnfilteredCxxFlag(createIncludeFlags(ndkPaths.createLibcxxIncludePaths()));
+      toolchain.addLinkerFlag("-L" + ndkPaths.createLibcppLinkerPath(toolchain.getTargetCpu()));
     }
   }
 
   public static class StlPortStlImpl extends StlImpl {
 
+    public static final String NAME = "stlport";
+
     public StlPortStlImpl(NdkPaths ndkPaths) {
-      super("stlport", ndkPaths);
+      super(NAME, ndkPaths);
     }
 
     @Override
-    public void addStlImpl(Builder toolchain, String gccVersion) {
+    public void addStlImpl(CToolchain.Builder toolchain, @Nullable String gccVersion) {
       addBaseStlImpl(toolchain, null);
       toolchain.addAllUnfilteredCxxFlag(createIncludeFlags(ndkPaths.createStlportIncludePaths()));
     }
   }
 
   /**
+   * Gets the list of runtime libraries (STL) in the NDK.
+   *
+   * <p>NDK r17 and lower contains gnustl, STLport and libc++. NDK r18 and above contains libc++
+   * only.
+   *
    * @param ndkPaths NdkPaths to use for creating the NdkStlImpls
    * @return an ImmutableList of every available NdkStlImpl
    */
-  public static List<StlImpl> get(NdkPaths ndkPaths) {
-    return ImmutableList.of(
-        new GnuLibStdCppStlImpl(ndkPaths),
-        new StlPortStlImpl(ndkPaths),
-        new LibCppStlImpl(ndkPaths));
+  public static List<StlImpl> get(NdkPaths ndkPaths, Integer ndkMajorRevision) {
+    return ndkMajorRevision < 18
+        ? ImmutableList.of(
+            new GnuLibStdCppStlImpl(ndkPaths),
+            new StlPortStlImpl(ndkPaths),
+            new LibCppStlImpl(ndkPaths))
+        : ImmutableList.of(new LibCppStlImpl(ndkPaths));
   }
 }

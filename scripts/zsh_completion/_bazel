@@ -40,7 +40,7 @@ local curcontext="$curcontext" state line
 
 : ${BAZEL_COMPLETION_PACKAGE_PATH:=%workspace%}
 : ${BAZEL:=bazel}
-b() { ${BAZEL} --noblock_for_lock "$@"; }
+_bazel_b() { ${BAZEL} --noblock_for_lock "$@" 2>/dev/null; }
 
 # Default cache lifetime is 1 week
 zstyle -s ":completion:${curcontext}:" cache-lifetime lifetime
@@ -87,11 +87,13 @@ _bazel_get_options() {
   local lcmd=$1
   _bazel_cmd_options=_bazel_${lcmd}_options
   _bazel_cmd_args=_bazel_${lcmd}_args
-  if [[ ${(P)#_bazel_cmd_options} == 0 ]] \
-          || _cache_invalid BAZEL_${lcmd}_options || _cache_invalid BAZEL_${lcmd}_args \
-          || ! _bazel_safe_retrieve_cache BAZEL_${lcmd}_options ${_bazel_cmd_options} \
-          || ! _retrieve_cache BAZEL_${lcmd}_args ${_bazel_cmd_args}; then
-    if ! eval "$(b help completion)"; then
+  if [[ ${(P)#_bazel_cmd_options} != 0 ]]; then
+    return
+  fi
+  if _cache_invalid BAZEL_${lcmd}_options || _cache_invalid BAZEL_${lcmd}_args \
+    || ! _bazel_safe_retrieve_cache BAZEL_${lcmd}_options ${_bazel_cmd_options} \
+    || ! _retrieve_cache BAZEL_${lcmd}_args ${_bazel_cmd_args}; then
+    if ! eval "$(_bazel_b help completion)"; then
       return
     fi
     local opts_var
@@ -161,7 +163,7 @@ _get_build_targets() {
       rule_re=".*_test|.*_binary"
       ;;
   esac
-  completions=(${$(b query "kind(\"${rule_re}\", ${pkg}:all)" 2>/dev/null)##*:})
+  completions=(${$(_bazel_b query "kind(\"${rule_re}\", ${pkg}:all)" 2>/dev/null)##*:})
   if ( (( ${#completions} > 0 )) && [[ $target_type != run ]] ); then
     completions+=(all)
   fi
@@ -184,7 +186,7 @@ _get_build_packages() {
   fi
   paths=(${^package_roots}/${pfx}*(/))
   for p in ${paths[*]}; do
-    if [[ -f ${p}/BUILD ]]; then
+    if [[ -f ${p}/BUILD || -f ${p}/BUILD.bazel ]]; then
       final_paths+=(${p##*/}:)
     fi
     final_paths+=(${p##*/}/)
@@ -205,7 +207,7 @@ _bazel_complete_target() {
   if [[ "${(e)PREFIX}" != *:* ]]; then
     # There is no : in the prefix, completion can be either
     # a package or a target, if the cwd is a package itself.
-    if [[ -f $PWD/BUILD ]]; then
+    if [[ -f $PWD/BUILD || -f $PWD/BUILD.bazel ]]; then
       targets=($(_get_build_targets ""))
       _description build_target expl "BUILD target"
       compadd "${expl[@]}" -a targets
@@ -280,7 +282,7 @@ _get_commands() {
   typeset -ga _bazel_cmd_list
   # Use `bazel help` instead of `bazel help completion` to get command
   # descriptions.
-  if _bazel_cmd_list=("${(@f)$(b help | awk '
+  if _bazel_cmd_list=("${(@f)$(_bazel_b help | awk '
 /Available commands/ { command=1; }
 /  [-a-z]+[ \t]+.+/ { if (command) { printf "%s:", $1; for (i=2; i<=NF; i++) printf "%s ", $i; print "" } }
 /^$/ { command=0; }')}"); then
@@ -290,9 +292,11 @@ _get_commands() {
 
 # Completion function for bazel subcommands, called by the completion system.
 _bazel_commands() {
-  if [[ ${#_bazel_cmd_list} == 0 ]] || _cache_invalid BAZEL_commands \
-    || ! _bazel_safe_retrieve_cache BAZEL_commands _bazel_cmd_list; then
-    _get_commands
+  if [[ ${#_bazel_cmd_list} == 0 ]]; then
+    if _cache_invalid BAZEL_commands \
+      || ! _bazel_safe_retrieve_cache BAZEL_commands _bazel_cmd_list; then
+      _get_commands
+    fi
   fi
 
   _describe -t bazel-commands 'Bazel command' _bazel_cmd_list
@@ -300,10 +304,13 @@ _bazel_commands() {
 
 # Completion function for bazel help options, called by the completion system.
 _bazel_help_topic() {
-  if [[ ${#_bazel_cmd_list} == 0 ]] || _cache_invalid BAZEL_commands \
-    || ! _bazel_safe_retrieve_cache BAZEL_commands _bazel_cmd_list; then
-    _get_commands
+  if [[ ${#_bazel_cmd_list} == 0 ]]; then
+    if _cache_invalid BAZEL_commands \
+      || ! _bazel_safe_retrieve_cache BAZEL_commands _bazel_cmd_list; then
+      _get_commands
+    fi
   fi
+
   while [[ $# -gt 0 ]]; do
     if [[ $1 == -- ]]; then
       shift
@@ -318,14 +325,16 @@ _bazel_help_topic() {
 
 # Completion function for bazel info keys, called by the completion system.
 _bazel_info_key() {
-  if [[ ${#_bazel_info_keys_list} == 0 ]] || _cache_invalid BAZEL_info_keys \
-    || ! _bazel_safe_retrieve_cache BAZEL_info_keys _bazel_info_keys_list; then
-    typeset -ga _bazel_info_keys_list
-    # Use `bazel help` instead of `bazel help completion` to get info-key
-    # descriptions.
-    if _bazel_info_keys_list=("${(@f)$(b help info-keys | awk '
-{ printf "%s:", $1; for (i=2; i<=NF; i++) printf "%s ", $i; print "" }')}"); then
-      _store_cache BAZEL_info_keys _bazel_info_keys_list
+  if [[ ${#_bazel_info_keys_list} == 0 ]]; then
+    if _cache_invalid BAZEL_info_keys \
+      || ! _bazel_safe_retrieve_cache BAZEL_info_keys _bazel_info_keys_list; then
+      typeset -ga _bazel_info_keys_list
+      # Use `bazel help` instead of `bazel help completion` to get info-key
+      # descriptions.
+      if _bazel_info_keys_list=("${(@f)$(_bazel_b help info-keys | awk '
+  { printf "%s:", $1; for (i=2; i<=NF; i++) printf "%s ", $i; print "" }')}"); then
+        _store_cache BAZEL_info_keys _bazel_info_keys_list
+      fi
     fi
   fi
   _describe -t bazel-info 'Key' _bazel_info_keys_list

@@ -14,247 +14,332 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.common.base.Joiner;
+import static java.util.stream.Collectors.joining;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.OutputFile;
+import com.google.devtools.build.lib.packages.RuleErrorConsumer;
+import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import javax.annotation.Nullable;
 
 /**
- * Expands $(location) tags inside target attributes.
- * You can specify something like this in the BUILD file:
+ * Expands $(location) and $(locations) tags inside target attributes. You can specify something
+ * like this in the BUILD file:
  *
+ * <pre>
  * somerule(name='some name',
  *          someopt = [ '$(location //mypackage:myhelper)' ],
  *          ...)
+ * </pre>
  *
  * and location will be substituted with //mypackage:myhelper executable output.
- * Note that //mypackage:myhelper should have just one output.
+ *
+ * <p>Note that this expander will always expand labels in srcs, deps, and tools attributes, with
+ * data being optional.
+ *
+ * <p>DO NOT USE DIRECTLY! Use RuleContext.getExpander() instead.
  */
-public class LocationExpander {
-  
-  /**
-   * List of options to tweak the LocationExpander.
-   */
-  public static enum Options {
-    /** output the execPath instead of the relative path */
-    EXEC_PATHS,
-    /** Allow to take label from the data attribute */
-    ALLOW_DATA,
-  }
-  
-  private static final int MAX_PATHS_SHOWN = 5;
-  private static final String LOCATION = "$(location";
-  private final RuleContext ruleContext;
-  private final ImmutableSet<Options> options;
+public final class LocationExpander {
 
-  /**
-   * This is a Map, not a Multimap, because we need to distinguish between the cases of "empty
-   * value" and "absent key."
-   */
-  private Map<Label, Collection<Artifact>> locationMap;
-  private ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap;
+  private static final boolean EXACTLY_ONE = false;
+  private static final boolean ALLOW_MULTIPLE = true;
+
+  private static final boolean USE_ROOT_PATHS = false;
+  private static final boolean USE_EXEC_PATHS = true;
+
+  private final RuleErrorConsumer ruleErrorConsumer;
+  private final ImmutableMap<String, LocationFunction> functions;
+  private final ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
+
+  @VisibleForTesting
+  LocationExpander(
+      RuleErrorConsumer ruleErrorConsumer,
+      Map<String, LocationFunction> functions,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+    this.ruleErrorConsumer = ruleErrorConsumer;
+    this.functions = ImmutableMap.copyOf(functions);
+    this.repositoryMapping = repositoryMapping;
+  }
+
+  private LocationExpander(
+      RuleErrorConsumer ruleErrorConsumer,
+      Label root,
+      Supplier<Map<Label, Collection<Artifact>>> locationMap,
+      boolean execPaths,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+    this(ruleErrorConsumer, allLocationFunctions(root, locationMap, execPaths), repositoryMapping);
+  }
 
   /**
    * Creates location expander helper bound to specific target and with default location map.
    *
    * @param ruleContext BUILD rule
    * @param labelMap A mapping of labels to build artifacts.
-   * @param allowDataAttributeEntriesInLabel set to true if the <code>data</code> attribute should
-   *        be used too.
+   * @param execPaths If true, this expander will expand $(location)/$(locations) using
+   *     Artifact.getExecPath(); otherwise with Artifact.getRootRelativePath().
+   * @param allowData If true, this expander will expand locations from the `data` attribute;
+   *     otherwise it will not.
    */
-  public LocationExpander(
-      RuleContext ruleContext, ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap,
-      boolean allowDataAttributeEntriesInLabel) {
-    this.ruleContext = ruleContext;
-    ImmutableSet.Builder<Options> builder = ImmutableSet.builder();
-    builder.add(Options.EXEC_PATHS);
-    if (allowDataAttributeEntriesInLabel) {
-      builder.add(Options.ALLOW_DATA);
-    }
-    this.options = builder.build();
-    this.labelMap = labelMap;
+  private LocationExpander(
+      RuleContext ruleContext,
+      @Nullable ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap,
+      boolean execPaths,
+      boolean allowData) {
+    this(
+        ruleContext,
+        ruleContext.getLabel(),
+        // Use a memoizing supplier to avoid eagerly building the location map.
+        Suppliers.memoize(
+            () -> LocationExpander.buildLocationMap(ruleContext, labelMap, allowData)),
+        execPaths,
+        ruleContext.getRule().getPackage().getRepositoryMapping());
   }
 
   /**
-   * Creates location expander helper bound to specific target.
+   * Creates an expander that expands $(location)/$(locations) using Artifact.getRootRelativePath().
    *
-   * @param ruleContext the BUILD rule's context
-   * @param options the list of options, see {@link Options}.
+   * <p>The expander expands $(rootpath)/$(rootpaths) using Artifact.getRootRelativePath(), and
+   * $(execpath)/$(execpaths) using Artifact.getExecPath().
+   *
+   * @param ruleContext BUILD rule
    */
-  public LocationExpander(RuleContext ruleContext, ImmutableSet<Options> options) {
-    this.ruleContext = ruleContext;
-    this.options = options;
+  public static LocationExpander withRunfilesPaths(RuleContext ruleContext) {
+    return new LocationExpander(ruleContext, null, false, false);
   }
 
   /**
-   * Creates location expander helper bound to specific target.
-   * 
-   * @param ruleContext the BUILD rule's context
-   * @param options the list of options, see {@link Options}.
+   * Creates an expander that expands $(location)/$(locations) using Artifact.getExecPath().
+   *
+   * <p>The expander expands $(rootpath)/$(rootpaths) using Artifact.getRootRelativePath(), and
+   * $(execpath)/$(execpaths) using Artifact.getExecPath().
+   *
+   * @param ruleContext BUILD rule
+   * @param labelMap A mapping of labels to build artifacts.
    */
-  public LocationExpander(RuleContext ruleContext, Options... options) {
-    this.ruleContext = ruleContext;
-    this.options = ImmutableSet.copyOf(options);
+  public static LocationExpander withExecPaths(
+      RuleContext ruleContext, ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap) {
+    return new LocationExpander(ruleContext, labelMap, true, false);
   }
 
-  public Map<Label, Collection<Artifact>> getLocationMap() {
-    if (locationMap == null) {
-      locationMap = buildLocationMap(ruleContext, labelMap, options.contains(Options.ALLOW_DATA));
-    }
-    return locationMap;
+  /**
+   * Creates an expander that expands $(location)/$(locations) using Artifact.getExecPath().
+   *
+   * <p>The expander expands $(rootpath)/$(rootpaths) using Artifact.getRootRelativePath(), and
+   * $(execpath)/$(execpaths) using Artifact.getExecPath().
+   *
+   * @param ruleContext BUILD rule
+   * @param labelMap A mapping of labels to build artifacts.
+   */
+  public static LocationExpander withExecPathsAndData(
+      RuleContext ruleContext, ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap) {
+    return new LocationExpander(ruleContext, labelMap, true, true);
   }
 
   public String expand(String input) {
-    return expand(input, new RuleErrorReporter());
+    return expand(input, new RuleErrorReporter(ruleErrorConsumer));
   }
 
   /**
    * Expands attribute's location and locations tags based on the target and
    * location map.
    *
-   * @param attrName  name of the attribute
+   * @param attrName  name of the attribute; only used for error reporting
    * @param attrValue initial value of the attribute
    * @return attribute value with expanded location tags or original value in
    *         case of errors
    */
   public String expandAttribute(String attrName, String attrValue) {
-    return expand(attrValue, new AttributeErrorReporter(attrName));
+    return expand(attrValue, new AttributeErrorReporter(ruleErrorConsumer, attrName));
   }
 
   private String expand(String value, ErrorReporter reporter) {
     int restart = 0;
 
-    int attrLength = value.length();
     StringBuilder result = new StringBuilder(value.length());
 
     while (true) {
-      // (1) find '$(location ' or '$(locations '
-      String message = "$(location)";
-      boolean multiple = false;
-      int start = value.indexOf(LOCATION, restart);
-      int scannedLength = LOCATION.length();
-      if (start == -1 || start + scannedLength == attrLength) {
+      // (1) Find '$(<fname> '.
+      int start = value.indexOf("$(", restart);
+      if (start == -1) {
         result.append(value.substring(restart));
         break;
       }
-
-      if (value.charAt(start + scannedLength) == 's') {
-        scannedLength++;
-        if (start + scannedLength == attrLength) {
-          result.append(value.substring(restart));
-          break;
-        }
-        message = "$(locations)";
-        multiple = true;
-      }
-
-      if (value.charAt(start + scannedLength) != ' ') {
-        result.append(value, restart, start + scannedLength);
-        restart = start + scannedLength;
+      int nextWhitespace = value.indexOf(' ', start);
+      if (nextWhitespace == -1) {
+        result.append(value, restart, start + 2);
+        restart = start + 2;
         continue;
       }
-      scannedLength++;
+      String fname = value.substring(start + 2, nextWhitespace);
+      if (!functions.containsKey(fname)) {
+        result.append(value, restart, start + 2);
+        restart = start + 2;
+        continue;
+      }
 
-      int end = value.indexOf(')', start + scannedLength);
+      result.append(value, restart, start);
+
+      int end = value.indexOf(')', nextWhitespace);
       if (end == -1) {
-        reporter.report(ruleContext, "unterminated " + message + " expression");
+        reporter.report(
+            String.format(
+                "unterminated $(%s) expression",
+                value.substring(start + 2, nextWhitespace)));
         return value;
       }
 
-      message = String.format(" in %s expression", message);
-
-      // (2) parse label
-      String labelText = value.substring(start + scannedLength, end);
-      Label label = parseLabel(labelText, message, reporter);
-
-      if (label == null) {
-        // Error was already reported in parseLabel()
-        return value;
-      }
-
-      // (3) expand label; stop this operation if there is an error
+      // (2) Call appropriate function to obtain string replacement.
+      String functionValue = value.substring(nextWhitespace + 1, end).trim();
       try {
-        Collection<String> paths = resolveLabel(label, message, multiple);
-        result.append(value, restart, start);
-
-        if (multiple) {
-          Joiner.on(' ').appendTo(result, paths);
-        } else {
-          result.append(Iterables.getOnlyElement(paths));
-        }
+        String replacement = functions.get(fname).apply(functionValue, repositoryMapping);
+        result.append(replacement);
       } catch (IllegalStateException ise) {
-        reporter.report(ruleContext, ise.getMessage());
+        reporter.report(ise.getMessage());
         return value;
       }
 
       restart = end + 1;
     }
-    
+
     return result.toString();
   }
 
-  private Label parseLabel(String labelText, String message, ErrorReporter reporter) {
-    try {
-      return ruleContext.getLabel().getRelative(labelText);
-    } catch (LabelSyntaxException e) {
-      reporter.report(ruleContext, String.format("invalid label%s: %s", message, e.getMessage()));
-      return null;
+  @VisibleForTesting
+  static final class LocationFunction {
+    private static final int MAX_PATHS_SHOWN = 5;
+
+    private final Label root;
+    private final Supplier<Map<Label, Collection<Artifact>>> locationMapSupplier;
+    private final boolean execPaths;
+    private final boolean multiple;
+
+    LocationFunction(
+        Label root,
+        Supplier<Map<Label, Collection<Artifact>>> locationMapSupplier,
+        boolean execPaths,
+        boolean multiple) {
+      this.root = root;
+      this.locationMapSupplier = locationMapSupplier;
+      this.execPaths = execPaths;
+      this.multiple = multiple;
+    }
+
+    /**
+     * Looks up the label-like string in the locationMap and returns the resolved path string. If
+     * the label-like string begins with a repository name, the repository name may be remapped
+     * using the {@code repositoryMapping}.
+     *
+     * @param arg The label-like string to be expanded, e.g. ":foo" or "//foo:bar"
+     * @param repositoryMapping map of {@code RepositoryName}s defined in the main workspace
+     * @return The expanded value
+     */
+    public String apply(
+        String arg, ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+      Label label;
+      try {
+        label = root.getRelativeWithRemapping(arg, repositoryMapping);
+      } catch (LabelSyntaxException e) {
+        throw new IllegalStateException(
+            String.format(
+                "invalid label in %s expression: %s", functionName(), e.getMessage()), e);
+      }
+      Collection<String> paths = resolveLabel(label);
+      return joinPaths(paths);
+    }
+
+    /**
+     * Returns all target location(s) of the given label.
+     */
+    private Collection<String> resolveLabel(Label unresolved) throws IllegalStateException {
+      Collection<Artifact> artifacts = locationMapSupplier.get().get(unresolved);
+
+      if (artifacts == null) {
+        throw new IllegalStateException(
+            String.format(
+                "label '%s' in %s expression is not a declared prerequisite of this rule",
+                unresolved, functionName()));
+      }
+
+      Set<String> paths = getPaths(artifacts, execPaths);
+      if (paths.isEmpty()) {
+        throw new IllegalStateException(
+            String.format(
+                "label '%s' in %s expression expands to no files",
+                unresolved, functionName()));
+      }
+
+      if (!multiple && paths.size() > 1) {
+        throw new IllegalStateException(
+            String.format(
+                "label '%s' in $(location) expression expands to more than one file, "
+                    + "please use $(locations %s) instead.  Files (at most %d shown) are: %s",
+                unresolved,
+                unresolved,
+                MAX_PATHS_SHOWN,
+                Iterables.limit(paths, MAX_PATHS_SHOWN)));
+      }
+      return paths;
+    }
+
+    /**
+     * Extracts list of all executables associated with given collection of label
+     * artifacts.
+     *
+     * @param artifacts to get the paths of
+     * @param takeExecPath if false, the root relative path will be taken
+     * @return all associated executable paths
+     */
+    private Set<String> getPaths(Collection<Artifact> artifacts, boolean takeExecPath) {
+      TreeSet<String> paths = Sets.newTreeSet();
+      for (Artifact artifact : artifacts) {
+        PathFragment execPath =
+            takeExecPath ? artifact.getExecPath() : artifact.getRootRelativePath();
+        if (execPath != null) {  // omit middlemen etc
+          paths.add(execPath.getCallablePathString());
+        }
+      }
+      return paths;
+    }
+
+    private String joinPaths(Collection<String> paths) {
+      return paths.stream().map(ShellEscaper::escapeString).collect(joining(" "));
+    }
+
+    private String functionName() {
+      return multiple ? "$(locations)" : "$(location)";
     }
   }
 
-  /**
-   * Returns all possible target location(s) of the given label
-   * @param message Original message, for error reporting purposes only
-   * @param hasMultipleTargets Describes whether the label has multiple target locations
-   * @return The collection of all path strings
-   */
-  private Collection<String> resolveLabel(
-      Label unresolved, String message, boolean hasMultipleTargets) throws IllegalStateException {
-    // replace with singleton artifact, iff unique.
-    Collection<Artifact> artifacts = getLocationMap().get(unresolved);
-
-    if (artifacts == null) {
-      throw new IllegalStateException(
-          "label '" + unresolved + "'" + message + " is not a declared prerequisite of this rule");
-    }
-
-    Set<String> paths = getPaths(artifacts, options.contains(Options.EXEC_PATHS));
-
-    if (paths.isEmpty()) {
-      throw new IllegalStateException(
-          "label '" + unresolved + "'" + message + " expression expands to no files");
-    }
-
-    if (!hasMultipleTargets && paths.size() > 1) {
-      throw new IllegalStateException(
-          String.format(
-              "label '%s'%s expands to more than one file, "
-                  + "please use $(locations %s) instead.  Files (at most %d shown) are: %s",
-              unresolved,
-              message,
-              unresolved,
-              MAX_PATHS_SHOWN,
-              Iterables.limit(paths, MAX_PATHS_SHOWN)));
-    }
-
-    return paths;
+  static ImmutableMap<String, LocationFunction> allLocationFunctions(
+      Label root, Supplier<Map<Label, Collection<Artifact>>> locationMap, boolean execPaths) {
+    return new ImmutableMap.Builder<String, LocationFunction>()
+        .put("location", new LocationFunction(root, locationMap, execPaths, EXACTLY_ONE))
+        .put("locations", new LocationFunction(root, locationMap, execPaths, ALLOW_MULTIPLE))
+        .put("rootpath", new LocationFunction(root, locationMap, USE_ROOT_PATHS, EXACTLY_ONE))
+        .put("rootpaths", new LocationFunction(root, locationMap, USE_ROOT_PATHS, ALLOW_MULTIPLE))
+        .put("execpath", new LocationFunction(root, locationMap, USE_EXEC_PATHS, EXACTLY_ONE))
+        .put("execpaths", new LocationFunction(root, locationMap, USE_EXEC_PATHS, ALLOW_MULTIPLE))
+        .build();
   }
 
   /**
@@ -264,7 +349,7 @@ public class LocationExpander {
    * @param labelMap map of labels to build artifacts
    * @return map of all possible target locations
    */
-  private static Map<Label, Collection<Artifact>> buildLocationMap(
+  static Map<Label, Collection<Artifact>> buildLocationMap(
       RuleContext ruleContext,
       Map<Label, ? extends Collection<Artifact>> labelMap,
       boolean allowDataAttributeEntriesInLabel) {
@@ -275,67 +360,64 @@ public class LocationExpander {
       }
     }
 
-    // Add all destination locations.
-    for (OutputFile out : ruleContext.getRule().getOutputFiles()) {
-      mapGet(locationMap, out.getLabel()).add(ruleContext.createOutputArtifact(out));
+    // We don't want to do this if we're processing aspect rules. It will
+    // create output artifacts and unbalance the input/output state, leading
+    // to an error (output artifact with no action to create its inputs).
+    if (ruleContext.getMainAspect() == null) {
+      // Add all destination locations.
+      for (OutputFile out : ruleContext.getRule().getOutputFiles()) {
+        // Not in aspect processing, so explicitly build an artifact & let it verify.
+        mapGet(locationMap, out.getLabel()).add(ruleContext.createOutputArtifact(out));
+      }
     }
 
     if (ruleContext.getRule().isAttrDefined("srcs", BuildType.LABEL_LIST)) {
-      for (FileProvider src : ruleContext
-          .getPrerequisites("srcs", Mode.TARGET, FileProvider.class)) {
-        Iterables.addAll(mapGet(locationMap, src.getLabel()), src.getFilesToBuild());
+      for (TransitiveInfoCollection src :
+          ruleContext.getPrerequisitesIf("srcs", TransitionMode.TARGET, FileProvider.class)) {
+        for (Label label : AliasProvider.getDependencyLabels(src)) {
+          mapGet(locationMap, label)
+              .addAll(src.getProvider(FileProvider.class).getFilesToBuild().toList());
+        }
       }
     }
 
     // Add all locations associated with dependencies and tools
-    List<FilesToRunProvider> depsDataAndTools = new ArrayList<>();
+    List<TransitiveInfoCollection> depsDataAndTools = new ArrayList<>();
     if (ruleContext.getRule().isAttrDefined("deps", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisites("deps", Mode.DONT_CHECK, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf(
+              "deps", TransitionMode.DONT_CHECK, FilesToRunProvider.class));
     }
     if (allowDataAttributeEntriesInLabel
         && ruleContext.getRule().isAttrDefined("data", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisites("data", Mode.DATA, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf(
+              "data", TransitionMode.DONT_CHECK, FilesToRunProvider.class));
     }
     if (ruleContext.getRule().isAttrDefined("tools", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisites("tools", Mode.HOST, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf("tools", TransitionMode.HOST, FilesToRunProvider.class));
     }
 
-    for (FilesToRunProvider dep : depsDataAndTools) {
-      Label label = dep.getLabel();
-      Artifact executableArtifact = dep.getExecutable();
+    for (TransitiveInfoCollection dep : depsDataAndTools) {
+      ImmutableList<Label> labels = AliasProvider.getDependencyLabels(dep);
+      FilesToRunProvider filesToRun = dep.getProvider(FilesToRunProvider.class);
+      Artifact executableArtifact = filesToRun.getExecutable();
 
       // If the label has an executable artifact add that to the multimaps.
-      if (executableArtifact != null) {
-        mapGet(locationMap, label).add(executableArtifact);
-      } else {
-        mapGet(locationMap, label).addAll(dep.getFilesToRun());
+      Collection<Artifact> values =
+          executableArtifact != null
+              ? ImmutableList.of(executableArtifact)
+              : filesToRun.getFilesToRun().toList();
+
+      for (Label label : labels) {
+        mapGet(locationMap, label).addAll(values);
       }
     }
     return locationMap;
-  }
-
-  /**
-   * Extracts list of all executables associated with given collection of label
-   * artifacts.
-   *
-   * @param artifacts to get the paths of
-   * @param takeExecPath if false, the root relative path will be taken
-   * @return all associated executable paths
-   */
-  private static Set<String> getPaths(Collection<Artifact> artifacts, boolean takeExecPath) {
-    TreeSet<String> paths = Sets.newTreeSet();
-
-    for (Artifact artifact : artifacts) {
-      PathFragment execPath =
-          takeExecPath ? artifact.getExecPath() : artifact.getRootRelativePath();
-      if (execPath != null) {  // omit middlemen etc
-        paths.add(execPath.getPathString());
-      }
-    }
-    return paths;
   }
 
   /**
@@ -355,28 +437,36 @@ public class LocationExpander {
     }
     return values;
   }
-  
+
   private static interface ErrorReporter {
-    void report(RuleContext ctx, String error);
+    void report(String error);
   }
 
   private static final class AttributeErrorReporter implements ErrorReporter {
+    private final RuleErrorConsumer delegate;
     private final String attrName;
 
-    public AttributeErrorReporter(String attrName) {
+    public AttributeErrorReporter(RuleErrorConsumer delegate, String attrName) {
+      this.delegate = delegate;
       this.attrName = attrName;
     }
 
     @Override
-    public void report(RuleContext ctx, String error) {
-      ctx.attributeError(attrName, error);
+    public void report(String error) {
+      delegate.attributeError(attrName, error);
     }
   }
 
   private static final class RuleErrorReporter implements ErrorReporter {
+    private final RuleErrorConsumer delegate;
+
+    public RuleErrorReporter(RuleErrorConsumer delegate) {
+      this.delegate = delegate;
+    }
+
     @Override
-    public void report(RuleContext ctx, String error) {
-      ctx.ruleError(error);
+    public void report(String error) {
+      delegate.ruleError(error);
     }
   }
 }
